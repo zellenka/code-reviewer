@@ -8,18 +8,6 @@
       "args": ["--extensionDevelopmentPath=${workspaceFolder}/packages/vscode"],
       "outFiles": ["${workspaceFolder}/packages/vscode/dist/**/*.js"],
       "preLaunchTask": "build extension"
-    },
-    {
-      "name": "Extension Tests",
-      "type": "extensionHost",
-      "request": "launch",
-      "args": [
-        "--disable-extensions",
-        "--extensionDevelopmentPath=${workspaceFolder}/packages/vscode",
-        "--extensionTestsPath=${workspaceFolder}/packages/vscode/out/test"
-      ],
-      "outFiles": ["${workspaceFolder}/packages/vscode/out/**/*.js"],
-      "preLaunchTask": "build extension"
     }
   ]
 }

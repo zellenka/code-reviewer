@@ -29,7 +29,7 @@ export default tseslint.config(
   {
     // Everything except the VS Code extension must stay host-agnostic:
     // the same engine runs in the CLI, evals and the GitHub Action.
-    files: ['packages/**/*.ts'],
+    files: ['packages/**/*.{ts,mts,cts,js,mjs,cjs}'],
     ignores: ['packages/vscode/**'],
     rules: {
       'no-restricted-imports': [
