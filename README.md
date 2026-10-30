@@ -1,5 +1,7 @@
 # AI Code Reviewer
 
+[![CI](https://github.com/zellenka/code-reviewer/actions/workflows/ci.yml/badge.svg)](https://github.com/zellenka/code-reviewer/actions/workflows/ci.yml)
+
 AI code review for your **local changes** in VS Code — staged, unstaged, branch vs base, current file or selection. Findings show up inline like a reviewer's comments, with one-click fixes.
 
 Free and open source. **Bring your own model:** GitHub Copilot (no key needed) or your own Anthropic API key.

@@ -39,7 +39,7 @@ Open the repo in VS Code and press **F5** ("Run Extension"). In the new window r
 ## Tests
 
 - **Unit** (`*.test.ts` next to the code in `packages/*/src`) — use the mock provider, never the network.
-- **Extension** (`packages/vscode/test`) — run inside VS Code via `@vscode/test-cli`.
+- **Extension** (`packages/vscode/test`) — run inside VS Code via `@vscode/test-cli`. To run or debug them from the editor, install the recommended **Extension Test Runner** extension and use the Testing sidebar (run `pnpm build` first; it runs the compiled tests in `out/`).
 - **Live** (`*.live.test.ts`) — real providers; started by hand in CI ("Live tests" workflow).
 
 ## Conventions

@@ -6,6 +6,15 @@
   "private": true,
   "publisher": "serhii",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zellenka/code-reviewer.git",
+    "directory": "packages/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/zellenka/code-reviewer/issues"
+  },
+  "homepage": "https://github.com/zellenka/code-reviewer#readme",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -55,7 +64,7 @@
     "build:prod": "tsc -b && node esbuild.mjs --production",
     "watch": "node esbuild.mjs --watch",
     "test:ext": "pnpm run build && vscode-test",
-    "package": "pnpm run build:prod && vsce package --no-dependencies",
+    "package": "pnpm run build:prod && node scripts/copy-docs.mjs && vsce package --no-dependencies",
     "clean": "tsc -b --clean && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
@@ -63,6 +72,7 @@
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
+    "@types/node": "^20.19.0",
     "@types/vscode": "~1.95.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
