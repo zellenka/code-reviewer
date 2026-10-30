@@ -1,0 +1,72 @@
+{
+  "name": "ai-code-reviewer",
+  "displayName": "AI Code Reviewer",
+  "description": "AI code review for your local changes. Bring your own model: GitHub Copilot or an Anthropic API key.",
+  "version": "0.0.0",
+  "private": true,
+  "publisher": "serhii",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Linters",
+    "AI"
+  ],
+  "keywords": [
+    "code review",
+    "ai",
+    "copilot",
+    "claude",
+    "anthropic"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "AI Code Reviewer reads repository content and sends it to the model you choose, so it only runs in trusted workspaces."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "AI Code Reviewer needs git and a local file system."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "aiReview.hello",
+        "title": "Hello",
+        "category": "AI Review"
+      },
+      {
+        "command": "aiReview.showLog",
+        "title": "Show Log",
+        "category": "AI Review"
+      }
+    ],
+    "configuration": {
+      "title": "AI Review",
+      "properties": {}
+    }
+  },
+  "scripts": {
+    "build": "tsc -b && node esbuild.mjs",
+    "build:prod": "tsc -b && node esbuild.mjs --production",
+    "watch": "node esbuild.mjs --watch",
+    "test:ext": "pnpm run build && vscode-test",
+    "package": "pnpm run build:prod && vsce package --no-dependencies",
+    "clean": "tsc -b --clean && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@ai-review/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/vscode": "~1.95.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.0",
+    "esbuild": "^0.28.2"
+  }
+}

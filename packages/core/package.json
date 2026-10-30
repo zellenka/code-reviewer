@@ -1,0 +1,16 @@
+{
+  "name": "@ai-review/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Host-agnostic review engine: diff parsing, chunking, review, finding validation.",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  }
+}

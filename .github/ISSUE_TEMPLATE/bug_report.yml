@@ -1,0 +1,45 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Do not paste private code, API keys or secrets.** Redact logs before sharing.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Stage a change in ...
+        2. Run "AI Review: Review staged"
+        3. ...
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - GitHub Copilot
+        - Anthropic API key
+        - Not provider-related
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Extension version, VS Code version, OS
+      placeholder: ext 0.1.0, VS Code 1.105.0, Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: 'Output panel → "AI Review" (run "AI Review: Show Log"). Redact anything sensitive.'
+      render: text

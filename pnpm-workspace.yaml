@@ -1,0 +1,11 @@
+packages:
+  - packages/*
+
+# Packages allowed to run install scripts (pnpm blocks them by default).
+onlyBuiltDependencies:
+  - esbuild
+
+# Only needed for signing/publishing (Phase 7); skip their install scripts.
+ignoredBuiltDependencies:
+  - '@vscode/vsce-sign'
+  - keytar

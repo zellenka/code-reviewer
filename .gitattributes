@@ -1,0 +1,4 @@
+# Normalize line endings in the repo. Test fixtures that need CRLF must opt out with -text.
+* text=auto eol=lf
+*.png binary
+*.gif binary
