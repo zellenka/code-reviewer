@@ -6,6 +6,15 @@
   "private": true,
   "publisher": "serhii",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zellenka/code-reviewer.git",
+    "directory": "packages/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/zellenka/code-reviewer/issues"
+  },
+  "homepage": "https://github.com/zellenka/code-reviewer#readme",
   "engines": {
     "vscode": "^1.95.0"
   },

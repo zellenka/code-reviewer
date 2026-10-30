@@ -2,6 +2,14 @@
   "name": "ai-code-reviewer-monorepo",
   "private": true,
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zellenka/code-reviewer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zellenka/code-reviewer/issues"
+  },
+  "homepage": "https://github.com/zellenka/code-reviewer#readme",
   "packageManager": "pnpm@10.34.9",
   "engines": {
     "node": ">=22.13"
