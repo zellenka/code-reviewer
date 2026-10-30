@@ -2,6 +2,17 @@
 
 VS Code extension for AI code review (CodeRabbit-like), later also a CI/PR bot. Free & open source, bring-your-own-key.
 
+## Progress
+
+- [x] **Phase 0 — Repo foundation** (P0-1, P0-2, P0-3) — done 2026-10-30 ([#1](https://github.com/zellenka/code-reviewer/pull/1), [#2](https://github.com/zellenka/code-reviewer/pull/2))
+- [ ] **Phase 1 — Providers** (P1-1, P1-2, P1-3, P1-4a, P1-4b)
+- [ ] **Phase 2 — Single-pass review (MVP)** (P2-0 … P2-10)
+- [ ] **Phase 3 — Real review UX** (P3-1 … P3-6)
+- [ ] **Phase 4 — Context & agent loop** (P4-1 … P4-6)
+- [ ] **Phase 5 — Quality & state** (P5-1 … P5-4)
+- [ ] **Phase 6 — CI / PR bot** (P6-1 … P6-4)
+- [ ] **Phase 7 — Release** (P7-1, P7-2)
+
 ## Decisions
 
 | Topic | Decision |
@@ -185,7 +196,7 @@ review:
 Each task: **ID · title** — description. *AC* = acceptance criteria. *Deps* = blocking tasks.
 **Test types:** *unit* (mock provider, deterministic, every PR), *ext* (`@vscode/test-electron`, every PR), *live* (real provider, needs secret, run on demand/nightly — never required for PR CI because fork PRs get no secrets).
 
-### Phase 0 — Repo foundation
+### Phase 0 — Repo foundation ✅ Done
 - **P0-1 · Monorepo scaffold** — pnpm workspaces (pin pnpm + Node LTS in `packageManager`/`.nvmrc`), TypeScript project refs, ESLint/Prettier, Vitest, esbuild bundling for the extension, changesets. *AC:* `pnpm build` and `pnpm test` pass from root; `core` has a lint rule forbidding `vscode` imports.
 - **P0-2 · Extension scaffold** — `packages/vscode` with activation on command; set extension id/publisher, `aiReview.*` command and settings namespace; `engines.vscode` = lowest version with stable `vscode.lm` tool calling (verify exact version); `capabilities.untrustedWorkspaces: { supported: false }`; Logger on an OutputChannel. F5 debug works. *AC:* "AI Review: Hello" command runs in Extension Development Host. *Deps:* P0-1
 - **P0-3 · OSS basics + CI** — LICENSE (Apache-2.0), README (privacy + cost section), CONTRIBUTING, issue templates, GitHub Actions running lint, unit and ext tests (xvfb on Linux) on PRs; separate manually-triggered workflow for live tests. *AC:* CI green on a sample PR; ext test launches VS Code headless. *Deps:* P0-2
