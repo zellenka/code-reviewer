@@ -5,7 +5,7 @@ VS Code extension for AI code review (CodeRabbit-like), later also a CI/PR bot. 
 ## Progress
 
 - [x] **Phase 0 — Repo foundation** (P0-1, P0-2, P0-3) — done 2026-10-30 ([#1](https://github.com/zellenka/code-reviewer/pull/1), [#2](https://github.com/zellenka/code-reviewer/pull/2))
-- [ ] **Phase 1 — Providers** (P1-1, P1-2, P1-3, P1-4a, P1-4b)
+- [x] **Phase 1 — Providers** (P1-1, P1-2, P1-3, P1-4a, P1-4b) — code done 2026-11-01; manual checks pending: Copilot round trip via "AI Review: Test Model Connection", Anthropic live test (`pnpm test:live`)
 - [ ] **Phase 2 — Single-pass review (MVP)** (P2-0 … P2-10)
 - [ ] **Phase 3 — Real review UX** (P3-1 … P3-6)
 - [ ] **Phase 4 — Context & agent loop** (P4-1 … P4-6)
@@ -88,7 +88,8 @@ type Message =
 type ContentPart =
   | { type: 'text'; text: string; cache?: boolean }          // cache = provider-agnostic cache breakpoint hint
   | { type: 'tool_call'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; callId: string; content: string; isError?: boolean };
+  | { type: 'tool_result'; callId: string; content: string; isError?: boolean }
+  | { type: 'opaque'; provider: string; data: unknown };     // provider-specific (e.g. Anthropic thinking blocks), echoed back unchanged
 
 interface ToolDef { name: string; description: string; inputSchema: JSONSchema }
 
@@ -106,13 +107,14 @@ interface ChatRequest {
 type ChatEvent =
   | { type: 'text'; delta: string }
   | { type: 'tool_call'; id: string; name: string; input: unknown }
+  | { type: 'message'; content: ContentPart[] }               // full assistant message in order; append to continue
   | { type: 'usage'; usage: Usage }
   | { type: 'stop'; reason: 'end' | 'tool_use' | 'max_tokens' | 'cancelled' };
 
-interface Usage { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; requests: number }
+interface Usage { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; requests: number; estimated?: boolean }
 
 class ProviderError extends Error {
-  kind: 'auth' | 'consent' | 'rateLimit' | 'quota' | 'contextTooLong' | 'blocked' | 'network' | 'unknown';
+  kind: 'auth' | 'consent' | 'rateLimit' | 'quota' | 'contextTooLong' | 'blocked' | 'notFound' | 'server' | 'network' | 'unknown';
   retryable: boolean; retryAfterMs?: number;
 }
 
@@ -201,7 +203,9 @@ Each task: **ID · title** — description. *AC* = acceptance criteria. *Deps* =
 - **P0-2 · Extension scaffold** — `packages/vscode` with activation on command; set extension id/publisher, `aiReview.*` command and settings namespace; `engines.vscode` = lowest version with stable `vscode.lm` tool calling (verify exact version); `capabilities.untrustedWorkspaces: { supported: false }`; Logger on an OutputChannel. F5 debug works. *AC:* "AI Review: Hello" command runs in Extension Development Host. *Deps:* P0-1
 - **P0-3 · OSS basics + CI** — LICENSE (Apache-2.0), README (privacy + cost section), CONTRIBUTING, issue templates, GitHub Actions running lint, unit and ext tests (xvfb on Linux) on PRs; separate manually-triggered workflow for live tests. *AC:* CI green on a sample PR; ext test launches VS Code headless. *Deps:* P0-2
 
-### Phase 1 — Providers
+### Phase 1 — Providers ✅ Code done
+> **Implementation notes (2026-11-01):** Current Anthropic models (Opus 5.5, Sonnet 5.5, Fable 5.1) reject forced `tool_choice` and `temperature`. So `toolChoice: { name }` becomes `auto` + a "call this tool" system line + at most one tool call; callers must validate and repair-retry (P2-4). `temperature` is never sent to Anthropic. Copilot's Required mode can't name a tool, so only the forced tool is sent. Server-side refusal fallback (`fallbacks: "default"`) is on by default for Anthropic (`aiReview.anthropic.refusalFallback`), since security reviews can trip the cyber classifier. `vscode.lm` reports no usage: Copilot usage is counted locally (`estimated: true`).
+
 - **P1-1 · `LLMProvider` interface + mock provider** — types from *Key interfaces*, `ProviderError` taxonomy, scripted mock for tests. *AC:* mock can replay text + tool-call sequences and throw each `ProviderError` kind; unit tests cover it. *Deps:* P0-1
 - **P1-2 · AnthropicProvider** — `@anthropic-ai/sdk`, streaming, tool use incl. forced `toolChoice`, maps `cache` hints to `cache_control`, usage reporting, retry with backoff on 429/5xx (respect `retry-after`), maps errors to `ProviderError`. Model list + pricing from a hardcoded table, overridable in settings. *AC:* live test completes a tool-call round trip and reports usage; unit tests cover error mapping. *Deps:* P1-1
 - **P1-3 · VsCodeLmProvider** — wraps `vscode.lm.selectChatModels({vendor:'copilot'})`, maps tool calls, maps `LanguageModelError` (no consent, quota, blocked) to `ProviderError`, first call only from a user command. Ignores `cache` hints. *AC:* a chat round trip with one tool call succeeds with a Copilot model; denied consent shows a clear message, not a stack trace. *Deps:* P1-1, P0-2

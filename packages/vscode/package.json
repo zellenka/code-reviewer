@@ -30,7 +30,9 @@
     "anthropic"
   ],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
@@ -52,11 +54,97 @@
         "command": "aiReview.showLog",
         "title": "Show Log",
         "category": "AI Review"
+      },
+      {
+        "command": "aiReview.selectModel",
+        "title": "Select Model",
+        "category": "AI Review"
+      },
+      {
+        "command": "aiReview.testConnection",
+        "title": "Test Model Connection",
+        "category": "AI Review"
+      },
+      {
+        "command": "aiReview.setAnthropicApiKey",
+        "title": "Set Anthropic API Key",
+        "category": "AI Review"
+      },
+      {
+        "command": "aiReview.clearAnthropicApiKey",
+        "title": "Clear Anthropic API Key",
+        "category": "AI Review"
       }
     ],
     "configuration": {
       "title": "AI Review",
-      "properties": {}
+      "properties": {
+        "aiReview.provider": {
+          "type": "string",
+          "enum": [
+            "copilot",
+            "anthropic"
+          ],
+          "enumDescriptions": [
+            "GitHub Copilot models via VS Code (no key needed).",
+            "Claude models with your own Anthropic API key (pay per token)."
+          ],
+          "default": "copilot",
+          "markdownDescription": "Model provider used for reviews. Use **AI Review: Select Model** to change it."
+        },
+        "aiReview.model": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Model id for the selected provider. Empty = the provider's first model. Use **AI Review: Select Model** to pick one."
+        },
+        "aiReview.anthropic.models": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "Overrides or additions to the built-in Anthropic model table (limits and pricing in USD per million tokens). Entries are matched by `id`.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "maxInputTokens": {
+                "type": "number"
+              },
+              "maxOutputTokens": {
+                "type": "number"
+              },
+              "pricing": {
+                "type": "object",
+                "properties": {
+                  "inputPerMTok": {
+                    "type": "number"
+                  },
+                  "outputPerMTok": {
+                    "type": "number"
+                  },
+                  "cacheReadPerMTok": {
+                    "type": "number"
+                  },
+                  "cacheWritePerMTok": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "aiReview.anthropic.refusalFallback": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "If a model's safety filter declines a request (security-related code can trigger this), let Anthropic retry it on a fallback model. Billed at the fallback model's rates."
+        }
+      }
     }
   },
   "scripts": {
