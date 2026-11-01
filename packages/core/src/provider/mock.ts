@@ -84,7 +84,7 @@ export class MockProvider implements LLMProvider {
         yield { type: 'stop', reason: 'cancelled' };
         return;
       }
-      if (step.delayMs) await new Promise((r) => setTimeout(r, step.delayMs));
+      if (step.delayMs) await abortableDelay(step.delayMs, req.signal);
       if (event.type === 'stop') break; // re-emitted below, after message/usage
       if (event.type === 'text') text.push(event.delta);
       if (event.type === 'tool_call') {
@@ -157,4 +157,18 @@ export function mockError(
   options?: ProviderErrorOptions,
 ): MockStep {
   return { error: new ProviderError(kind, message, { provider: 'mock', ...options }) };
+}
+
+/** Waits `ms`, or less if the request is aborted (like a real stream would). */
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+    signal.addEventListener('abort', done, { once: true });
+  });
 }

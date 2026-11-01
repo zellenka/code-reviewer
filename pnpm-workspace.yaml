@@ -1,5 +1,6 @@
 packages:
   - packages/*
+  - evals
 
 # Packages allowed to run install scripts (pnpm blocks them by default).
 onlyBuiltDependencies:

@@ -1,0 +1,33 @@
+name: Off-by-one loop
+description: Loop bound uses <= and reads past the end of the array.
+before:
+  src/cart.ts: |
+    export interface Item {
+      price: number;
+      qty: number;
+    }
+
+    export function total(items: Item[]): number {
+      return items.reduce((sum, item) => sum + item.price * item.qty, 0);
+    }
+after:
+  src/cart.ts: |
+    export interface Item {
+      price: number;
+      qty: number;
+    }
+
+    export function total(items: Item[]): number {
+      let sum = 0;
+      for (let i = 0; i <= items.length; i++) {
+        sum += items[i].price * items[i].qty;
+      }
+      return sum;
+    }
+expected:
+  - file: src/cart.ts
+    lines: 8
+    category: bug
+    severity: major
+    title: Loop reads one element past the end of the array
+    quote: 'for (let i = 0; i <= items.length; i++) {'

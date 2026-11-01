@@ -1,0 +1,29 @@
+name: Cache key ignores a parameter
+description: A memoized lookup keys the cache by user id only, so results for different locales leak into each other.
+before:
+  src/greeting.ts: |
+    export function greeting(userId: string, locale: string): string {
+      return translate('hello', locale) + ', ' + userId;
+    }
+
+    declare function translate(key: string, locale: string): string;
+after:
+  src/greeting.ts: |
+    const cache = new Map<string, string>();
+
+    export function greeting(userId: string, locale: string): string {
+      const hit = cache.get(userId);
+      if (hit !== undefined) return hit;
+      const value = translate('hello', locale) + ', ' + userId;
+      cache.set(userId, value);
+      return value;
+    }
+
+    declare function translate(key: string, locale: string): string;
+expected:
+  - file: src/greeting.ts
+    lines: [4, 7]
+    category: bug
+    severity: major
+    title: Cache key leaves out the locale, so other locales get the wrong greeting
+    quote: 'const hit = cache.get(userId);'

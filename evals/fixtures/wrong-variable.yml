@@ -1,0 +1,33 @@
+name: Copy-paste wrong variable
+description: Area uses width twice instead of width and height.
+before:
+  src/geometry.ts: |
+    export interface Rect {
+      width: number;
+      height: number;
+    }
+
+    export function perimeter(r: Rect): number {
+      return 2 * (r.width + r.height);
+    }
+after:
+  src/geometry.ts: |
+    export interface Rect {
+      width: number;
+      height: number;
+    }
+
+    export function perimeter(r: Rect): number {
+      return 2 * (r.width + r.height);
+    }
+
+    export function area(r: Rect): number {
+      return r.width * r.width;
+    }
+expected:
+  - file: src/geometry.ts
+    lines: 11
+    category: bug
+    severity: major
+    title: area() multiplies width by itself instead of by height
+    quote: 'return r.width * r.width;'

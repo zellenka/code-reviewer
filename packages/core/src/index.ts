@@ -5,3 +5,6 @@ export { LOG_LEVELS, isLevelEnabled, noopLogger } from './logger';
 
 export * from './provider';
 export * from './anthropic';
+export * from './config';
+export * from './diff';
+export * from './review';

@@ -1,0 +1,29 @@
+{
+  "name": "@ai-review/node-host",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Node implementations of the core host interfaces: git CLI diffs and sandboxed file tools.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zellenka/code-reviewer.git",
+    "directory": "packages/node-host"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@ai-review/core": "workspace:*",
+    "picomatch": "^4.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/picomatch": "^4.0.3"
+  }
+}

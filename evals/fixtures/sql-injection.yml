@@ -1,0 +1,29 @@
+name: SQL injection
+description: User input is concatenated into a SQL query.
+before:
+  src/users.ts: |
+    import { db } from './db';
+
+    export async function findUser(id: number) {
+      return db.query('SELECT id, name FROM users WHERE id = $1', [id]);
+    }
+after:
+  src/users.ts: |
+    import { db } from './db';
+
+    export async function findUser(id: number) {
+      return db.query('SELECT id, name FROM users WHERE id = $1', [id]);
+    }
+
+    export async function searchUsers(name: string) {
+      const sql = "SELECT id, name FROM users WHERE name LIKE '%" + name + "%'";
+      return db.query(sql);
+    }
+expected:
+  - file: src/users.ts
+    lines: 8
+    category: security
+    severity: critical
+    title: SQL query built from user input (SQL injection)
+    quote: |-
+      const sql = "SELECT id, name FROM users WHERE name LIKE '%" + name + "%'";

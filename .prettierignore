@@ -7,3 +7,6 @@ pnpm-lock.yaml
 LICENSE
 .changeset/*.md
 implementation-plan.md
+
+# Eval fixtures are test data: keep them byte-for-byte.
+evals/fixtures/

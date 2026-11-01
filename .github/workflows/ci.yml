@@ -33,6 +33,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm test
+      - name: Evals (mock provider, checks the pipeline)
+        run: pnpm eval --provider mock
       - name: Extension tests (headless, Linux)
         if: runner.os == 'Linux'
         run: xvfb-run -a pnpm test:ext

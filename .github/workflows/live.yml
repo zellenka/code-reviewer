@@ -4,6 +4,10 @@ name: Live tests
 # Fork PRs never get secrets, which is why these tests are not part of PR CI.
 on:
   workflow_dispatch:
+    inputs:
+      model:
+        description: Anthropic model for the evals
+        default: claude-sonnet-5-5
 
 permissions:
   contents: read
@@ -23,3 +27,14 @@ jobs:
       - run: pnpm test:live
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Evals (Anthropic)
+        run: pnpm eval --provider anthropic --model "$EVAL_MODEL" --json eval-report.json
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVAL_MODEL: ${{ inputs.model }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: eval-report
+          path: eval-report.json
+          if-no-files-found: ignore
