@@ -4,6 +4,8 @@ export interface QuoteMatch {
   startLine: number;
   endLine: number;
   method: 'exact' | 'normalized' | 'fuzzy';
+  /** The quote lines that matched (after stripping copied line numbers or +/- markers). */
+  quoteLines: string[];
 }
 
 export interface LocateOptions {
@@ -48,12 +50,17 @@ export function locateQuote(
           ? hits.filter((h) => options.prefer!(h, h + variant.length - 1))
           : [];
         const start = nearest(preferred.length ? preferred : hits, options.nearLine);
-        return { startLine: start, endLine: start + variant.length - 1, method };
+        return {
+          startLine: start,
+          endLine: start + variant.length - 1,
+          method,
+          quoteLines: variant,
+        };
       }
     }
   }
   const fuzzy = fuzzyFind(lines, base, options);
-  return fuzzy ? { ...fuzzy, method: 'fuzzy' } : undefined;
+  return fuzzy ? { ...fuzzy, method: 'fuzzy', quoteLines: base } : undefined;
 }
 
 function trimBlankLines(lines: string[]): string[] {
