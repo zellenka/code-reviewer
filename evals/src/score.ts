@@ -18,6 +18,15 @@ export interface FixtureScore {
   changedLines: number;
   outcomes: ParseOutcome[];
   error?: string;
+  /** Whether the review produced a summary (P3-6). */
+  summary?: boolean;
+  /** Pre-run input-token estimate vs. what the provider reported (P3-4). */
+  inputTokens?: { estimated: number; actual: number };
+}
+
+/** actual / estimated − 1, e.g. 0.12 = the estimate was 12% low. */
+export function estimateError(t: { estimated: number; actual: number }): number {
+  return t.estimated ? t.actual / t.estimated - 1 : 0;
 }
 
 export function matches(finding: Finding, expected: ExpectedFinding): boolean {

@@ -9,7 +9,12 @@ import { CONFIG_SECTION, ProviderRegistry, type Selection } from './providers/re
 import { reviewCommand, type ReviewCommandArgs, type ReviewKind } from './review/commands';
 import { ReviewConfigService } from './review/config';
 import { FindingsDiagnostics } from './review/diagnostics';
+import { registerFindingCommands } from './review/findingCommands';
+import { FindingCodeActions, FixPreviewProvider, PREVIEW_SCHEME } from './review/fixes';
 import { RepoLocator } from './review/repo';
+import { FindingStore } from './review/store';
+import { FindingThreads } from './review/threads';
+import { FindingsTree, SUMMARY_SCHEME, SummaryProvider } from './review/tree';
 
 /** Returned from `activate`; used by extension tests. Not a stable public API. */
 export interface ExtensionApi {
@@ -17,7 +22,9 @@ export interface ExtensionApi {
   keyStore: AnthropicKeyStore;
   repos: RepoLocator;
   configs: ReviewConfigService;
-  diagnostics: FindingsDiagnostics;
+  findings: FindingStore;
+  threads: FindingThreads;
+  tree: FindingsTree;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi> {
@@ -88,9 +95,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   const repos = new RepoLocator(logger);
   const configs = new ReviewConfigService(logger);
-  const diagnostics = new FindingsDiagnostics();
-  context.subscriptions.push(configs, diagnostics);
-  const deps = { registry, repos, configs, diagnostics, logger };
+  const store = new FindingStore();
+  const threads = new FindingThreads(store);
+  const tree = new FindingsTree(store);
+  const previews = new FixPreviewProvider();
+  const summaries = new SummaryProvider(store);
+  context.subscriptions.push(
+    configs,
+    store,
+    new FindingsDiagnostics(store),
+    threads,
+    tree,
+    previews,
+    summaries,
+    vscode.workspace.registerTextDocumentContentProvider(PREVIEW_SCHEME, previews),
+    vscode.workspace.registerTextDocumentContentProvider(SUMMARY_SCHEME, summaries),
+    vscode.languages.registerCodeActionsProvider(
+      { scheme: 'file' },
+      new FindingCodeActions(store),
+      {
+        providedCodeActionKinds: FindingCodeActions.kinds,
+      },
+    ),
+    ...registerFindingCommands({ store, threads, previews }),
+  );
+  const deps = { registry, repos, configs, store, logger };
   const reviewCommands: [string, ReviewKind][] = [
     ['aiReview.reviewStaged', 'staged'],
     ['aiReview.reviewUnstaged', 'unstaged'],
@@ -112,10 +141,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     );
   }
   context.subscriptions.push(
-    vscode.commands.registerCommand('aiReview.clearFindings', () => diagnostics.clear()),
+    vscode.commands.registerCommand('aiReview.clearFindings', () => store.clear()),
   );
 
-  return { registry, keyStore, repos, configs, diagnostics };
+  return { registry, keyStore, repos, configs, findings: store, threads, tree };
 }
 
 export function deactivate(): void {}

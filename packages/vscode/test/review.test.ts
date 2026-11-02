@@ -26,29 +26,68 @@ const CALC_V1 = 'export function sub(a: number, b: number) {\n  return a - b;\n}
 const CALC_V2 =
   '// helpers\n\nexport function sub(a: number, b: number) {\n  return a + b;\n}\n\nexport const twice = (n: number) => n * 2;\n';
 
-/** Stub model: reports the `a + b` bug, with a wrong line number, whenever it's in the diff. */
+/** Bugs the stub model knows; each is reported (line 2, often wrong) when its quote is sent. */
+const KNOWN_BUGS = [
+  {
+    file: 'src/calc.ts',
+    title: 'sub() adds instead of subtracting',
+    quote: 'return a + b;',
+    suggestion: 'return a - b;',
+  },
+  {
+    file: 'src/ux-lf.ts',
+    title: 'div() multiplies',
+    quote: 'return a * b; // lf',
+    suggestion: 'return a / b; // lf',
+  },
+  {
+    file: 'src/ux-crlf.ts',
+    title: 'div() multiplies (crlf)',
+    quote: 'return a * b; // crlf',
+    suggestion: 'if (b === 0) throw new Error("b is 0");\nreturn a / b; // crlf',
+  },
+  {
+    file: 'src/ux-track.ts',
+    title: 'tracked bug',
+    quote: 'return a * b; // track',
+    suggestion: 'return a / b; // track',
+  },
+];
+
+/** Stub model: reports known bugs found in the diff; answers summary requests with text. */
 function reviewer(req: ChatRequest): MockStep {
   const text = JSON.stringify(req.messages);
-  const findings = text.includes('return a + b;')
-    ? [
-        {
-          file: 'src/calc.ts',
-          startLine: 2,
-          endLine: 2,
-          severity: 'major',
-          category: 'bug',
-          title: 'sub() adds instead of subtracting',
-          body: 'Use `a - b`.',
-          quote: 'return a + b;',
-          suggestion: 'return a - b;',
-          confidence: 0.95,
-        },
-      ]
-    : [];
+  if (!req.tools) {
+    return {
+      events: [{ type: 'text', delta: '## Walkthrough\n- stub summary\n\n## Top risks\n- none' }],
+    };
+  }
+  const findings = KNOWN_BUGS.filter((b) => text.includes(b.quote)).map((b) => ({
+    file: b.file,
+    startLine: 2,
+    endLine: 2,
+    severity: 'major',
+    category: 'bug',
+    title: b.title,
+    body: 'Fix the operator.',
+    quote: b.quote,
+    suggestion: b.suggestion,
+    confidence: 0.95,
+  }));
   return {
     events: [{ type: 'tool_call', id: 'c1', name: 'report_findings', input: { findings } }],
   };
 }
+
+const DIV = (tag: string, eol = '\n') =>
+  [
+    '// math',
+    '',
+    'export function div(a: number, b: number) {',
+    `  return a * b; // ${tag}`,
+    '}',
+    '',
+  ].join(eol);
 
 suite('Review', () => {
   let api: ExtensionApi;
@@ -104,7 +143,7 @@ suite('Review', () => {
 
   teardown(async () => {
     vscode.Disposable.from(...disposables.splice(0)).dispose();
-    api.diagnostics.clear();
+    api.findings.clear();
     rmSync(path.join(root, '.codereview.yml'), { force: true });
     api.configs.forget(root);
     const config = vscode.workspace.getConfiguration('aiReview');
@@ -242,6 +281,232 @@ suite('Review', () => {
       assert.match(result.message ?? '', /No git repository/);
     } finally {
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  // ---------- Phase 3: review UX ----------
+
+  /** Writes a file, reviews it, and returns the single finding's key. */
+  async function reviewOne(rel: string, content: string): Promise<string> {
+    write(rel, content);
+    const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+      'aiReview.reviewFile',
+      {
+        root,
+        path: rel,
+        silent: true,
+      },
+    );
+    assert.strictEqual(result.ok, true, result.message);
+    const open = api.findings.open();
+    assert.strictEqual(open.length, 1);
+    return open[0]!.key;
+  }
+
+  const uriOf = (rel: string) => vscode.Uri.file(path.join(root, ...rel.split('/')));
+  const until = async (check: () => boolean, ms = 3000) => {
+    const end = Date.now() + ms;
+    while (!check()) {
+      if (Date.now() > end) throw new Error('timed out');
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  };
+
+  test('comment threads appear on the right range; resolve, reopen and dismiss update them', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const thread = api.threads.threadOf(key);
+    assert.ok(thread);
+    assert.strictEqual(thread.range?.start.line, 3);
+    assert.strictEqual(thread.contextValue, 'open fixable');
+    assert.match(
+      (thread.comments[0]!.body as vscode.MarkdownString).value,
+      /div\\\(\\\) multiplies/,
+    );
+
+    await vscode.commands.executeCommand('aiReview.resolveFinding', thread);
+    assert.strictEqual(thread.state, vscode.CommentThreadState.Resolved);
+    assert.strictEqual(thread.contextValue, 'resolved');
+    assert.strictEqual(vscode.languages.getDiagnostics(uriOf('src/ux-lf.ts')).length, 0);
+
+    await vscode.commands.executeCommand('aiReview.reopenFinding', thread);
+    assert.strictEqual(thread.state, vscode.CommentThreadState.Unresolved);
+    assert.strictEqual(vscode.languages.getDiagnostics(uriOf('src/ux-lf.ts')).length, 1);
+
+    await vscode.commands.executeCommand('aiReview.dismissFinding', key);
+    assert.strictEqual(api.threads.threadOf(key), undefined);
+    assert.strictEqual(vscode.languages.getDiagnostics(uriOf('src/ux-lf.ts')).length, 0);
+  });
+
+  test('apply fix edits the file (LF), marks it resolved, and undo restores it', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-lf.ts'));
+    await vscode.window.showTextDocument(doc);
+
+    const outcome = await vscode.commands.executeCommand<{ ok: boolean }>(
+      'aiReview.applyFix',
+      key,
+      {
+        silent: true,
+      },
+    );
+    assert.strictEqual(outcome.ok, true);
+    assert.strictEqual(doc.getText(), DIV('lf').replace('a * b', 'a / b'));
+    assert.strictEqual(api.findings.get(key)?.status, 'resolved');
+
+    await vscode.commands.executeCommand('undo');
+    assert.strictEqual(doc.getText(), DIV('lf'));
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
+  test('apply fix keeps CRLF line endings (via preview)', async () => {
+    const key = await reviewOne('src/ux-crlf.ts', DIV('crlf', '\r\n'));
+    const outcome = await vscode.commands.executeCommand<{ ok: boolean; applied?: boolean }>(
+      'aiReview.previewFix',
+      key,
+      { silent: true, accept: true },
+    );
+    assert.strictEqual(outcome.applied, true);
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-crlf.ts'));
+    assert.strictEqual(
+      doc.getText(),
+      DIV('crlf', '\r\n').replace(
+        '  return a * b; // crlf',
+        '  if (b === 0) throw new Error("b is 0");\r\nreturn a / b; // crlf',
+      ),
+    );
+    // The preview diff was closed.
+    const previews = vscode.window.tabGroups.all
+      .flatMap((g) => g.tabs)
+      .filter((t) => t.input instanceof vscode.TabInputTextDiff);
+    assert.strictEqual(previews.length, 0);
+    await vscode.window.showTextDocument(doc);
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
+  test('findings follow edits above them; deleting the quoted code marks them stale', async () => {
+    const key = await reviewOne('src/ux-track.ts', DIV('track'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-track.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+
+    await editor.edit((e) => e.insert(new vscode.Position(0, 0), '// a\n// b\n'));
+    await until(() => api.findings.get(key)?.startLine === 6);
+    assert.strictEqual(api.threads.threadOf(key)?.range?.start.line, 5);
+    assert.strictEqual(vscode.languages.getDiagnostics(doc.uri)[0]?.range.start.line, 5);
+
+    await editor.edit((e) => e.delete(doc.lineAt(5).rangeIncludingLineBreak));
+    await doc.save();
+    await until(() => api.findings.get(key)?.stale === true);
+    assert.match(api.threads.threadOf(key)?.label ?? '', /outdated/);
+    const outcome = await vscode.commands.executeCommand<{ ok: boolean }>(
+      'aiReview.applyFix',
+      key,
+      {
+        silent: true,
+      },
+    );
+    assert.strictEqual(outcome.ok, false);
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  });
+
+  test('tree lists findings by file; clicking one reveals its range; summary is shown', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const roots = api.tree.getChildren();
+    assert.deepStrictEqual(
+      roots.map((n) => n.kind),
+      ['summary', 'file', 'details'],
+    );
+    const items = api.tree.getChildren(roots[1]);
+    assert.strictEqual(items.length, 1);
+    const item = api.tree.getTreeItem(items[0]!);
+    assert.strictEqual(item.command?.command, 'aiReview.revealFinding');
+
+    const editor = await vscode.commands.executeCommand<vscode.TextEditor>(
+      'aiReview.revealFinding',
+      ...(item.command?.arguments ?? []),
+    );
+    assert.strictEqual(
+      editor.document.uri.fsPath.toLowerCase(),
+      uriOf('src/ux-lf.ts').fsPath.toLowerCase(),
+    );
+    assert.strictEqual(editor.selection.start.line, 3);
+    assert.strictEqual(api.findings.get(key)?.startLine, 4);
+
+    assert.match(api.findings.session?.result.summary ?? '', /Walkthrough/);
+    const details = api.tree.getChildren(roots[2]).map((n) => api.tree.getTreeItem(n).label);
+    assert.ok(details.some((l) => /request/.test(String(l)) || /in ·/.test(String(l))));
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  });
+
+  test('summary can be turned off', async () => {
+    await vscode.workspace
+      .getConfiguration('aiReview')
+      .update('summary', false, vscode.ConfigurationTarget.Global);
+    try {
+      write('src/ux-lf.ts', DIV('lf'));
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root, path: 'src/ux-lf.ts', silent: true },
+      );
+      assert.strictEqual(result.result?.summary, undefined);
+      assert.ok(stub.requests.every((r) => r.tools));
+    } finally {
+      await vscode.workspace
+        .getConfiguration('aiReview')
+        .update('summary', undefined, vscode.ConfigurationTarget.Global);
+    }
+  });
+
+  test('a priced model above the cost threshold needs confirmation', async () => {
+    const priced = new MockProvider({
+      id: 'anthropic',
+      models: [
+        {
+          id: 'priced',
+          name: 'Priced',
+          vendor: 'anthropic',
+          maxInputTokens: 50_000,
+          maxOutputTokens: 4_000,
+          supportsTools: true,
+          pricing: { inputPerMTok: 3, outputPerMTok: 15 },
+        },
+      ],
+      fallback: reviewer,
+    });
+    disposables.push(
+      api.registry.register('anthropic', {
+        label: 'Priced',
+        provider: priced,
+        isAvailable: () => true,
+      }),
+    );
+    const config = vscode.workspace.getConfiguration('aiReview');
+    await config.update('provider', 'anthropic', vscode.ConfigurationTarget.Global);
+    await config.update('model', 'priced', vscode.ConfigurationTarget.Global);
+    await config.update('costConfirmationThreshold', 0, vscode.ConfigurationTarget.Global);
+    try {
+      const args = { root, path: 'src/calc.ts', silent: true };
+      let result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        args,
+      );
+      assert.strictEqual(result.ok, false);
+      assert.match(result.message ?? '', /confirmation/);
+      assert.strictEqual(priced.requests.length, 0);
+      assert.ok(result.estimate?.costUsd && result.estimate.costUsd.high > 0);
+
+      result = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+        ...args,
+        confirmCost: true,
+      });
+      assert.strictEqual(result.ok, true, result.message);
+      assert.strictEqual(priced.requests.length, result.estimate?.requests);
+      assert.match(result.message ?? '', /≈ \$/);
+    } finally {
+      await config.update(
+        'costConfirmationThreshold',
+        undefined,
+        vscode.ConfigurationTarget.Global,
+      );
     }
   });
 });

@@ -2,11 +2,15 @@ import {
   DROP_REASON_LABELS,
   ReviewTooLargeError,
   describeMode,
+  estimateCostUsd,
+  estimateReview,
   isDiffSourceError,
   isProviderError,
   runReview,
   type Finding,
   type Logger,
+  type ModelInfo,
+  type ReviewEstimate,
   type ReviewMode,
   type ReviewResult,
   type Severity,
@@ -16,8 +20,9 @@ import * as vscode from 'vscode';
 import { showProviderError } from '../providers/errorUi';
 import type { ProviderRegistry } from '../providers/registry';
 import type { ReviewConfigService } from './config';
-import type { FindingsDiagnostics } from './diagnostics';
 import { relativeToRepo, type RepoLocator } from './repo';
+import type { FindingStore } from './store';
+import { formatTokens } from './tree';
 
 export type ReviewKind = ReviewMode['kind'];
 
@@ -32,6 +37,8 @@ export interface ReviewCommandArgs {
   base?: string;
   /** No notifications (tests). */
   silent?: boolean;
+  /** Skip the cost confirmation (tests). Silent runs otherwise stop where it would be asked. */
+  confirmCost?: boolean;
 }
 
 export interface ReviewCommandResult {
@@ -40,13 +47,15 @@ export interface ReviewCommandResult {
   /** Findings as shown (re-anchored to the working tree). */
   findings?: Finding[];
   message?: string;
+  /** Pre-run estimate (requests, tokens, cost range). */
+  estimate?: ReviewEstimate;
 }
 
 export interface ReviewDeps {
   registry: ProviderRegistry;
   repos: RepoLocator;
   configs: ReviewConfigService;
-  diagnostics: FindingsDiagnostics;
+  store: FindingStore;
   logger: Logger;
 }
 
@@ -112,6 +121,8 @@ export async function reviewCommand(
     const config = await deps.configs.get(repo.root);
     const settings = vscode.workspace.getConfiguration('aiReview');
     const concurrency = settings.get<number>('concurrency') || undefined;
+    const summary = settings.get<boolean>('summary') ?? true;
+    const redactHighEntropy = settings.get<boolean>('redactHighEntropyStrings') ?? false;
 
     const outcome = await vscode.window.withProgress(
       {
@@ -129,6 +140,24 @@ export async function reviewCommand(
           progress.report({ message: 'collecting changes…' });
           const diff = await repo.source.getDiff(mode);
           if (!diff.files.length) return { empty: true as const };
+
+          const estimate = estimateReview(diff, { model, config, redactHighEntropy, summary });
+          logger.info(describeEstimate(estimate, model));
+          const threshold = settings.get<number>('costConfirmationThreshold') ?? 0.5;
+          if (estimate.costUsd && estimate.costUsd.high > threshold && !args.confirmCost) {
+            if (args.silent) return { needsConfirmation: true as const, estimate };
+            const choice = await vscode.window.showWarningMessage(
+              `AI Review: this review sends about ${formatTokens(estimate.inputTokens)} tokens in ${estimate.requests} request(s) to ${model.name}. Estimated cost: ${formatUsd(estimate.costUsd.low)}–${formatUsd(estimate.costUsd.high)}.`,
+              {
+                modal: true,
+                detail: `That's above your confirmation threshold of ${formatUsd(threshold)} (setting aiReview.costConfirmationThreshold). Narrow the scope to make it cheaper.`,
+              },
+              'Run Review',
+            );
+            if (choice !== 'Run Review') return { declined: true as const, estimate };
+          }
+          if (!estimate.costUsd) progress.report({ message: `${estimate.requests} request(s)…` });
+
           let done = 0;
           const result = await runReview(diff, {
             provider,
@@ -136,9 +165,14 @@ export async function reviewCommand(
             config,
             signal: controller.signal,
             logger,
-            redactHighEntropy: settings.get<boolean>('redactHighEntropyStrings') ?? false,
+            redactHighEntropy,
+            summary,
             ...(concurrency ? { concurrency } : {}),
             onProgress: (p) => {
+              if (p.phase === 'summary') {
+                progress.report({ message: 'writing the summary…' });
+                return;
+              }
               const increment = p.chunksTotal ? ((p.chunksDone - done) / p.chunksTotal) * 100 : 0;
               done = p.chunksDone;
               progress.report({
@@ -147,39 +181,62 @@ export async function reviewCommand(
               });
             },
           });
-          return { empty: false as const, result };
+          return { empty: false as const, result, estimate };
         } finally {
           subs.forEach((s) => s.dispose());
         }
       },
     );
 
+    if ('needsConfirmation' in outcome) {
+      return {
+        ok: false,
+        message: 'The estimated cost needs confirmation.',
+        estimate: outcome.estimate,
+      };
+    }
+    if ('declined' in outcome) {
+      logger.info('review cancelled at the cost confirmation');
+      return { ok: false, message: 'cancelled', estimate: outcome.estimate };
+    }
     if (outcome.empty) {
       const message = `No changes to review (${describeMode(mode)}).`;
       notify(message);
-      deps.diagnostics.clear();
+      deps.store.clear();
       return { ok: true, findings: [], message };
     }
 
-    const { result } = outcome;
+    const { result, estimate } = outcome;
     logResult(result, logger);
-    const findings = await deps.diagnostics.show(repo.root, result.findings);
-    const message = summarize(result);
+    const actualInput =
+      result.usage.inputTokens +
+      (result.usage.cacheReadTokens ?? 0) +
+      (result.usage.cacheWriteTokens ?? 0);
+    logger.info(
+      `input tokens: estimated ${estimate.inputTokens}, actual ${actualInput}${result.usage.estimated ? ' (counted locally)' : ''}`,
+    );
+    const findings = await deps.store.set(
+      { root: repo.root, mode, model, result, finishedAt: new Date() },
+      result.findings,
+    );
+    const message = summarize(result, model);
     if (!args.silent) {
       const level = result.errors.length && !result.findings.length ? 'warn' : 'info';
       const show =
         level === 'warn' ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
       const actions = [
-        findings.length ? 'Show Problems' : undefined,
+        findings.length ? 'Show Findings' : undefined,
+        result.summary ? 'Show Summary' : undefined,
         result.errors.length ? 'Show Log' : undefined,
       ].filter((a): a is string => !!a);
       void show(`AI Review: ${message}`, ...actions).then((choice) => {
-        if (choice === 'Show Problems')
-          void vscode.commands.executeCommand('workbench.actions.view.problems');
+        if (choice === 'Show Findings')
+          void vscode.commands.executeCommand('aiReview.findings.focus');
+        if (choice === 'Show Summary') void vscode.commands.executeCommand('aiReview.showSummary');
         if (choice === 'Show Log') void vscode.commands.executeCommand('aiReview.showLog');
       });
     }
-    return { ok: true, result, findings, message };
+    return { ok: true, result, findings, message, estimate };
   } catch (err) {
     if (isDiffSourceError(err) || err instanceof ReviewTooLargeError || isTooLarge(err)) {
       const message = (err as Error).message;
@@ -245,7 +302,7 @@ function toRepoPath(root: string, target: string): string | undefined {
 
 const ORDER: Severity[] = ['critical', 'major', 'minor', 'nit'];
 
-export function summarize(result: ReviewResult): string {
+export function summarize(result: ReviewResult, model?: ModelInfo): string {
   const parts: string[] = [];
   if (result.findings.length) {
     const counts = ORDER.map(
@@ -262,14 +319,21 @@ export function summarize(result: ReviewResult): string {
   const tokens = result.usage.inputTokens + result.usage.outputTokens;
   if (tokens)
     parts.push(`${formatTokens(tokens)} tokens${result.usage.estimated ? ' (est.)' : ''}`);
+  if (model?.pricing) parts.push(`≈ ${formatUsd(estimateCostUsd(result.usage, model.pricing))}`);
+  else if (result.usage.requests) parts.push(`${result.usage.requests} request(s)`);
   let message = parts.join(' · ');
   if (result.cancelled) message = `Cancelled. ${message} (from finished parts)`;
   if (result.errors.length) message += ` · ${result.errors.length} part(s) failed`;
   return message;
 }
 
-function formatTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+export function formatUsd(n: number): string {
+  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
+}
+
+function describeEstimate(e: ReviewEstimate, model: ModelInfo): string {
+  const cost = e.costUsd ? `, ${formatUsd(e.costUsd.low)}–${formatUsd(e.costUsd.high)}` : '';
+  return `estimate for ${model.id}: ${e.files} file(s), ${e.requests} request(s), ~${e.inputTokens} input tokens, ${e.outputTokens.low}–${e.outputTokens.high} output tokens${cost}`;
 }
 
 function logResult(result: ReviewResult, logger: Logger): void {

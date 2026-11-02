@@ -7,7 +7,7 @@ VS Code extension for AI code review (CodeRabbit-like), later also a CI/PR bot. 
 - [x] **Phase 0 — Repo foundation** (P0-1, P0-2, P0-3) — done 2026-10-30 ([#1](https://github.com/zellenka/code-reviewer/pull/1), [#2](https://github.com/zellenka/code-reviewer/pull/2))
 - [x] **Phase 1 — Providers** (P1-1, P1-2, P1-3, P1-4a, P1-4b) — code done 2026-11-01; manual checks pending: Copilot round trip via "AI Review: Test Model Connection", Anthropic live test (`pnpm test:live`)
 - [x] **Phase 2 — Single-pass review (MVP)** (P2-0 … P2-10) — code done 2026-11-01; pending: live evals with Anthropic (P2-4 parse-rate AC, MVP precision gate), manual review run on a real repo with Copilot, dogfooding
-- [ ] **Phase 3 — Real review UX** (P3-1 … P3-6)
+- [x] **Phase 3 — Real review UX** (P3-1 … P3-6) — code done 2026-11-02; pending: live check of the ±30% input-token estimate (P3-4 AC) with `pnpm eval --provider anthropic`, manual run in VS Code
 - [ ] **Phase 4 — Context & agent loop** (P4-1 … P4-6)
 - [ ] **Phase 5 — Quality & state** (P5-1 … P5-4)
 - [ ] **Phase 6 — CI / PR bot** (P6-1 … P6-4)
@@ -235,7 +235,14 @@ Each task: **ID · title** — description. *AC* = acceptance criteria. *Deps* =
 
 **MVP milestone (exit criteria):** usable locally with Copilot; on the P2-8 evals precision ≥ 0.7 and no findings on the clean fixture; ≤ 3 nits per 100 changed lines. Then dogfood with teammates.
 
-### Phase 3 — Real review UX
+### Phase 3 — Real review UX ✅ Code done
+> **Implementation notes (2026-11-02):**
+> - **One store, several views:** `FindingStore` (packages/vscode) holds the last review's findings with status `open|resolved|dismissed`; the Problems panel, comment threads, tree view and code actions all render from it. Resolved/dismissed state lives only in memory until P5-3.
+> - **Tracking (P3-5):** edits above a finding shift it right away; edits touching it re-anchor it by quote after 400 ms and on save. Not found → `stale` (dimmed, "outdated", no fix).
+> - **Fixes (P3-2):** `computeFix` (core) re-anchors the quote; exact matches replace just the quoted text, whitespace-only differences replace whole lines; fuzzy matches are refused (the code changed). Edits are line/column based and `\n` is converted to the document's EOL. "Preview fix" opens a diff and asks before applying. Applying marks the finding resolved.
+> - **Tree (P3-3)** is in the Source Control sidebar (`aiReview.findings`), with a welcome view when there's no review. The summary opens as a read-only markdown preview.
+> - **Cost (P3-4):** `estimateReview` uses the same filter/redact/chunk path as `runReview`, so the request count is exact; input tokens are chars/3.5 and output a range (150–2000 per request, 200–800 for the summary). Copilot has no prices, so the request count is shown instead. The eval runner prints estimated vs. actual input tokens per fixture.
+> - **Summary (P3-6):** one extra request without tools; up to ~12k tokens of diff plus per-file stats and the findings. A failed summary is reported in `errors` and never loses findings. On by default (`aiReview.summary`).
 - **P3-1 · Comments API threads** — CodeRabbit-style inline threads per finding, severity badge, markdown body. Actions: Dismiss, Mark resolved. *AC:* threads appear on correct ranges; actions update state (ext test). *Deps:* P2-7
 - **P3-2 · Apply fix CodeAction** — when `suggestion` exists, quick-fix replaces the re-anchored `quote` range, preserving EOL; preview via diff editor before applying. If the quote moved/changed since the review, re-anchor first; if not found, disable the fix. *AC:* applying a fix produces the expected file content (LF and CRLF fixtures); undo works; stale finding has no fix. *Deps:* P3-1
 - **P3-3 · Summary view** — tree view: summary text (from P3-6), counts by severity, findings grouped by file, click-to-navigate, tokens/cost used, dropped counts. *AC:* clicking an item reveals the range. *Deps:* P2-6, P3-6

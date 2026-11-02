@@ -10,7 +10,10 @@ import * as vscode from 'vscode';
 import type { FindingStore, ReviewSession, TrackedFinding } from './store';
 
 export const SUMMARY_SCHEME = 'ai-review-summary';
-export const SUMMARY_URI = vscode.Uri.from({ scheme: SUMMARY_SCHEME, path: '/AI Review Summary.md' });
+export const SUMMARY_URI = vscode.Uri.from({
+  scheme: SUMMARY_SCHEME,
+  path: '/AI Review Summary.md',
+});
 
 type Node =
   | { kind: 'summary' }
@@ -217,7 +220,8 @@ function details(session: ReviewSession, all: TrackedFinding[]): Node[] {
   for (const e of result.errors) {
     out.push({ kind: 'detail', label: e, icon: 'warning', tooltip: e });
   }
-  if (result.cancelled) out.push({ kind: 'detail', label: 'Cancelled (partial results)', icon: 'debug-stop' });
+  if (result.cancelled)
+    out.push({ kind: 'detail', label: 'Cancelled (partial results)', icon: 'debug-stop' });
   return out;
 }
 

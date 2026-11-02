@@ -42,12 +42,15 @@ export class ProviderRegistry implements vscode.Disposable {
   }
 
   /** Registers (or replaces) a provider. */
+  /** Registers (or overrides) a provider. Disposing restores the one it replaced. */
   register(id: string, entry: ProviderEntry): vscode.Disposable {
+    const previous = this.entries.get(id);
     this.entries.set(id, entry);
     this.changed.fire();
     return new vscode.Disposable(() => {
       if (this.entries.get(id) === entry) {
-        this.entries.delete(id);
+        if (previous) this.entries.set(id, previous);
+        else this.entries.delete(id);
         this.changed.fire();
       }
     });
