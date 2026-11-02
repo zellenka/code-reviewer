@@ -113,7 +113,8 @@ ${options.diff}
 
 /**
  * One extra request after the review: a per-file walkthrough and the top risks.
- * Errors are not thrown: a missing summary must not fail the review.
+ * Provider errors are thrown; `runReview` catches them so a failed summary
+ * doesn't lose the findings.
  */
 export async function summarizeReview(options: SummarizeOptions): Promise<SummaryResult> {
   const logger = options.logger ?? noopLogger;

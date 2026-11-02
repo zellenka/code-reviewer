@@ -72,6 +72,29 @@ describe('summary', () => {
     expect(provider.requests).toHaveLength(1);
   });
 
+  it('cancelling during the summary keeps the review complete', async () => {
+    const controller = new AbortController();
+    const provider = new MockProvider({
+      script: [
+        mockToolCall(REPORT_TOOL_NAME, { findings: [finding] }),
+        () => {
+          controller.abort();
+          return { events: [], delayMs: 50 };
+        },
+      ],
+    });
+    const result = await runReview(DIFF, {
+      provider,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      summary: true,
+      signal: controller.signal,
+    });
+    expect(result.findings).toHaveLength(1);
+    expect(result.summary).toBeUndefined();
+    expect(result.cancelled).toBe(false);
+  });
+
   it('a failing summary keeps the findings', async () => {
     const provider = new MockProvider({
       script: [mockToolCall(REPORT_TOOL_NAME, { findings: [finding] }), mockError('server')],

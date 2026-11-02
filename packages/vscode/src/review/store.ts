@@ -112,6 +112,11 @@ export class FindingStore implements vscode.Disposable {
     const item = this.items.get(key);
     if (!item || item.status === status) return;
     item.status = status;
+    // Only open findings are re-anchored while editing; catch up when reopened.
+    if (status === 'open' && item.anchor === 'line') {
+      const doc = vscode.workspace.textDocuments.find((d) => uriKey(d.uri) === uriKey(item.uri));
+      if (doc) Object.assign(item, placement(reanchor(item, documentLines(doc), true)));
+    }
     this.emitter.fire({ uris: [item.uri] });
   }
 
@@ -130,25 +135,24 @@ export class FindingStore implements vscode.Disposable {
     this.emitter.fire({});
   }
 
-  /** Re-anchors every finding in the document by its quote. */
+  /**
+   * Re-anchors the document's open findings by their quote, near where they are now.
+   * Resolved findings are left alone: applying their fix removes the quote on purpose.
+   */
   reanchorDocument(doc: vscode.TextDocument): void {
     this.cancelPending(uriKey(doc.uri));
-    const findings = this.forUri(doc.uri).filter((f) => f.anchor === 'line');
+    const findings = this.forUri(doc.uri).filter((f) => f.anchor === 'line' && f.status === 'open');
     if (!findings.length) return;
     const lines = documentLines(doc);
     let changed = false;
     for (const f of findings) {
-      const placed = reanchor(f, lines);
+      const placed = reanchor(f, lines, true);
       if (
         placed.startLine !== f.startLine ||
         placed.endLine !== f.endLine ||
         placed.stale !== f.stale
       ) {
-        Object.assign(f, {
-          startLine: placed.startLine,
-          endLine: placed.endLine,
-          stale: placed.stale,
-        });
+        Object.assign(f, placement(placed));
         changed = true;
       }
     }
@@ -219,17 +223,35 @@ export function documentLines(doc: vscode.TextDocument): string[] {
   return Array.from({ length: doc.lineCount }, (_, i) => doc.lineAt(i).text);
 }
 
-function reanchor(finding: Finding, lines: string[] | undefined): Finding {
+/** Lines around a finding where its quote is looked for after edits. */
+export function searchWindow(finding: Pick<Finding, 'startLine' | 'endLine'>): {
+  start: number;
+  end: number;
+} {
+  return { start: finding.startLine - SEARCH_MARGIN, end: finding.endLine + SEARCH_MARGIN };
+}
+
+/**
+ * Finds the finding's quote in `lines`. `nearby` limits every match to the search
+ * window (after edits: the finding's position is tracked, so an identical line far
+ * away is a different piece of code). Without it, only the fuzzy step is limited
+ * (first placement, when the working tree may differ from what was reviewed).
+ */
+function reanchor(finding: Finding, lines: string[] | undefined, nearby = false): Finding {
   if (finding.anchor === 'file') return { ...finding, stale: false };
   if (!lines) return { ...finding, stale: true };
+  const window = searchWindow(finding);
   const match = locateQuote(lines, finding.quote, {
     nearLine: finding.startLine,
-    fuzzyRanges: [
-      { start: finding.startLine - SEARCH_MARGIN, end: finding.endLine + SEARCH_MARGIN },
-    ],
+    fuzzyRanges: [window],
+    ...(nearby ? { searchRange: window } : {}),
   });
   if (!match) return { ...finding, stale: true };
   return { ...finding, startLine: match.startLine, endLine: match.endLine, stale: false };
+}
+
+function placement(f: Finding): Pick<Finding, 'startLine' | 'endLine' | 'stale'> {
+  return { startLine: f.startLine, endLine: f.endLine, stale: f.stale };
 }
 
 function countNewlines(text: string): number {

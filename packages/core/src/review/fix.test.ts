@@ -49,6 +49,20 @@ describe('computeFix', () => {
     expect(fix(text, 'return a + b;', 'return a - b;', 2)).toContain('return a - b;');
   });
 
+  it('never edits an identical line outside the search range', () => {
+    const text = 'a();\nreturn null;\nb();\nc();\nd();\nreturn null;\n';
+    const edited = text.replace('return null;', 'return undefined;');
+    const finding = { quote: 'return null;', suggestion: 'return 0;', startLine: 2 };
+    expect(computeFix(lines(edited), finding, { searchRange: { start: 1, end: 4 } })).toBe(
+      undefined,
+    );
+    // Within the range it still works.
+    const edit = computeFix(lines(text), finding, { searchRange: { start: 1, end: 4 } });
+    expect(edit && applyFixToText(text, edit)).toBe(
+      'a();\nreturn 0;\nb();\nc();\nd();\nreturn null;\n',
+    );
+  });
+
   it('refuses when there is no suggestion, the quote is gone, or only fuzzy matches', () => {
     expect(fix(SRC, 'return a + b;', undefined)).toBeUndefined();
     expect(fix(SRC, 'completely different', 'x')).toBeUndefined();

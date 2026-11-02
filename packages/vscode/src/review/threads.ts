@@ -1,4 +1,4 @@
-import type { Severity } from '@ai-review/core';
+import { neutralizeMarkdown, type Severity } from '@ai-review/core';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { findingRange } from './diagnostics';
@@ -130,7 +130,7 @@ export function commentBody(finding: TrackedFinding): vscode.MarkdownString {
   if (finding.stale) {
     md.appendMarkdown('_Outdated: the code this comment refers to has changed._\n\n');
   }
-  md.appendMarkdown(`${finding.body}\n\n`);
+  md.appendMarkdown(`${neutralizeMarkdown(finding.body)}\n\n`);
   if (finding.suggestion !== undefined) {
     md.appendMarkdown('**Suggested change:**\n');
     md.appendCodeblock(finding.suggestion, languageOf(finding.file));

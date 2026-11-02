@@ -52,6 +52,13 @@ const KNOWN_BUGS = [
     quote: 'return a * b; // track',
     suggestion: 'return a / b; // track',
   },
+  {
+    file: 'src/ux-dup.ts',
+    title: 'duplicated bug',
+    quote: 'return a * b; // dup',
+    suggestion: 'return a / b; // dup',
+    body: 'Fix the operator. ![x](https://example.invalid/leak.png)',
+  },
 ];
 
 /** Stub model: reports known bugs found in the diff; answers summary requests with text. */
@@ -69,7 +76,7 @@ function reviewer(req: ChatRequest): MockStep {
     severity: 'major',
     category: 'bug',
     title: b.title,
-    body: 'Fix the operator.',
+    body: b.body ?? 'Fix the operator.',
     quote: b.quote,
     suggestion: b.suggestion,
     confidence: 0.95,
@@ -352,6 +359,10 @@ suite('Review', () => {
     assert.strictEqual(outcome.ok, true);
     assert.strictEqual(doc.getText(), DIV('lf').replace('a * b', 'a / b'));
     assert.strictEqual(api.findings.get(key)?.status, 'resolved');
+    // Removing the quote on purpose doesn't make the resolved finding outdated.
+    await doc.save();
+    assert.ok(!api.findings.get(key)?.stale);
+    assert.doesNotMatch(api.threads.threadOf(key)?.label ?? '', /outdated/);
 
     await vscode.commands.executeCommand('undo');
     assert.strictEqual(doc.getText(), DIV('lf'));
@@ -406,6 +417,35 @@ suite('Review', () => {
     );
     assert.strictEqual(outcome.ok, false);
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  });
+
+  test('an edited finding never jumps to an identical line far away', async () => {
+    const filler = Array.from({ length: 40 }, (_, i) => `const x${i} = ${i};`);
+    const content = DIV('dup') + [...filler, '  return a * b; // dup', ''].join('\n');
+    const key = await reviewOne('src/ux-dup.ts', content);
+    assert.strictEqual(api.findings.get(key)?.startLine, 4);
+    // Model markdown can't load images.
+    const body = (api.threads.threadOf(key)!.comments[0]!.body as vscode.MarkdownString).value;
+    assert.match(body, /\\!\[x\]/);
+
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-dup.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    // Rewrite the line so even the fuzzy match fails; the identical line 46 must not be used.
+    await editor.edit((e) => e.replace(doc.lineAt(3).range, '  throw new Error("todo");'));
+    await doc.save();
+    await until(() => api.findings.get(key)?.stale === true);
+    assert.strictEqual(api.findings.get(key)?.startLine, 4);
+
+    const outcome = await vscode.commands.executeCommand<{ ok: boolean }>(
+      'aiReview.applyFix',
+      key,
+      {
+        silent: true,
+      },
+    );
+    assert.strictEqual(outcome.ok, false);
+    assert.strictEqual(doc.lineAt(45).text, '  return a * b; // dup');
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
   });
 
   test('tree lists findings by file; clicking one reveals its range; summary is shown', async () => {

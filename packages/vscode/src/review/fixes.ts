@@ -1,7 +1,14 @@
 import { applyFixToText, computeFix, locateQuote, type FixEdit } from '@ai-review/core';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { documentLines, uriKey, type FindingStore, type TrackedFinding } from './store';
+import { DIAGNOSTIC_SOURCE } from './diagnostics';
+import {
+  documentLines,
+  searchWindow,
+  uriKey,
+  type FindingStore,
+  type TrackedFinding,
+} from './store';
 
 export const PREVIEW_SCHEME = 'ai-review-fix';
 
@@ -30,7 +37,7 @@ export class FindingCodeActions implements vscode.CodeActionProvider {
     for (const f of this.store.forUri(doc.uri)) {
       if (f.status !== 'open' || f.endLine < first || f.startLine > last) continue;
       const diagnostics = context.diagnostics.filter(
-        (d) => d.source === 'AI Review' && d.range.start.line === f.startLine - 1,
+        (d) => d.source === DIAGNOSTIC_SOURCE && d.range.start.line === f.startLine - 1,
       );
       if (f.suggestion !== undefined && !f.stale) {
         const apply = new vscode.CodeAction(
@@ -106,9 +113,14 @@ async function plan(store: FindingStore, key: string): Promise<Planned> {
   }
   const doc = await vscode.workspace.openTextDocument(finding.uri);
   const lines = documentLines(doc);
-  const edit = computeFix(lines, finding);
+  // Only near the finding: an identical line elsewhere is different code.
+  const searchRange = searchWindow(finding);
+  const edit = computeFix(lines, finding, { searchRange });
   if (!edit) {
-    const stillThere = locateQuote(lines, finding.quote, { nearLine: finding.startLine });
+    const stillThere = locateQuote(lines, finding.quote, {
+      nearLine: finding.startLine,
+      searchRange,
+    });
     if (!stillThere) store.markStale(key);
     return {
       ok: false,
@@ -132,7 +144,8 @@ export async function applyFix(store: FindingStore, key: string): Promise<FixOut
     new vscode.Range(edit.startLine - 1, edit.startColumn, edit.endLine - 1, edit.endColumn),
     edit.newText.replace(/\n/g, eol),
   );
-  // Resolve first: the edit itself would otherwise re-anchor the finding as stale.
+  // Resolve first: the store only re-anchors open findings, so the edit removing
+  // the quote doesn't mark this one outdated.
   store.setStatus(key, 'resolved');
   const applied = await vscode.workspace.applyEdit(workspaceEdit);
   if (!applied) {

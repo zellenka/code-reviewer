@@ -3,6 +3,7 @@ import {
   SEVERITIES,
   describeMode,
   estimateCostUsd,
+  neutralizeMarkdown,
   severityRank,
   type Severity,
 } from '@ai-review/core';
@@ -99,7 +100,9 @@ export class FindingsTree implements vscode.TreeDataProvider<Node>, vscode.Dispo
         const [icon, color] = ICONS[f.severity];
         item.iconPath = new vscode.ThemeIcon(icon, new vscode.ThemeColor(color));
         item.description = `${f.anchor === 'file' ? 'file' : `L${f.startLine}`} · ${f.severity}/${f.category}${f.stale ? ' · outdated' : ''}`;
-        const tooltip = new vscode.MarkdownString(`**${f.title}**\n\n${f.body}`);
+        const tooltip = new vscode.MarkdownString(
+          `**${neutralizeMarkdown(f.title)}**\n\n${neutralizeMarkdown(f.body)}`,
+        );
         tooltip.isTrusted = false;
         item.tooltip = tooltip;
         item.contextValue = `finding${f.suggestion !== undefined && !f.stale ? ' fixable' : ''}`;
@@ -243,7 +246,8 @@ export class SummaryProvider implements vscode.TextDocumentContentProvider, vsco
     const session = this.store.session;
     if (!session?.result.summary) return '# AI Review\n\nNo summary for the last review.\n';
     const open = this.store.open();
-    return `# AI Review: ${describeMode(session.mode)}\n\n_${session.model.name} · ${countText(open)}_\n\n${session.result.summary}\n`;
+    // The Markdown preview loads images and renders HTML: neutralize the model's text.
+    return `# AI Review: ${describeMode(session.mode)}\n\n_${session.model.name} · ${countText(open)}_\n\n${neutralizeMarkdown(session.result.summary)}\n`;
   }
 
   dispose(): void {

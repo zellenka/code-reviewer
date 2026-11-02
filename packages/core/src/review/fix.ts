@@ -1,5 +1,5 @@
 import { normalizeEol } from '../diff/parse';
-import { locateQuote, normalizeWhitespace } from './anchor';
+import { locateQuote, normalizeWhitespace, type LocateOptions } from './anchor';
 import type { Finding } from './types';
 
 /**
@@ -20,13 +20,19 @@ export interface FixEdit {
  * current document lines. The quote is re-anchored first. Returns undefined when
  * there's no suggestion, or the quote can't be found reliably (fuzzy matches are
  * not used: the code changed, and replacing it could lose the user's edits).
+ * Pass `searchRange` to only look near the finding, so an identical line elsewhere
+ * in the file is never edited.
  */
 export function computeFix(
   lines: readonly string[],
   finding: Pick<Finding, 'quote' | 'suggestion' | 'startLine'>,
+  options: Pick<LocateOptions, 'searchRange'> = {},
 ): FixEdit | undefined {
   if (finding.suggestion === undefined) return undefined;
-  const match = locateQuote(lines, finding.quote, { nearLine: finding.startLine });
+  const match = locateQuote(lines, finding.quote, {
+    nearLine: finding.startLine,
+    ...(options.searchRange ? { searchRange: options.searchRange } : {}),
+  });
   if (!match || match.method === 'fuzzy') return undefined;
 
   const q = match.quoteLines;

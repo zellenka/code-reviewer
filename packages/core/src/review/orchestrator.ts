@@ -203,8 +203,8 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
           logger,
         });
         result.usage = addUsage(result.usage, summary.usage);
+        // Cancelling here only loses the summary: the findings are complete.
         if (summary.text) result.summary = summary.text;
-        if (options.signal?.aborted) result.cancelled = true;
       } catch (err) {
         // A missing summary must not lose the findings.
         const error = toProviderError(err);

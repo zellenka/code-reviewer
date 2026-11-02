@@ -79,6 +79,5 @@ function toDiagnostic(finding: TrackedFinding, doc: vscode.TextDocument | undefi
   );
   diagnostic.source = DIAGNOSTIC_SOURCE;
   diagnostic.code = `${finding.severity}/${finding.category}`;
-  if (finding.stale) diagnostic.tags = [vscode.DiagnosticTag.Unnecessary];
   return diagnostic;
 }
