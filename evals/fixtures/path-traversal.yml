@@ -1,0 +1,37 @@
+name: Path traversal
+description: A file name from the request is joined to the uploads directory without validation.
+before:
+  src/server.ts: |
+    import express from 'express';
+
+    const app = express();
+
+    app.get('/health', (_req, res) => {
+      res.send('ok');
+    });
+
+    export default app;
+after:
+  src/server.ts: |
+    import express from 'express';
+    import * as path from 'node:path';
+
+    const app = express();
+    const UPLOADS = path.resolve('uploads');
+
+    app.get('/health', (_req, res) => {
+      res.send('ok');
+    });
+
+    app.get('/files/:name', (req, res) => {
+      res.sendFile(path.join(UPLOADS, req.params.name));
+    });
+
+    export default app;
+expected:
+  - file: src/server.ts
+    lines: 12
+    category: security
+    severity: critical
+    title: Path traversal through the file name parameter
+    quote: 'res.sendFile(path.join(UPLOADS, req.params.name));'

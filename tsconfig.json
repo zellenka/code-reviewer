@@ -1,4 +1,17 @@
 {
   "files": [],
-  "references": [{ "path": "packages/core" }, { "path": "packages/vscode" }]
+  "references": [
+    {
+      "path": "packages/core"
+    },
+    {
+      "path": "packages/node-host"
+    },
+    {
+      "path": "packages/vscode"
+    },
+    {
+      "path": "evals"
+    }
+  ]
 }

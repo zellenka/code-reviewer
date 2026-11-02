@@ -74,6 +74,37 @@
         "command": "aiReview.clearAnthropicApiKey",
         "title": "Clear Anthropic API Key",
         "category": "AI Review"
+      },
+      {
+        "command": "aiReview.reviewStaged",
+        "title": "Review Staged Changes",
+        "category": "AI Review"
+      },
+      {
+        "command": "aiReview.reviewUnstaged",
+        "title": "Review Unstaged Changes",
+        "category": "AI Review",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "aiReview.reviewBranch",
+        "title": "Review Branch Changes",
+        "category": "AI Review"
+      },
+      {
+        "command": "aiReview.reviewFile",
+        "title": "Review Current File",
+        "category": "AI Review"
+      },
+      {
+        "command": "aiReview.reviewSelection",
+        "title": "Review Selection",
+        "category": "AI Review"
+      },
+      {
+        "command": "aiReview.clearFindings",
+        "title": "Clear Findings",
+        "category": "AI Review"
       }
     ],
     "configuration": {
@@ -143,8 +174,88 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "If a model's safety filter declines a request (security-related code can trigger this), let Anthropic retry it on a fallback model. Billed at the fallback model's rates."
+        },
+        "aiReview.baseBranch": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Base branch for **Review Branch Changes**. Empty = auto-detect (`origin/HEAD`, then `main`, then `master`)."
+        },
+        "aiReview.concurrency": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 16,
+          "markdownDescription": "Parallel model requests per review. `0` = default (2 for Copilot, 4 for Anthropic)."
+        },
+        "aiReview.severityThreshold": {
+          "type": "string",
+          "enum": [
+            "",
+            "critical",
+            "major",
+            "minor",
+            "nit"
+          ],
+          "enumDescriptions": [
+            "Use the repository setting (`.codereview.yml`, default `minor`).",
+            "",
+            "",
+            "",
+            ""
+          ],
+          "default": "",
+          "markdownDescription": "Hide findings below this severity. Can only make the repository's `.codereview.yml` threshold stricter, not looser."
+        },
+        "aiReview.confidenceThreshold": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1,
+          "markdownDescription": "Hide findings below this confidence (0–1). Can only make the repository's threshold stricter. `0` = use the repository setting (default 0.6)."
+        },
+        "aiReview.redactHighEntropyStrings": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Also replace long random-looking strings with `[REDACTED]` before sending code to the model. Known secret formats (API keys, private keys, passwords in code) are always redacted."
         }
       }
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "aiReview.reviewSelection",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "aiReview.reviewFile",
+          "when": "editorIsOpen"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "aiReview.reviewSelection",
+          "when": "editorHasSelection",
+          "group": "aiReview@1"
+        },
+        {
+          "command": "aiReview.reviewFile",
+          "group": "aiReview@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "aiReview.reviewFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "aiReview@1"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "aiReview.reviewUnstaged",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ]
     }
   },
   "scripts": {
@@ -156,7 +267,8 @@
     "clean": "tsc -b --clean && node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@ai-review/core": "workspace:*"
+    "@ai-review/core": "workspace:*",
+    "@ai-review/node-host": "workspace:*"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

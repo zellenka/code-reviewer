@@ -6,7 +6,7 @@ VS Code extension for AI code review (CodeRabbit-like), later also a CI/PR bot. 
 
 - [x] **Phase 0 — Repo foundation** (P0-1, P0-2, P0-3) — done 2026-10-30 ([#1](https://github.com/zellenka/code-reviewer/pull/1), [#2](https://github.com/zellenka/code-reviewer/pull/2))
 - [x] **Phase 1 — Providers** (P1-1, P1-2, P1-3, P1-4a, P1-4b) — code done 2026-11-01; manual checks pending: Copilot round trip via "AI Review: Test Model Connection", Anthropic live test (`pnpm test:live`)
-- [ ] **Phase 2 — Single-pass review (MVP)** (P2-0 … P2-10)
+- [x] **Phase 2 — Single-pass review (MVP)** (P2-0 … P2-10) — code done 2026-11-01; pending: live evals with Anthropic (P2-4 parse-rate AC, MVP precision gate), manual review run on a real repo with Copilot, dogfooding
 - [ ] **Phase 3 — Real review UX** (P3-1 … P3-6)
 - [ ] **Phase 4 — Context & agent loop** (P4-1 … P4-6)
 - [ ] **Phase 5 — Quality & state** (P5-1 … P5-4)
@@ -212,7 +212,15 @@ Each task: **ID · title** — description. *AC* = acceptance criteria. *Deps* =
 - **P1-4a · Provider & model picker** — quick pick + status bar item, stored in settings; switching takes effect without reload. *AC:* choosing a Copilot model is used by the next request (ext test with a stubbed provider). *Deps:* P1-3
 - **P1-4b · Anthropic key storage** — key in `SecretStorage` with "Set/Clear API key" commands, never in settings.json; Anthropic appears in the picker when a key is set. *AC:* key survives reload, isn't in any settings file; `auth` error offers "Set API key". *Deps:* P1-2, P1-4a
 
-### Phase 2 — Single-pass review (MVP)
+### Phase 2 — Single-pass review (MVP) ✅ Code done
+> **Implementation notes (2026-11-01):**
+> - **Git:** the extension finds repos through the built-in Git extension (multi-repo, active editor first) and uses its git binary, but diffs come from `node-host`'s `GitCliDiffSource` — one implementation for the extension, evals and the future CLI. `branch` mode includes uncommitted and untracked files (merge-base → working tree). `file`/`selection` review the working-tree content as if it were all added.
+> - **Redaction (P2-9):** known secret formats (cloud/API keys, PEM blocks, JWTs, connection-string passwords, `password = "…"` values) are always redacted; high-entropy redaction is the opt-in `aiReview.redactHighEntropyStrings`. Lines are only changed in place, so line numbers stay valid; a finding that quotes a redacted line gets the real line back locally.
+> - **Changed lines** for `onlyChangedLines` = added lines plus the new-side lines right next to a deletion (where deleted-code findings are anchored). Among duplicate quotes, a match on a changed line wins.
+> - **Chunk budget:** `min(24k, (maxInputTokens − prompt − tool schema − output reserve) × 0.8)`; tokens are estimated (chars/3.5), hence the margin. More than 40 chunks → "too large, narrow the scope".
+> - **Errors:** `auth`/`consent`/`quota`/`notFound` stop the whole review; other errors fail only their chunk and are listed in the result.
+> - **Evals:** fixtures are single YAML files (`before`/`after`/`expected`). `--provider mock` is an oracle that reports the expected findings with wrong line numbers; it checks the pipeline (CI requires 100%). Live: `pnpm eval --provider anthropic [--model …] [--json report.json] [--strict]`, also in the manual "Live tests" workflow.
+
 - **P2-0 · Config schema & loader** — zod schema for `.codereview.yml` (see above), defaults, precedence with settings, file watcher reload. *AC:* unit tests for defaults, invalid file (warning + defaults), precedence rules. *Deps:* P0-1
 - **P2-1 · DiffSource + parser** — core: unified-diff parser → `UnifiedDiff` (CRLF normalized). VS Code: `VsCodeDiffSource` via built-in Git extension API for all `ReviewMode`s; untracked files included in `unstaged`; base auto-detected (`origin/HEAD` → `main` → `master`, overridable), diff from merge-base. Multi-repo workspace: review the repo of the active editor, else ask. No repo / detached HEAD → clear message. *AC:* parser fixtures for add/modify/delete/rename/binary/CRLF/no-newline-at-EOF parse correctly; ext test produces a diff for each mode on a temp repo. *Deps:* P0-2
 - **P2-2 · Ignore & filter** — built-in ignores: lockfiles, `dist/`, `build/`, minified, snapshots, `@generated` markers, binaries, **secrets** (`.env*`, `*.pem`, `*.key`, `*.p12`, `id_rsa*`), plus config `ignore:`. Deleted files are listed in the summary but not reviewed. *AC:* ignored files never reach the provider (asserted with mock provider). *Deps:* P2-0, P2-1

@@ -1,0 +1,19 @@
+{
+  "name": "@ai-review/evals",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Review quality evals: fixture diffs with expected findings, and a runner.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@ai-review/core": "workspace:*",
+    "@ai-review/node-host": "workspace:*",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0"
+  }
+}

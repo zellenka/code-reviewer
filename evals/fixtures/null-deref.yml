@@ -1,0 +1,35 @@
+name: Unchecked find() result
+description: The result of Array.find is used without checking for undefined.
+before:
+  src/orders.ts: |
+    export interface Order {
+      id: string;
+      status: 'open' | 'shipped';
+    }
+
+    export function countOpen(orders: Order[]): number {
+      return orders.filter((o) => o.status === 'open').length;
+    }
+after:
+  src/orders.ts: |
+    export interface Order {
+      id: string;
+      status: 'open' | 'shipped';
+    }
+
+    export function countOpen(orders: Order[]): number {
+      return orders.filter((o) => o.status === 'open').length;
+    }
+
+    export function markShipped(orders: Order[], id: string): Order[] {
+      const order = orders.find((o) => o.id === id);
+      order!.status = 'shipped';
+      return orders;
+    }
+expected:
+  - file: src/orders.ts
+    lines: 12
+    category: bug
+    severity: major
+    title: Crashes when no order has the given id
+    quote: "order!.status = 'shipped';"

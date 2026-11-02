@@ -1,0 +1,41 @@
+name: Clean refactor
+description: A correct, tested refactor. Any finding is a false positive.
+before:
+  src/format.ts: |
+    export function formatPrice(cents: number): string {
+      const dollars = Math.floor(cents / 100);
+      const rest = cents % 100;
+      return '$' + dollars + '.' + (rest < 10 ? '0' + rest : rest);
+    }
+  src/format.test.ts: |
+    import { expect, it } from 'vitest';
+    import { formatPrice } from './format';
+
+    it('formats cents', () => {
+      expect(formatPrice(1234)).toBe('$12.34');
+    });
+after:
+  src/format.ts: |
+    const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+
+    /** Formats an amount in cents as US dollars, e.g. 1234 → "$12.34". */
+    export function formatPrice(cents: number): string {
+      if (!Number.isInteger(cents)) {
+        throw new RangeError(`cents must be an integer, got ${cents}`);
+      }
+      return formatter.format(cents / 100);
+    }
+  src/format.test.ts: |
+    import { expect, it } from 'vitest';
+    import { formatPrice } from './format';
+
+    it('formats cents', () => {
+      expect(formatPrice(1234)).toBe('$12.34');
+      expect(formatPrice(5)).toBe('$0.05');
+      expect(formatPrice(0)).toBe('$0.00');
+      expect(formatPrice(-250)).toBe('-$2.50');
+    });
+
+    it('rejects fractional cents', () => {
+      expect(() => formatPrice(1.5)).toThrow(RangeError);
+    });

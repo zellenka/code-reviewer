@@ -25,7 +25,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "changeset": "changeset",
-    "clean": "pnpm -r run clean"
+    "clean": "pnpm -r run clean",
+    "eval": "tsc -b evals && tsx evals/src/run.ts"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.7",
@@ -35,6 +36,7 @@
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.0.0",
     "prettier": "^3.6.2",
+    "tsx": "^4.23.15",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.46.0",
     "vitest": "^5.0.5"

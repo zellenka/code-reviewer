@@ -1,0 +1,40 @@
+name: Missing await
+description: An async call inside try/catch is not awaited, so failures are never caught and the lock is released too early.
+before:
+  src/sync.ts: |
+    import { acquireLock, releaseLock, uploadAll } from './io';
+
+    export async function syncNow(): Promise<boolean> {
+      await acquireLock();
+      try {
+        await uploadAll();
+        return true;
+      } finally {
+        await releaseLock();
+      }
+    }
+after:
+  src/sync.ts: |
+    import { acquireLock, releaseLock, uploadAll } from './io';
+    import { log } from './log';
+
+    export async function syncNow(): Promise<boolean> {
+      await acquireLock();
+      try {
+        uploadAll();
+        log.info('upload finished');
+        return true;
+      } catch (err) {
+        log.error('upload failed', err);
+        return false;
+      } finally {
+        await releaseLock();
+      }
+    }
+expected:
+  - file: src/sync.ts
+    lines: 7
+    category: bug
+    severity: major
+    title: uploadAll() is not awaited, so errors are not caught and the lock is released early
+    quote: 'uploadAll();'
