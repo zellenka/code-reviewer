@@ -19,6 +19,7 @@ import {
   emptyUsage,
   addUsage,
   estimateCostUsd,
+  estimateReview,
   runReview,
   type ChatRequest,
   type LLMProvider,
@@ -28,7 +29,7 @@ import {
 } from '@ai-review/core';
 import { GitCliDiffSource } from '@ai-review/node-host';
 import { loadFixtures, type Fixture } from './fixtures';
-import { scoreFixture, totals, type FixtureScore } from './score';
+import { estimateError, scoreFixture, totals, type FixtureScore } from './score';
 
 const GIT_ENV = {
   ...process.env,
@@ -39,7 +40,14 @@ const GIT_ENV = {
 };
 
 /** MVP exit criteria from the implementation plan. */
-const GATES = { precision: 0.7, cleanFindings: 0, nitsPer100Lines: 3, parseRate: 0.95 };
+const GATES = {
+  precision: 0.7,
+  cleanFindings: 0,
+  nitsPer100Lines: 3,
+  parseRate: 0.95,
+  /** P3-4: pre-run input-token estimate within ±30% of actual (reported, not gated). */
+  estimateError: 0.3,
+};
 
 async function main(): Promise<number> {
   const { values } = parseArgs({
@@ -50,8 +58,10 @@ async function main(): Promise<number> {
       json: { type: 'string' },
       strict: { type: 'boolean', default: false },
       concurrency: { type: 'string' },
+      'no-summary': { type: 'boolean', default: false },
     },
   });
+  const summary = !values['no-summary'];
   const fixtures = await loadFixtures(undefined, values.fixture);
   if (!fixtures.length) {
     console.error('No fixtures matched.');
@@ -73,20 +83,34 @@ async function main(): Promise<number> {
         0,
       );
       try {
+        const estimate = estimateReview(diff, {
+          model: m,
+          config: DEFAULT_CONFIG,
+          summary,
+        });
         const result = await runReview(diff, {
           provider,
           model: m,
           config: DEFAULT_CONFIG,
+          summary,
           ...(values.concurrency ? { concurrency: Number(values.concurrency) } : {}),
         });
         usage = addUsage(usage, result.usage);
-        scores.push(
-          scoreFixture(fixture.id, fixture.expected, result.findings, {
+        scores.push({
+          ...scoreFixture(fixture.id, fixture.expected, result.findings, {
             changedLines,
             outcomes: result.chunks.outcomes,
             ...(result.errors.length ? { error: result.errors.join('; ') } : {}),
           }),
-        );
+          summary: !!result.summary,
+          inputTokens: {
+            estimated: estimate.inputTokens,
+            actual:
+              result.usage.inputTokens +
+              (result.usage.cacheReadTokens ?? 0) +
+              (result.usage.cacheWriteTokens ?? 0),
+          },
+        });
       } catch (err) {
         scores.push(
           scoreFixture(fixture.id, fixture.expected, [], {
@@ -118,6 +142,13 @@ async function main(): Promise<number> {
     `usage: ${usage.inputTokens} in / ${usage.outputTokens} out, ${usage.requests} request(s)${cost !== undefined ? `, ≈ $${cost.toFixed(4)}` : ''}`,
   );
   if (t.errors) console.log(`fixtures with errors: ${t.errors}`);
+  const withSummary = scores.filter((s) => s.summary).length;
+  if (summary) console.log(`summaries:   ${withSummary}/${scores.length}`);
+  const estimates = scores.flatMap((s) => (s.inputTokens ? [estimateError(s.inputTokens)] : []));
+  const worstEstimate = estimates.length ? Math.max(...estimates.map(Math.abs)) : 0;
+  console.log(
+    `input-token estimate: worst error ${pct(worstEstimate)}   (target ≤ ${pct(GATES.estimateError)})`,
+  );
 
   if (values.json) {
     await writeFile(
@@ -138,7 +169,12 @@ async function main(): Promise<number> {
     t.nitsPer100Lines <= GATES.nitsPer100Lines;
   if (values.provider === 'mock') {
     // The oracle must be perfect; anything less is a pipeline bug.
-    const perfect = t.parseRate === 1 && t.precision === 1 && t.recall === 1 && t.errors === 0;
+    const perfect =
+      t.parseRate === 1 &&
+      t.precision === 1 &&
+      t.recall === 1 &&
+      t.errors === 0 &&
+      (!summary || withSummary === scores.length);
     console.log(perfect ? '\nmock run: pipeline OK' : '\nmock run: pipeline FAILED');
     return perfect ? 0 : 1;
   }
@@ -173,6 +209,14 @@ async function createProvider(
 
 /** Reports every expected finding whose quote is in the request, 3 lines off. */
 function oracle(req: ChatRequest, fixture: Fixture): MockStep {
+  if (!req.tools) {
+    // The summary request (no tools): any non-empty markdown will do.
+    return {
+      events: [
+        { type: 'text', delta: `## Walkthrough\n- ${fixture.id}\n\n## Top risks\n- see findings` },
+      ],
+    };
+  }
   const sent = req.messages
     .flatMap((m) => m.content)
     .map((p) => (p.type === 'text' ? p.text : ''))
@@ -229,6 +273,11 @@ function printFixture(s: FixtureScore): void {
   console.log(
     `${s.id.padEnd(28)} ${status.padEnd(6)} reported ${s.reported}, false positives ${s.falsePositives.length}, parse ${s.outcomes.join(',')}`,
   );
+  if (s.inputTokens) {
+    console.log(
+      `    input tokens: estimated ${s.inputTokens.estimated}, actual ${s.inputTokens.actual} (${signedPct(estimateError(s.inputTokens))})${s.summary === false ? ', no summary' : ''}`,
+    );
+  }
   for (const m of s.misses) console.log(`    miss: ${m.file}:${m.lines} ${m.title}`);
   for (const f of s.falsePositives)
     console.log(`    extra: ${f.file}:${f.startLine} [${f.severity}/${f.category}] ${f.title}`);
@@ -237,6 +286,10 @@ function printFixture(s: FixtureScore): void {
 
 function pct(n: number): string {
   return `${(n * 100).toFixed(0)}%`;
+}
+
+function signedPct(n: number): string {
+  return `${n >= 0 ? '+' : ''}${pct(n)}`;
 }
 
 main().then(

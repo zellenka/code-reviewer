@@ -4,6 +4,8 @@ export interface QuoteMatch {
   startLine: number;
   endLine: number;
   method: 'exact' | 'normalized' | 'fuzzy';
+  /** The quote lines that matched (after stripping copied line numbers or +/- markers). */
+  quoteLines: string[];
 }
 
 export interface LocateOptions {
@@ -11,7 +13,13 @@ export interface LocateOptions {
   nearLine?: number;
   /** Among several exact/normalized matches, prefer ones where this is true (e.g. changed lines). */
   prefer?: (startLine: number, endLine: number) => boolean;
-  /** Line ranges (1-based, inclusive) searched by the fuzzy step. Default: whole file. */
+  /**
+   * Only matches fully inside this range (1-based, inclusive) count, in every step.
+   * Use it when the code is known to be near a line, so an identical line elsewhere
+   * in the file isn't picked up. Default: whole file.
+   */
+  searchRange?: { start: number; end: number };
+  /** Line ranges searched by the fuzzy step (clipped to `searchRange`). Default: whole file. */
   fuzzyRanges?: { start: number; end: number }[];
   /** Minimum similarity for a fuzzy match. Default 0.8. */
   fuzzyThreshold?: number;
@@ -42,18 +50,29 @@ export function locateQuote(
 
   for (const method of ['exact', 'normalized'] as const) {
     for (const variant of variants) {
-      const hits = findAll(lines, variant, method === 'normalized');
+      const hits = findAll(lines, variant, method === 'normalized').filter((h) =>
+        inRange(h, h + variant.length - 1, options.searchRange),
+      );
       if (hits.length) {
         const preferred = options.prefer
           ? hits.filter((h) => options.prefer!(h, h + variant.length - 1))
           : [];
         const start = nearest(preferred.length ? preferred : hits, options.nearLine);
-        return { startLine: start, endLine: start + variant.length - 1, method };
+        return {
+          startLine: start,
+          endLine: start + variant.length - 1,
+          method,
+          quoteLines: variant,
+        };
       }
     }
   }
   const fuzzy = fuzzyFind(lines, base, options);
-  return fuzzy ? { ...fuzzy, method: 'fuzzy' } : undefined;
+  return fuzzy ? { ...fuzzy, method: 'fuzzy', quoteLines: base } : undefined;
+}
+
+function inRange(start: number, end: number, range: LocateOptions['searchRange']): boolean {
+  return !range || (start >= range.start && end <= range.end);
 }
 
 function trimBlankLines(lines: string[]): string[] {
@@ -107,7 +126,10 @@ function fuzzyFind(
   options: LocateOptions,
 ): { startLine: number; endLine: number } | undefined {
   const threshold = options.fuzzyThreshold ?? 0.8;
-  const ranges = options.fuzzyRanges ?? [{ start: 1, end: lines.length }];
+  const limit = options.searchRange;
+  const ranges = (options.fuzzyRanges ?? [{ start: 1, end: lines.length }]).map((r) =>
+    limit ? { start: Math.max(r.start, limit.start), end: Math.min(r.end, limit.end) } : r,
+  );
   const q = quote.map(normalizeWhitespace);
   let best: { start: number; score: number } | undefined;
   for (const range of ranges) {

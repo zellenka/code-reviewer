@@ -104,7 +104,64 @@
       {
         "command": "aiReview.clearFindings",
         "title": "Clear Findings",
+        "category": "AI Review",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "aiReview.showSummary",
+        "title": "Show Review Summary",
+        "category": "AI Review",
+        "icon": "$(book)"
+      },
+      {
+        "command": "aiReview.applyFix",
+        "title": "Apply Fix",
+        "category": "AI Review",
+        "icon": "$(check)"
+      },
+      {
+        "command": "aiReview.previewFix",
+        "title": "Preview Fix",
+        "category": "AI Review",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "aiReview.resolveFinding",
+        "title": "Mark Resolved",
+        "category": "AI Review",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "aiReview.dismissFinding",
+        "title": "Dismiss",
+        "category": "AI Review",
+        "icon": "$(close)"
+      },
+      {
+        "command": "aiReview.reopenFinding",
+        "title": "Reopen",
+        "category": "AI Review",
+        "icon": "$(issue-reopened)"
+      },
+      {
+        "command": "aiReview.revealFinding",
+        "title": "Go to Finding",
         "category": "AI Review"
+      }
+    ],
+    "views": {
+      "scm": [
+        {
+          "id": "aiReview.findings",
+          "name": "AI Review",
+          "icon": "$(sparkle)"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "aiReview.findings",
+        "contents": "Review your local changes with AI. Findings show up here, inline in the editor and in the Problems panel.\n[Review Unstaged Changes](command:aiReview.reviewUnstaged)\n[Review Staged Changes](command:aiReview.reviewStaged)\n[Review Branch Changes](command:aiReview.reviewBranch)\nModel: [Select Model](command:aiReview.selectModel)"
       }
     ],
     "configuration": {
@@ -217,6 +274,17 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Also replace long random-looking strings with `[REDACTED]` before sending code to the model. Known secret formats (API keys, private keys, passwords in code) are always redacted."
+        },
+        "aiReview.summary": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "After the review, make one extra request for a summary: a walkthrough of the change per file and the top risks. Turn off to save a request."
+        },
+        "aiReview.costConfirmationThreshold": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0,
+          "markdownDescription": "Ask before running a review whose estimated cost (upper bound, USD) is above this amount. Applies to providers with known prices (Anthropic). `0` = always ask."
         }
       }
     },
@@ -229,6 +297,100 @@
         {
           "command": "aiReview.reviewFile",
           "when": "editorIsOpen"
+        },
+        {
+          "command": "aiReview.applyFix",
+          "when": "false"
+        },
+        {
+          "command": "aiReview.previewFix",
+          "when": "false"
+        },
+        {
+          "command": "aiReview.resolveFinding",
+          "when": "false"
+        },
+        {
+          "command": "aiReview.dismissFinding",
+          "when": "false"
+        },
+        {
+          "command": "aiReview.reopenFinding",
+          "when": "false"
+        },
+        {
+          "command": "aiReview.revealFinding",
+          "when": "false"
+        },
+        {
+          "command": "aiReview.showSummary",
+          "when": "aiReview.hasReview"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "aiReview.applyFix",
+          "when": "commentController == aiReview && commentThread =~ /\\bfixable\\b/",
+          "group": "inline@1"
+        },
+        {
+          "command": "aiReview.previewFix",
+          "when": "commentController == aiReview && commentThread =~ /\\bfixable\\b/",
+          "group": "inline@2"
+        },
+        {
+          "command": "aiReview.resolveFinding",
+          "when": "commentController == aiReview && commentThread =~ /\\bopen\\b/",
+          "group": "inline@3"
+        },
+        {
+          "command": "aiReview.dismissFinding",
+          "when": "commentController == aiReview && commentThread =~ /\\bopen\\b/",
+          "group": "inline@4"
+        },
+        {
+          "command": "aiReview.reopenFinding",
+          "when": "commentController == aiReview && commentThread =~ /\\bresolved\\b/",
+          "group": "inline@1"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "aiReview.reviewUnstaged",
+          "when": "view == aiReview.findings",
+          "group": "navigation@1"
+        },
+        {
+          "command": "aiReview.showSummary",
+          "when": "view == aiReview.findings && aiReview.hasReview",
+          "group": "navigation@2"
+        },
+        {
+          "command": "aiReview.clearFindings",
+          "when": "view == aiReview.findings && aiReview.hasReview",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "aiReview.applyFix",
+          "when": "view == aiReview.findings && viewItem =~ /\\bfixable\\b/",
+          "group": "inline@1"
+        },
+        {
+          "command": "aiReview.resolveFinding",
+          "when": "view == aiReview.findings && viewItem =~ /^finding/",
+          "group": "inline@2"
+        },
+        {
+          "command": "aiReview.dismissFinding",
+          "when": "view == aiReview.findings && viewItem =~ /^finding/",
+          "group": "inline@3"
+        },
+        {
+          "command": "aiReview.previewFix",
+          "when": "view == aiReview.findings && viewItem =~ /\\bfixable\\b/",
+          "group": "fix@1"
         }
       ],
       "editor/context": [

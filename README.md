@@ -6,7 +6,7 @@ AI code review for your **local changes** in VS Code — staged, unstaged, branc
 
 Free and open source. **Bring your own model:** GitHub Copilot (no key needed) or your own Anthropic API key.
 
-> **Status: early development (MVP).** Reviews run and findings show up in the Problems panel. Inline comment threads, one-click fixes and cost estimates are next. See [implementation-plan.md](implementation-plan.md) for the roadmap.
+> **Status: early development.** Reviews run; findings show up inline as comment threads, in the Problems panel and in the AI Review view, with one-click fixes and a summary. Deeper context (an agent that reads related code) is next. See [implementation-plan.md](implementation-plan.md) for the roadmap.
 
 ## Requirements
 
@@ -24,7 +24,14 @@ Free and open source. **Bring your own model:** GitHub Copilot (no key needed) o
    - **AI Review: Review Staged Changes**
    - **AI Review: Review Branch Changes** (everything since the branch left `main`; set `aiReview.baseBranch` to change the base)
    - **AI Review: Review Current File** / **Review Selection** (also in the editor's right-click menu)
-3. Findings appear in the **Problems** panel: critical = error, major = warning, minor = info, nit = hint. **AI Review: Clear Findings** removes them.
+3. Look at the findings:
+   - **Inline comment threads** on the code, with buttons to apply or preview the fix, mark resolved, or dismiss.
+   - The **AI Review** view in the Source Control sidebar: a summary of the change (walkthrough + top risks), findings grouped by file (click to jump to the code), and review details (model, tokens, cost, dropped findings).
+   - The **Problems** panel: critical = error, major = warning, minor = info, nit = hint.
+4. Fix: when a finding suggests a change, use the light bulb (**Apply fix** or **Preview fix…**) or the thread's buttons. Fixes are normal edits, so **Undo** works.
+5. Keep editing: findings move with your code. If the code a finding refers to is changed or deleted, it's marked _outdated_ and its fix is disabled. **AI Review: Clear Findings** removes all findings.
+
+Turn off the summary request with the `aiReview.summary` setting.
 
 ## Configuration (`.codereview.yml`)
 
@@ -68,7 +75,8 @@ Diff content is marked as untrusted data in the prompt, so instructions hidden i
 ## Cost
 
 - **Copilot:** nothing extra beyond your Copilot plan, but reviews count against its request limits. The extension shows how many requests a review uses.
-- **Anthropic:** you pay Anthropic per token. Before large reviews the extension shows an estimate and asks you to confirm (default threshold $0.50, configurable). Prompt caching lowers the cost of repeated context.
+- **Anthropic:** you pay Anthropic per token. Before each review the extension estimates the cost; if the upper estimate is above `aiReview.costConfirmationThreshold` (default $0.50) it asks you to confirm. The actual tokens and cost are shown after the review. Prompt caching lowers the cost of repeated context.
+- The summary is one extra request per review; turn it off with `aiReview.summary`.
 - Narrow the scope (staged changes, one file, a selection) to keep reviews cheap and fast.
 
 ## Contributing

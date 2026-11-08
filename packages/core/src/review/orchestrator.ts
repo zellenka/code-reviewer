@@ -1,22 +1,25 @@
 import type { ReviewConfig } from '../config/schema';
-import type { UnifiedDiff } from '../diff/types';
+import type { FileDiff, UnifiedDiff } from '../diff/types';
 import { noopLogger, type Logger } from '../logger';
 import { isProviderError, toProviderError } from '../provider/errors';
 import type { LLMProvider, ModelInfo } from '../provider/types';
-import { addUsage, emptyUsage, estimateTokens } from '../provider/usage';
+import { addUsage, emptyUsage, estimateCostUsd, estimateTokens } from '../provider/usage';
 import { chunkFiles, renderChunk, type Chunk } from './chunker';
 import { filterFiles } from './filter';
 import { buildSystemPrompt, buildUserPrompt } from './prompt';
 import { REPORT_FINDINGS_TOOL } from './output';
 import { redactFiles } from './redact';
 import { reviewChunk } from './reviewer';
-import type { DropReason, RawFinding, ReviewResult } from './types';
+import { buildSummarySystemPrompt, summarizeReview } from './summarize';
+import type { DropReason, RawFinding, ReviewResult, SkippedFile } from './types';
 import { validateFindings } from './validate';
 
 export interface ReviewProgress {
   chunksTotal: number;
   chunksDone: number;
   findings: number;
+  /** 'summary' while the summary request runs. */
+  phase?: 'review' | 'summary';
 }
 
 export interface ReviewOptions {
@@ -36,6 +39,8 @@ export interface ReviewOptions {
   maxChunks?: number;
   /** Output tokens per request. Default min(model max, 16k). */
   maxOutputTokens?: number;
+  /** One extra request for a walkthrough + top risks (`ReviewResult.summary`). Default false. */
+  summary?: boolean;
 }
 
 /** Errors that will fail every chunk the same way: stop the whole review. */
@@ -79,18 +84,8 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
   options.signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
-    const { files, skipped } = filterFiles(diff.files, config.ignore);
-    const redacted = redactFiles(files, { highEntropy: options.redactHighEntropy ?? false });
+    const { files, skipped, redacted, chunks, outputTokens } = prepareReview(diff, options);
     if (redacted.count) logger.info(`redacted ${redacted.count} secret(s) before sending`);
-
-    const { chunkTokens, outputTokens } = chunkBudget(model, config, options);
-    if (chunkTokens < 500) {
-      throw new Error(`${model.name} has too small an input limit for a review.`);
-    }
-    const chunks = chunkFiles(redacted.files, {
-      maxTokens: chunkTokens,
-      ...(options.maxChunks !== undefined ? { maxChunks: options.maxChunks } : {}),
-    });
     logger.info(
       `reviewing ${files.length} file(s) in ${chunks.length} request(s) with ${model.id}; skipped ${skipped.length}`,
     );
@@ -188,8 +183,139 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
     logger.info(
       `review done: ${result.findings.length} finding(s), ${result.chunks.failed} failed part(s)${result.cancelled ? ', cancelled' : ''}`,
     );
+
+    if (options.summary && !result.cancelled && result.chunks.completed > 0) {
+      options.onProgress?.({
+        chunksTotal: chunks.length,
+        chunksDone: chunks.length,
+        findings: result.findings.length,
+        phase: 'summary',
+      });
+      try {
+        const summary = await summarizeReview({
+          provider,
+          model,
+          config,
+          files: redacted.files,
+          skipped,
+          findings: result.findings,
+          signal: controller.signal,
+          logger,
+        });
+        result.usage = addUsage(result.usage, summary.usage);
+        // Cancelling here only loses the summary: the findings are complete.
+        if (summary.text) result.summary = summary.text;
+      } catch (err) {
+        // A missing summary must not lose the findings.
+        const error = toProviderError(err);
+        logger.warn(`summary failed: ${error.message}`);
+        result.errors.push(`Summary: ${error.message}`);
+      }
+    }
     return result;
   } finally {
     options.signal?.removeEventListener('abort', onAbort);
   }
+}
+
+export interface PreparedReview {
+  /** Files that will be reviewed (before redaction; used to restore quotes). */
+  files: FileDiff[];
+  skipped: SkippedFile[];
+  redacted: { files: FileDiff[]; count: number };
+  chunks: Chunk[];
+  outputTokens: number;
+}
+
+type PrepareOptions = Pick<
+  ReviewOptions,
+  'model' | 'config' | 'redactHighEntropy' | 'maxChunkTokens' | 'maxChunks' | 'maxOutputTokens'
+>;
+
+/** Filter → redact → chunk. Throws ReviewTooLargeError when the diff needs too many requests. */
+export function prepareReview(diff: UnifiedDiff, options: PrepareOptions): PreparedReview {
+  const { model, config } = options;
+  const { files, skipped } = filterFiles(diff.files, config.ignore);
+  const redacted = redactFiles(files, { highEntropy: options.redactHighEntropy ?? false });
+  const { chunkTokens, outputTokens } = chunkBudget(model, config, options);
+  if (chunkTokens < 500) {
+    throw new Error(`${model.name} has too small an input limit for a review.`);
+  }
+  const chunks = chunkFiles(redacted.files, {
+    maxTokens: chunkTokens,
+    ...(options.maxChunks !== undefined ? { maxChunks: options.maxChunks } : {}),
+  });
+  return { files, skipped, redacted, chunks, outputTokens };
+}
+
+/** Output tokens one review request typically uses: none found … many long findings. */
+export const OUTPUT_TOKENS_PER_REQUEST = { low: 150, high: 2_000 } as const;
+/** Output tokens of the summary request. */
+export const SUMMARY_OUTPUT_TOKENS = { low: 200, high: 800 } as const;
+
+export interface ReviewEstimate {
+  /** Files that would be sent. */
+  files: number;
+  skipped: number;
+  /** Model requests, without repair retries. */
+  requests: number;
+  /** Estimated input tokens (chars / 3.5), without repair retries or caching. */
+  inputTokens: number;
+  outputTokens: { low: number; high: number };
+  /** USD; only when the model has pricing. */
+  costUsd?: { low: number; high: number };
+}
+
+/**
+ * Estimates what a review will send before running it: same filtering and chunking
+ * as `runReview`, so the request count is exact; tokens are estimated.
+ */
+export function estimateReview(
+  diff: UnifiedDiff,
+  options: PrepareOptions & { summary?: boolean },
+): ReviewEstimate {
+  const { model, config } = options;
+  const prepared = prepareReview(diff, options);
+  const fixed =
+    estimateTokens(buildSystemPrompt({ config, jsonOnly: !model.supportsTools })) +
+    (model.supportsTools ? estimateTokens(JSON.stringify(REPORT_FINDINGS_TOOL)) : 0);
+  let inputTokens = prepared.chunks.reduce(
+    (sum, chunk) => sum + fixed + estimateTokens(buildUserPrompt(renderChunk(chunk))),
+    0,
+  );
+  let requests = prepared.chunks.length;
+  const outputTokens = {
+    low: requests * OUTPUT_TOKENS_PER_REQUEST.low,
+    high: requests * OUTPUT_TOKENS_PER_REQUEST.high,
+  };
+  if (options.summary && requests > 0) {
+    requests++;
+    // The summary sends at most ~12k tokens of diff plus stats and findings.
+    const diffTokens = Math.min(
+      12_000,
+      prepared.chunks.reduce((sum, c) => sum + c.tokens, 0),
+    );
+    inputTokens +=
+      estimateTokens(buildSummarySystemPrompt(config)) +
+      diffTokens +
+      prepared.redacted.files.length * 20 +
+      200;
+    outputTokens.low += SUMMARY_OUTPUT_TOKENS.low;
+    outputTokens.high += SUMMARY_OUTPUT_TOKENS.high;
+  }
+  const estimate: ReviewEstimate = {
+    files: prepared.files.length,
+    skipped: prepared.skipped.length,
+    requests,
+    inputTokens,
+    outputTokens,
+  };
+  if (model.pricing) {
+    const usage = (out: number) => ({ inputTokens, outputTokens: out, requests });
+    estimate.costUsd = {
+      low: estimateCostUsd(usage(outputTokens.low), model.pricing),
+      high: estimateCostUsd(usage(outputTokens.high), model.pricing),
+    };
+  }
+  return estimate;
 }
