@@ -13,6 +13,8 @@ const expectedSchema = z.object({
   title: z.string(),
   /** Exact new-side code; the mock provider reports it. */
   quote: z.string(),
+  /** Only findable by reading code outside the diff (agentic mode should find it). */
+  crossFile: z.boolean().default(false),
 });
 
 const fixtureSchema = z.object({

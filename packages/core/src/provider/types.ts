@@ -21,13 +21,18 @@ export interface ModelInfo {
   maxOutputTokens: number;
   supportsTools: boolean;
   pricing?: ModelPricing;
+  /**
+   * Set when the provider caches prompt prefixes marked with `cache` hints.
+   * `minTokens`: shorter prefixes are not cached.
+   */
+  promptCaching?: { minTokens: number };
 }
 
 export type ContentPart =
   /** `cache` = provider-agnostic cache breakpoint hint. Providers without caching ignore it. */
   | { type: 'text'; text: string; cache?: boolean }
   | { type: 'tool_call'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; callId: string; content: string; isError?: boolean }
+  | { type: 'tool_result'; callId: string; content: string; isError?: boolean; cache?: boolean }
   /**
    * Provider-specific content that must be sent back unchanged when the
    * conversation continues (e.g. Anthropic thinking blocks). Other providers drop it.

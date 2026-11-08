@@ -8,3 +8,4 @@ export * from './anthropic';
 export * from './config';
 export * from './diff';
 export * from './review';
+export * from './agent';

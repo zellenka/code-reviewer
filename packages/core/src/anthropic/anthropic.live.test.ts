@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_CONFIG } from '../config/schema';
+import { addedFileDiff } from '../diff/parse';
 import { collectChat } from '../provider/collect';
+import { runReview } from '../review/orchestrator';
 import type { Message, ToolDef } from '../provider/types';
 import { AnthropicProvider } from './provider';
 
@@ -61,4 +64,38 @@ describe.skipIf(!apiKey)('AnthropicProvider (live)', () => {
     expect(second.text).toContain('42');
     expect(second.usage.requests).toBe(1);
   });
+
+  it('reads the shared prompt prefix from the cache in later parts (P4-5)', async () => {
+    const provider = new AnthropicProvider({ apiKey });
+    const info = (await provider.listModels()).find((m) => m.id === model)!;
+    // Small parts so the diff needs several requests; rules make the shared prefix
+    // clearly longer than the minimum cacheable length.
+    const files = Array.from({ length: 4 }, (_, i) =>
+      addedFileDiff(
+        `src/m${i}.ts`,
+        Array.from({ length: 120 }, (_, n) => `export const k${i}_${n} = ${n} * ${i};\n`).join(''),
+      ),
+    );
+    const rules = {
+      sources: [
+        {
+          path: 'AGENTS.md',
+          text: Array.from({ length: 80 }, (_, n) => `- Rule ${n}: prefer clear names.`).join('\n'),
+        },
+      ],
+    };
+    const result = await runReview(
+      { files },
+      {
+        provider,
+        model: info,
+        config: DEFAULT_CONFIG,
+        rules,
+        maxChunkTokens: 2_000,
+        maxOutputTokens: 2_000,
+      },
+    );
+    expect(result.chunks.total).toBeGreaterThan(1);
+    expect(result.usage.cacheReadTokens ?? 0).toBeGreaterThan(0);
+  }, 180_000);
 });

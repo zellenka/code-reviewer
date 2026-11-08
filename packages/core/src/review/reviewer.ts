@@ -1,3 +1,10 @@
+import {
+  runAgentLoop,
+  type AgentLimits,
+  type AgentStop,
+  type AgentTool,
+  type WrapUpReason,
+} from '../agent/loop';
 import type { ReviewConfig } from '../config/schema';
 import type { Logger } from '../logger';
 import { noopLogger } from '../logger';
@@ -5,7 +12,7 @@ import { collectChat, type CollectedResponse } from '../provider/collect';
 import type { ContentPart, LLMProvider, Message, ModelInfo, Usage } from '../provider/types';
 import { addUsage, emptyUsage } from '../provider/usage';
 import { REPORT_FINDINGS_TOOL, REPORT_TOOL_NAME, extractJson, parseFindingsInput } from './output';
-import { buildSystemPrompt, buildUserPrompt } from './prompt';
+import { buildSystemBlocks, buildUserPrompt } from './prompt';
 import type { ParseOutcome, RawFinding } from './types';
 
 export interface ReviewChunkOptions {
@@ -17,6 +24,21 @@ export interface ReviewChunkOptions {
   signal: AbortSignal;
   maxOutputTokens: number;
   logger?: Logger;
+  /** System blocks (prompt + repo rules). Default: built from `config`. */
+  system?: { text: string; cache?: boolean }[];
+  /** Sent before the diff in every part of a review (changed-symbols index), with a cache hint. */
+  shared?: string;
+  /** Agentic mode: the model explores with these tools before reporting. */
+  agent?: { tools: AgentTool<never>[]; limits: AgentLimits };
+  /** For log lines, e.g. "part 2". */
+  label?: string;
+}
+
+export interface AgentChunkStats {
+  turns: number;
+  toolCalls: number;
+  stop: AgentStop;
+  wrapUp?: WrapUpReason;
 }
 
 export interface ChunkReview {
@@ -25,6 +47,7 @@ export interface ChunkReview {
   invalid: number;
   outcome: ParseOutcome;
   usage: Usage;
+  agent?: AgentChunkStats;
 }
 
 type Attempt =
@@ -39,10 +62,9 @@ export async function reviewChunk(options: ReviewChunkOptions): Promise<ChunkRev
   const { provider, model, config, signal } = options;
   const logger = options.logger ?? noopLogger;
   const jsonOnly = !model.supportsTools;
-  const system = [{ text: buildSystemPrompt({ config, jsonOnly }), cache: true }];
-  const messages: Message[] = [
-    { role: 'user', content: [{ type: 'text', text: buildUserPrompt(options.diff) }] },
-  ];
+  if (options.agent && !jsonOnly) return reviewChunkAgentic(options, options.agent);
+  const system = options.system ?? buildSystemBlocks({ config, jsonOnly });
+  const messages: Message[] = [{ role: 'user', content: userContent(options) }];
   const request = () =>
     collectChat(
       provider.chat({
@@ -106,25 +128,105 @@ export async function reviewChunk(options: ReviewChunkOptions): Promise<ChunkRev
   return { findings: [], invalid: 0, outcome: 'failed', usage };
 }
 
-function interpret(response: CollectedResponse, jsonOnly: boolean): Attempt {
-  const calls = response.toolCalls.filter((c) => c.name === REPORT_TOOL_NAME);
-  if (calls.length) {
-    const findings: RawFinding[] = [];
-    const errors: string[] = [];
-    let usable = false;
-    for (const call of calls) {
-      const parsed = parseFindingsInput(call.input);
-      if (!parsed) continue;
-      usable = true;
-      findings.push(...parsed.findings);
-      errors.push(...parsed.errors);
-    }
-    if (usable) return { kind: 'ok', findings, errors };
+function userContent(options: Pick<ReviewChunkOptions, 'diff' | 'shared'>): ContentPart[] {
+  const diff: ContentPart = { type: 'text', text: buildUserPrompt(options.diff) };
+  return options.shared ? [{ type: 'text', text: options.shared, cache: true }, diff] : [diff];
+}
+
+/**
+ * Agentic variant: the model may explore with read-only tools, then calls
+ * `report_findings`, which is validated (one repair round inside the loop).
+ */
+async function reviewChunkAgentic(
+  options: ReviewChunkOptions,
+  agent: NonNullable<ReviewChunkOptions['agent']>,
+): Promise<ChunkReview> {
+  const { provider, model, config, signal } = options;
+  const logger = options.logger ?? noopLogger;
+  const system =
+    options.system ??
+    buildSystemBlocks({
+      config,
+      agent: { maxTurns: agent.limits.maxTurns, maxToolCalls: agent.limits.maxToolCalls },
+    });
+  const loop = await runAgentLoop({
+    provider,
+    model,
+    system,
+    messages: [{ role: 'user', content: userContent(options) }],
+    tools: agent.tools,
+    finalTool: REPORT_FINDINGS_TOOL,
+    checkFinal: (inputs) => {
+      const attempt = interpretInputs(inputs);
+      if (attempt.kind === 'ok' && !attempt.errors.length) return { ok: true };
+      return {
+        ok: false,
+        error:
+          attempt.kind === 'ok'
+            ? `Some findings were invalid:\n${attempt.errors.join('\n')}`
+            : attempt.reason,
+      };
+    },
+    limits: agent.limits,
+    maxOutputTokens: options.maxOutputTokens,
+    signal,
+    logger,
+    ...(options.label ? { label: options.label } : {}),
+  });
+  const stats: AgentChunkStats = { turns: loop.turns, toolCalls: loop.toolCalls, stop: loop.stop };
+  if (loop.wrapUp) stats.wrapUp = loop.wrapUp;
+  const base = { usage: loop.usage, agent: stats };
+  const final = loop.final ? interpretInputs(loop.final) : undefined;
+  const earlier = loop.rejected ? interpretInputs(loop.rejected) : undefined;
+
+  if (loop.stop === 'final' && final?.kind === 'ok') {
     return {
-      kind: 'none',
-      reason: `The ${REPORT_TOOL_NAME} input must be an object like {"findings": [...]}.`,
+      ...base,
+      findings: final.findings,
+      invalid: 0,
+      outcome: loop.rejected ? 'repaired' : 'valid',
     };
   }
+  const best = [final, earlier]
+    .filter((a): a is Extract<Attempt, { kind: 'ok' }> => a?.kind === 'ok')
+    .sort((a, b) => b.findings.length - a.findings.length)[0];
+  if (loop.stop === 'cancelled') {
+    return {
+      ...base,
+      findings: best?.findings ?? [],
+      invalid: best?.errors.length ?? 0,
+      outcome: 'cancelled',
+    };
+  }
+  if (best) {
+    return { ...base, findings: best.findings, invalid: best.errors.length, outcome: 'partial' };
+  }
+  logger.warn(`${model.name} did not report findings (agent stopped: ${loop.stop})`);
+  return { ...base, findings: [], invalid: 0, outcome: 'failed' };
+}
+
+/** Validates the inputs of one or more `report_findings` calls together. */
+function interpretInputs(inputs: unknown[]): Attempt {
+  const findings: RawFinding[] = [];
+  const errors: string[] = [];
+  let usable = false;
+  for (const input of inputs) {
+    const parsed = parseFindingsInput(input);
+    if (!parsed) continue;
+    usable = true;
+    findings.push(...parsed.findings);
+    errors.push(...parsed.errors);
+  }
+  if (usable) return { kind: 'ok', findings, errors };
+  return {
+    kind: 'none',
+    reason: `The ${REPORT_TOOL_NAME} input must be an object like {"findings": [...]}.`,
+  };
+}
+
+function interpret(response: CollectedResponse, jsonOnly: boolean): Attempt {
+  const calls = response.toolCalls.filter((c) => c.name === REPORT_TOOL_NAME);
+  if (calls.length) return interpretInputs(calls.map((c) => c.input));
   // No tool call: accept JSON in the text (fallback for models that ignore tools).
   const json = extractJson(response.text);
   const parsed = json === undefined ? undefined : parseFindingsInput(json);

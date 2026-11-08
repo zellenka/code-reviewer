@@ -4,17 +4,22 @@ import {
   describeMode,
   estimateCostUsd,
   estimateReview,
+  filterFiles,
   isDiffSourceError,
+  loadSymbols,
   isProviderError,
   runReview,
   type Finding,
+  type AgentLimits,
   type Logger,
   type ModelInfo,
+  type ReviewConfig,
   type ReviewEstimate,
   type ReviewMode,
   type ReviewResult,
   type Severity,
 } from '@ai-review/core';
+import { loadRepoRulesFromDisk } from '@ai-review/node-host';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { showProviderError } from '../providers/errorUi';
@@ -23,6 +28,7 @@ import type { ReviewConfigService } from './config';
 import { relativeToRepo, type RepoLocator } from './repo';
 import type { FindingStore } from './store';
 import { formatTokens } from './tree';
+import { VsCodeSymbolProvider, VsCodeWorkspaceTools } from './workspace';
 
 export type ReviewKind = ReviewMode['kind'];
 
@@ -118,8 +124,12 @@ export async function reviewCommand(
     }
 
     const { provider, model } = await deps.registry.resolveActive();
-    const config = await deps.configs.get(repo.root);
     const settings = vscode.workspace.getConfiguration('aiReview');
+    const config = withModeSetting(await deps.configs.get(repo.root), settings);
+    // "Review Selection" sends only the selected lines, so no surrounding code.
+    const includeContext =
+      (settings.get<boolean>('includeContext') ?? true) && mode.kind !== 'selection';
+    const agentLimits = agentLimitSettings(settings);
     const concurrency = settings.get<number>('concurrency') || undefined;
     const summary = settings.get<boolean>('summary') ?? true;
     const redactHighEntropy = settings.get<boolean>('redactHighEntropyStrings') ?? false;
@@ -141,13 +151,39 @@ export async function reviewCommand(
           const diff = await repo.source.getDiff(mode);
           if (!diff.files.length) return { empty: true as const };
 
-          const estimate = estimateReview(diff, { model, config, redactHighEntropy, summary });
+          const rules = await loadRepoRulesFromDisk(repo.root, config, {
+            logger,
+            redactHighEntropy,
+          });
+          let symbols;
+          if (includeContext) {
+            progress.report({ message: 'reading code structure…' });
+            symbols = await loadSymbols(
+              filterFiles(diff.files, config.ignore).files,
+              new VsCodeSymbolProvider(repo.root, logger),
+              { logger },
+            );
+          }
+          const reviewOptions = {
+            model,
+            config,
+            redactHighEntropy,
+            summary,
+            rules,
+            context: includeContext,
+            ...(symbols ? { symbols } : {}),
+            workspace: new VsCodeWorkspaceTools(repo.root, logger),
+            agentLimits,
+          };
+          const estimate = estimateReview(diff, reviewOptions);
           logger.info(describeEstimate(estimate, model));
           const threshold = settings.get<number>('costConfirmationThreshold') ?? 0.5;
           if (estimate.costUsd && estimate.costUsd.high > threshold && !args.confirmCost) {
             if (args.silent) return { needsConfirmation: true as const, estimate };
             const choice = await vscode.window.showWarningMessage(
-              `AI Review: this review sends about ${formatTokens(estimate.inputTokens)} tokens in ${estimate.requests} request(s) to ${model.name}. Estimated cost: ${formatUsd(estimate.costUsd.low)}–${formatUsd(estimate.costUsd.high)}.`,
+              estimate.inputTokensHigh !== undefined
+                ? `AI Review: this agentic review sends ${formatTokens(estimate.inputTokens)}–${formatTokens(estimate.inputTokensHigh)} tokens to ${model.name} (${estimate.requests} part(s), each may explore the repository). Estimated cost: ${formatUsd(estimate.costUsd.low)}–${formatUsd(estimate.costUsd.high)}.`
+                : `AI Review: this review sends about ${formatTokens(estimate.inputTokens)} tokens in ${estimate.requests} request(s) to ${model.name}. Estimated cost: ${formatUsd(estimate.costUsd.low)}–${formatUsd(estimate.costUsd.high)}.`,
               {
                 modal: true,
                 detail: `That's above your confirmation threshold of ${formatUsd(threshold)} (setting aiReview.costConfirmationThreshold). Narrow the scope to make it cheaper.`,
@@ -160,13 +196,10 @@ export async function reviewCommand(
 
           let done = 0;
           const result = await runReview(diff, {
+            ...reviewOptions,
             provider,
-            model,
-            config,
             signal: controller.signal,
             logger,
-            redactHighEntropy,
-            summary,
             ...(concurrency ? { concurrency } : {}),
             onProgress: (p) => {
               if (p.phase === 'summary') {
@@ -256,6 +289,31 @@ export async function reviewCommand(
   }
 }
 
+/** `aiReview.reviewMode` overrides the repository's `review.mode` unless it is "auto". */
+function withModeSetting(
+  config: ReviewConfig,
+  settings: vscode.WorkspaceConfiguration,
+): ReviewConfig {
+  const mode = settings.get<string>('reviewMode');
+  if (mode !== 'single-pass' && mode !== 'agentic') return config;
+  return { ...config, review: { ...config.review, mode } };
+}
+
+function agentLimitSettings(settings: vscode.WorkspaceConfiguration): Partial<AgentLimits> {
+  const limits: Partial<AgentLimits> = {};
+  const read = (key: string) => {
+    const value = settings.get<number>(key);
+    return typeof value === 'number' && value > 0 ? value : undefined;
+  };
+  const maxTurns = read('agent.maxTurns');
+  const maxToolCalls = read('agent.maxToolCalls');
+  const tokenBudget = read('agent.tokenBudget');
+  if (maxTurns) limits.maxTurns = maxTurns;
+  if (maxToolCalls) limits.maxToolCalls = maxToolCalls;
+  if (tokenBudget) limits.tokenBudget = tokenBudget;
+  return limits;
+}
+
 function isTooLarge(err: unknown): boolean {
   return err instanceof Error && err.name === 'ReviewTooLargeError';
 }
@@ -315,6 +373,7 @@ export function summarize(result: ReviewResult, model?: ModelInfo): string {
     parts.push('no issues found');
   }
   parts.push(`${result.reviewedFiles.length} file(s) reviewed`);
+  if (result.agent) parts.push(`${result.agent.toolCalls} tool call(s)`);
   if (result.skipped.length) parts.push(`${result.skipped.length} skipped`);
   const tokens = result.usage.inputTokens + result.usage.outputTokens;
   if (tokens)
@@ -333,7 +392,11 @@ export function formatUsd(n: number): string {
 
 function describeEstimate(e: ReviewEstimate, model: ModelInfo): string {
   const cost = e.costUsd ? `, ${formatUsd(e.costUsd.low)}–${formatUsd(e.costUsd.high)}` : '';
-  return `estimate for ${model.id}: ${e.files} file(s), ${e.requests} request(s), ~${e.inputTokens} input tokens, ${e.outputTokens.low}–${e.outputTokens.high} output tokens${cost}`;
+  const input =
+    e.inputTokensHigh !== undefined
+      ? `${e.inputTokens}–${e.inputTokensHigh}`
+      : String(e.inputTokens);
+  return `estimate for ${model.id} (${e.mode}): ${e.files} file(s), ${e.requests} request(s), ~${input} input tokens, ${e.outputTokens.low}–${e.outputTokens.high} output tokens${cost}`;
 }
 
 function logResult(result: ReviewResult, logger: Logger): void {
@@ -342,4 +405,5 @@ function logResult(result: ReviewResult, logger: Logger): void {
     logger.info(`dropped ${d.count} finding(s): ${DROP_REASON_LABELS[d.reason]}`);
   for (const e of result.errors) logger.warn(e);
   if (result.redactions) logger.info(`${result.redactions} secret(s) redacted before sending`);
+  if (result.rules?.length) logger.info(`repo rules applied: ${result.rules.join(', ')}`);
 }

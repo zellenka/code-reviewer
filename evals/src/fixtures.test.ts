@@ -6,9 +6,10 @@ import { matches, scoreFixture, totals } from './score';
 describe('eval fixtures', async () => {
   const fixtures = await loadFixtures();
 
-  it('has 5–10 fixtures including a clean one', () => {
+  it('has 5–30 fixtures including a clean one and a cross-file one', () => {
     expect(fixtures.length).toBeGreaterThanOrEqual(5);
-    expect(fixtures.length).toBeLessThanOrEqual(10);
+    expect(fixtures.length).toBeLessThanOrEqual(30);
+    expect(fixtures.some((f) => f.expected.some((e) => e.crossFile))).toBe(true);
     expect(fixtures.some((f) => f.expected.length === 0)).toBe(true);
   });
 
@@ -36,6 +37,7 @@ describe('scoring', () => {
       severity: 'major',
       title: 't',
       quote: 'q',
+      crossFile: false,
     } as const,
   ];
   const finding = (file: string, line: number) => ({

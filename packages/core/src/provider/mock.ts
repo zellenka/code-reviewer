@@ -109,7 +109,10 @@ export class MockProvider implements LLMProvider {
       };
     }
     if (!sawUsage) {
-      const input = req.system.map((s) => s.text).join('') + JSON.stringify(req.messages);
+      const input =
+        req.system.map((s) => s.text).join('') +
+        JSON.stringify(req.messages) +
+        (req.tools?.length ? JSON.stringify(req.tools) : '');
       yield {
         type: 'usage',
         usage: {

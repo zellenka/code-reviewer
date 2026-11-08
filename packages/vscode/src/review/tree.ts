@@ -169,7 +169,12 @@ function details(session: ReviewSession, all: TrackedFinding[]): Node[] {
       description: session.finishedAt.toLocaleTimeString(),
       icon: 'git-compare',
     },
-    { kind: 'detail', label: model.name, description: model.vendor, icon: 'hubot' },
+    {
+      kind: 'detail',
+      label: model.name,
+      description: `${model.vendor} · ${result.mode}`,
+      icon: 'hubot',
+    },
     {
       kind: 'detail',
       label: `${formatTokens(usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0))} in · ${formatTokens(usage.outputTokens)} out`,
@@ -196,6 +201,23 @@ function details(session: ReviewSession, all: TrackedFinding[]): Node[] {
       : {}),
     icon: 'files',
   });
+  if (result.agent) {
+    out.push({
+      kind: 'detail',
+      label: `${result.agent.toolCalls} tool call(s) in ${result.agent.turns} turn(s)`,
+      ...(result.agent.limitStops
+        ? { description: `${result.agent.limitStops} part(s) hit a limit` }
+        : {}),
+      icon: 'search',
+    });
+  }
+  if (result.rules?.length) {
+    out.push({
+      kind: 'detail',
+      label: `Rules: ${result.rules.join(', ')}`,
+      icon: 'law',
+    });
+  }
   for (const d of result.dropped) {
     out.push({
       kind: 'detail',

@@ -8,6 +8,11 @@ on:
       model:
         description: Anthropic model for the evals
         default: claude-sonnet-5-5
+      mode:
+        description: Review mode for the evals (compare runs both and costs more)
+        type: choice
+        options: [single-pass, agentic, compare]
+        default: single-pass
 
 permissions:
   contents: read
@@ -28,10 +33,11 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       - name: Evals (Anthropic)
-        run: pnpm eval --provider anthropic --model "$EVAL_MODEL" --json eval-report.json
+        run: pnpm eval --provider anthropic --model "$EVAL_MODEL" --mode "$EVAL_MODE" --json eval-report.json
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EVAL_MODEL: ${{ inputs.model }}
+          EVAL_MODE: ${{ inputs.mode }}
       - uses: actions/upload-artifact@v7
         if: always()
         with:

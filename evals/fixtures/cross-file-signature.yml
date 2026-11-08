@@ -1,0 +1,30 @@
+name: Swapped parameters (cross-file)
+description: formatPrice's parameters are swapped, but its caller in an unchanged file still passes (cents, currency), so prices render as "1999 NaN". Plain JavaScript, so no compiler catches it; only visible by finding the callers.
+before:
+  src/price.js: |
+    /** Formats an amount in cents, e.g. formatPrice(1999, 'EUR') → "EUR 19.99". */
+    export function formatPrice(cents, currency) {
+      return `${currency} ${(cents / 100).toFixed(2)}`;
+    }
+  src/cart.js: |
+    import { formatPrice } from './price.js';
+
+    export function cartTotal(lines, currency) {
+      const cents = lines.reduce((sum, l) => sum + l.cents, 0);
+      return formatPrice(cents, currency);
+    }
+after:
+  src/price.js: |
+    /** Formats an amount in cents for display, e.g. formatPrice('EUR', 1999) → "EUR 19.99". */
+    export function formatPrice(currency, cents) {
+      const amount = (cents / 100).toFixed(2);
+      return `${currency} ${amount}`;
+    }
+expected:
+  - file: src/price.js
+    lines: 2
+    category: bug
+    severity: major
+    title: Parameters swapped, but cartTotal in src/cart.js still calls formatPrice(cents, currency)
+    quote: 'export function formatPrice(currency, cents) {'
+    crossFile: true

@@ -276,6 +276,6 @@ describe('sandbox + FsWorkspaceTools', () => {
     expect(await tools.grep('(unclosed')).toEqual([]);
     const refs = await tools.findReferences('src/a.ts', 1, 18);
     expect(refs).toHaveLength(4);
-    expect(await tools.getSymbolAt()).toBeNull();
+    expect(await tools.getSymbolAt('src/a.ts', 1)).toBeNull();
   });
 });

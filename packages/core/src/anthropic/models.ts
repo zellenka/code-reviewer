@@ -42,6 +42,8 @@ function model(id: string, name: string, pricing: ModelPricing): ModelInfo {
     maxOutputTokens: 128_000,
     supportsTools: true,
     pricing: { cacheWritePerMTok: pricing.inputPerMTok * 1.25, ...pricing },
+    // Minimum cacheable prefix on current Anthropic models (checked 2026-11).
+    promptCaching: { minTokens: 512 },
   };
 }
 

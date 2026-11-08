@@ -1,5 +1,6 @@
 import type { FileDiff, Hunk } from '../diff/types';
 import { estimateTokens } from '../provider/usage';
+import { renderContext, type ContextRange } from './context';
 
 export interface ChunkFile {
   path: string;
@@ -8,6 +9,8 @@ export interface ChunkFile {
   hunks: Hunk[];
   /** Set when a large file was split: part `index` of `total` (1-based). */
   part?: { index: number; total: number };
+  /** Unchanged code around the hunks (enclosing function/class), see `buildFileContext`. */
+  context?: ContextRange[];
 }
 
 export interface Chunk {
@@ -37,6 +40,8 @@ export interface ChunkOptions {
   maxChunks?: number;
   /** Token estimator. Default chars/3.5. */
   countTokens?: (text: string) => number;
+  /** Context to show with a file (or part of one). Dropped for a part that wouldn't fit with it. */
+  context?: (file: FileDiff, hunks: Hunk[]) => ContextRange[] | undefined;
 }
 
 /**
@@ -56,6 +61,7 @@ export function renderFile(file: ChunkFile): string {
   const out = [`<file ${attrs.join(' ')}>`];
   for (const hunk of file.hunks) out.push(renderHunk(hunk));
   out.push('</file>');
+  if (file.context?.length) out.push(renderContext(file.path, file.context));
   return out.join('\n');
 }
 
@@ -85,17 +91,24 @@ export function chunkFiles(files: FileDiff[], options: ChunkOptions): Chunk[] {
   const limit = Math.max(200, options.maxTokens);
 
   const pieces: { file: ChunkFile; tokens: number }[] = [];
+  const withContext = (piece: ChunkFile, file: FileDiff): { file: ChunkFile; tokens: number } => {
+    const plain = { file: piece, tokens: count(renderFile(piece)) };
+    const context = options.context?.(file, piece.hunks);
+    if (!context?.length) return plain;
+    const rich = { ...piece, context };
+    const tokens = count(renderFile(rich));
+    return tokens <= limit ? { file: rich, tokens } : plain;
+  };
   for (const file of files) {
-    const whole = toChunkFile(file, file.hunks);
-    const tokens = count(renderFile(whole));
-    if (tokens <= limit) {
-      pieces.push({ file: whole, tokens });
+    const whole = withContext(toChunkFile(file, file.hunks), file);
+    if (whole.tokens <= limit) {
+      pieces.push(whole);
       continue;
     }
     const parts = splitFile(file, limit, count);
     parts.forEach((hunks, i) => {
       const part = toChunkFile(file, hunks, { index: i + 1, total: parts.length });
-      pieces.push({ file: part, tokens: count(renderFile(part)) });
+      pieces.push(withContext(part, file));
     });
   }
 

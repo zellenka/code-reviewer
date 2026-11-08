@@ -96,4 +96,10 @@ export interface ReviewResult {
   errors: string[];
   /** Number of secrets replaced before sending. */
   redactions: number;
+  /** How the review ran (agentic falls back to single-pass without repo access or tools). */
+  mode: 'single-pass' | 'agentic';
+  /** Repo rules files that were applied. */
+  rules?: string[];
+  /** Agentic reviews: totals over all parts. `limitStops` = parts stopped by a limit. */
+  agent?: { turns: number; toolCalls: number; limitStops: number };
 }

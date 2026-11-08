@@ -1,8 +1,15 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
 import * as path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import picomatch from 'picomatch';
-import { normalizeEol, splitLines, toPosixPath, type WorkspaceTools } from '@ai-review/core';
-import { resolveInRepo } from './sandbox';
+import {
+  isProtectedPath,
+  normalizeEol,
+  splitLines,
+  toPosixPath,
+  type WorkspaceTools,
+} from '@ai-review/core';
+import { realRepoPath, resolveInRepo } from './sandbox';
 
 export interface FsWorkspaceToolsOptions {
   /** Max characters returned by `readFile`. Default 100k. */
@@ -11,10 +18,47 @@ export interface FsWorkspaceToolsOptions {
   maxGrepResults?: number;
   /** Directory names never searched. */
   skipDirs?: string[];
+  /** A grep whose regex takes longer than this on one batch of files fails. Default 3s. */
+  grepTimeoutMs?: number;
 }
 
-const DEFAULT_SKIP = ['.git', 'node_modules', 'dist', 'out', 'build', '.vscode-test', 'coverage'];
+const DEFAULT_SKIP = [
+  '.git',
+  'node_modules',
+  'dist',
+  'out',
+  'build',
+  '.vscode-test',
+  'coverage',
+  '.next',
+  '.turbo',
+  '.venv',
+  'venv',
+  '__pycache__',
+  'target',
+  'vendor',
+];
 const MAX_GREP_FILE_BYTES = 1024 * 1024;
+/** Text sent to the grep worker at once. */
+const GREP_BATCH_CHARS = 1024 * 1024;
+
+/**
+ * Regex matching runs in a worker: the pattern comes from the model, and a catastrophic
+ * one (e.g. `(a+)+$`) would otherwise block the whole host (in VS Code: every extension).
+ * The worker is killed when a batch takes too long.
+ */
+const GREP_WORKER = `
+const { parentPort, workerData } = require('node:worker_threads');
+const re = new RegExp(workerData);
+parentPort.on('message', (texts) => {
+  const hits = [];
+  for (let f = 0; f < texts.length; f++) {
+    const lines = texts[f].split('\\n');
+    for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) hits.push([f, i]);
+  }
+  parentPort.postMessage(hits);
+});
+`;
 
 /** Read-only file tools sandboxed to the repo root (no LSP: references fall back to grep). */
 export class FsWorkspaceTools implements WorkspaceTools {
@@ -22,16 +66,22 @@ export class FsWorkspaceTools implements WorkspaceTools {
   private readonly maxReadChars: number;
   private readonly maxGrepResults: number;
   private readonly skipDirs: Set<string>;
+  private readonly grepTimeoutMs: number;
 
   constructor(root: string, options: FsWorkspaceToolsOptions = {}) {
     this.root = path.resolve(root);
     this.maxReadChars = options.maxReadChars ?? 100_000;
     this.maxGrepResults = options.maxGrepResults ?? 200;
     this.skipDirs = new Set(options.skipDirs ?? DEFAULT_SKIP);
+    this.grepTimeoutMs = options.grepTimeoutMs ?? 3_000;
   }
 
   async readFile(relPath: string, range?: { start: number; end: number }): Promise<string> {
     const abs = await resolveInRepo(this.root, relPath);
+    // Callers check the name they ask for; this checks what a symlink points to.
+    if (isProtectedPath(await realRepoPath(this.root, abs))) {
+      throw new Error(`${relPath} can't be read: it may contain secrets.`);
+    }
     let text = normalizeEol(await readFile(abs, 'utf8'));
     if (range) {
       const lines = splitLines(text);
@@ -57,6 +107,26 @@ export class FsWorkspaceTools implements WorkspaceTools {
     }
     const matchGlob = glob ? picomatch(glob, { dot: true }) : undefined;
     const results: { path: string; line: number; text: string }[] = [];
+    const worker = new Worker(GREP_WORKER, { eval: true, workerData: regex.source });
+    worker.unref();
+    let batch: { rel: string; lines: string[] }[] = [];
+    let batchChars = 0;
+
+    const flush = async () => {
+      if (!batch.length) return;
+      const files = batch;
+      batch = [];
+      batchChars = 0;
+      const hits = await this.matchInWorker(
+        worker,
+        files.map((f) => f.lines.join('\n')),
+      );
+      for (const [f, i] of hits) {
+        if (results.length >= this.maxGrepResults) break;
+        const file = files[f]!;
+        results.push({ path: file.rel, line: i + 1, text: file.lines[i]!.slice(0, 500) });
+      }
+    };
 
     const walk = async (dir: string): Promise<void> => {
       const entries = await readdir(dir, { withFileTypes: true });
@@ -71,19 +141,53 @@ export class FsWorkspaceTools implements WorkspaceTools {
         if (!entry.isFile()) continue; // symlinks are not followed
         const rel = toPosixPath(path.relative(this.root, abs));
         if (matchGlob && !matchGlob(rel)) continue;
+        // Never even scanned, so matches can't hint at their content.
+        if (isProtectedPath(rel)) continue;
         if ((await stat(abs)).size > MAX_GREP_FILE_BYTES) continue;
         const buf = await readFile(abs);
         if (buf.subarray(0, 8000).includes(0)) continue;
-        const lines = splitLines(normalizeEol(buf.toString('utf8')));
-        for (let i = 0; i < lines.length && results.length < this.maxGrepResults; i++) {
-          if (regex.test(lines[i]!)) {
-            results.push({ path: rel, line: i + 1, text: lines[i]!.slice(0, 500) });
-          }
-        }
+        const text = normalizeEol(buf.toString('utf8'));
+        batch.push({ rel, lines: splitLines(text) });
+        batchChars += text.length;
+        if (batchChars >= GREP_BATCH_CHARS) await flush();
       }
     };
-    await walk(this.root);
+    try {
+      await walk(this.root);
+      await flush();
+    } finally {
+      void worker.terminate();
+    }
     return results;
+  }
+
+  private matchInWorker(worker: Worker, texts: string[]): Promise<[number, number][]> {
+    return new Promise((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        worker.off('message', onMessage);
+        worker.off('error', onError);
+      };
+      const onMessage = (hits: [number, number][]) => {
+        done();
+        resolve(hits);
+      };
+      const onError = (err: Error) => {
+        done();
+        reject(err);
+      };
+      const timer = setTimeout(() => {
+        done();
+        reject(
+          new Error(
+            'The search pattern is too slow (it backtracks a lot). Use a simpler pattern, e.g. without nested repetition like (a+)+.',
+          ),
+        );
+      }, this.grepTimeoutMs);
+      worker.on('message', onMessage);
+      worker.on('error', onError);
+      worker.postMessage(texts);
+    });
   }
 
   /** Grep fallback: whole-word matches of the identifier at `line`/`col` (1-based). */
@@ -99,8 +203,8 @@ export class FsWorkspaceTools implements WorkspaceTools {
     return hits.map(({ path: p, line: l }) => ({ path: p, line: l }));
   }
 
-  /** No language server outside VS Code. */
-  async getSymbolAt(): Promise<null> {
+  /** No language server outside VS Code (callers fall back to heuristics). Hosts may override. */
+  async getSymbolAt(_relPath: string, _line: number): ReturnType<WorkspaceTools['getSymbolAt']> {
     return null;
   }
 }

@@ -285,6 +285,46 @@
           "default": 0.5,
           "minimum": 0,
           "markdownDescription": "Ask before running a review whose estimated cost (upper bound, USD) is above this amount. Applies to providers with known prices (Anthropic). `0` = always ask."
+        },
+        "aiReview.reviewMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "single-pass",
+            "agentic"
+          ],
+          "enumDescriptions": [
+            "Use the repository setting (`review.mode` in `.codereview.yml`, default single-pass).",
+            "One request per part of the diff. Cheapest and fastest.",
+            "The model may read other files in the repository (read-only) before reporting. Finds cross-file bugs; uses several requests per part."
+          ],
+          "default": "auto",
+          "markdownDescription": "How reviews run. **agentic** lets the model look up callers, definitions and types in the repository with read-only tools. Secret files are never readable."
+        },
+        "aiReview.includeContext": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Send the enclosing function or class of each change (from the language server when available), and for multi-file changes a list of the declarations changed across the diff."
+        },
+        "aiReview.agent.maxTurns": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 30,
+          "markdownDescription": "Agentic reviews: model requests per part of the diff spent exploring, before it must report."
+        },
+        "aiReview.agent.maxToolCalls": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 100,
+          "markdownDescription": "Agentic reviews: tool calls (read file, search, references) per part of the diff."
+        },
+        "aiReview.agent.tokenBudget": {
+          "type": "number",
+          "default": 200000,
+          "minimum": 20000,
+          "markdownDescription": "Agentic reviews: input tokens per part of the diff, summed over its requests (cached tokens included). The model is asked to report when it's used up."
         }
       }
     },

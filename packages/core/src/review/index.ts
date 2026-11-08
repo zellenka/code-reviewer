@@ -11,3 +11,6 @@ export * from './orchestrator';
 export * from './summarize';
 export * from './fix';
 export * from './markdown';
+export * from './symbols';
+export * from './context';
+export * from './rules';

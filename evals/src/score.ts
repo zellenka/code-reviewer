@@ -10,6 +10,8 @@ export interface FixtureScore {
   reported: number;
   /** Expected findings that were found. */
   hits: number;
+  /** Expected findings marked crossFile, and how many of them were found. */
+  crossFile: { expected: number; hits: number };
   /** Reported findings that match an expected one. */
   truePositives: number;
   falsePositives: Finding[];
@@ -20,6 +22,8 @@ export interface FixtureScore {
   error?: string;
   /** Whether the review produced a summary (P3-6). */
   summary?: boolean;
+  /** Agentic runs: tool calls the agent made. */
+  toolCalls?: number;
   /** Pre-run input-token estimate vs. what the provider reported (P3-4). */
   inputTokens?: { estimated: number; actual: number };
 }
@@ -48,6 +52,10 @@ export function scoreFixture(
     expected: expected.length,
     reported: findings.length,
     hits: found.length,
+    crossFile: {
+      expected: expected.filter((e) => e.crossFile).length,
+      hits: found.filter((e) => e.crossFile).length,
+    },
     truePositives: truePositives.length,
     falsePositives: findings.filter((f) => !truePositives.includes(f)),
     misses: expected.filter((e) => !found.includes(e)),
@@ -65,6 +73,8 @@ export interface Totals {
   parseRate: number;
   precision: number;
   recall: number;
+  /** Recall on expected findings that need code outside the diff. 1 when there are none. */
+  crossFileRecall: number;
   /** Findings on fixtures that expect none. */
   cleanFindings: number;
   nitsPer100Lines: number;
@@ -77,11 +87,13 @@ export function totals(scores: FixtureScore[], cleanIds: Set<string>): Totals {
   const reported = sum(scores.map((s) => s.reported));
   const expected = sum(scores.map((s) => s.expected));
   const lines = sum(scores.map((s) => s.changedLines));
+  const crossExpected = sum(scores.map((s) => s.crossFile.expected));
   return {
     fixtures: scores.length,
     parseRate: outcomes.length ? parsed / outcomes.length : 1,
     precision: reported ? sum(scores.map((s) => s.truePositives)) / reported : 1,
     recall: expected ? sum(scores.map((s) => s.hits)) / expected : 1,
+    crossFileRecall: crossExpected ? sum(scores.map((s) => s.crossFile.hits)) / crossExpected : 1,
     cleanFindings: sum(scores.filter((s) => cleanIds.has(s.id)).map((s) => s.reported)),
     nitsPer100Lines: lines ? (sum(scores.map((s) => s.nits)) / lines) * 100 : 0,
     errors: scores.filter((s) => s.error).length,

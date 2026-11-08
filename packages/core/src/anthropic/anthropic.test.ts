@@ -380,6 +380,31 @@ describe('buildParams', () => {
     expect(marked).toHaveLength(4);
   });
 
+  it('puts a cache breakpoint on a tool result (agent loop turns)', () => {
+    const params = buildParams(
+      baseReq({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'go' }] },
+          { role: 'assistant', content: [{ type: 'tool_call', id: 't1', name: 'x', input: {} }] },
+          {
+            role: 'user',
+            content: [{ type: 'tool_result', callId: 't1', content: 'ok', cache: true }],
+          },
+        ],
+      }),
+      undefined,
+      false,
+    );
+    expect(params.messages[2]!.content).toEqual([
+      {
+        type: 'tool_result',
+        tool_use_id: 't1',
+        content: 'ok',
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
+  });
+
   it('never sends temperature; enables refusal fallback only for supported models', () => {
     const p1 = buildParams(baseReq({ temperature: 0 }), undefined, true);
     expect(p1).not.toHaveProperty('temperature');

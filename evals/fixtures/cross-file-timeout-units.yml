@@ -1,0 +1,38 @@
+name: Timeout units (cross-file)
+description: The new code passes a timeout constant to setTimeout, but the constant (in an unchanged file) is in seconds, so requests are aborted after 30 ms instead of 30 s. Only visible by reading src/config.ts.
+before:
+  src/config.ts: |
+    /** How long a request may take, in seconds. */
+    export const REQUEST_TIMEOUT = 30;
+
+    /** How many times a failed request is retried. */
+    export const MAX_RETRIES = 3;
+  src/client.ts: |
+    export async function fetchJson(url: string): Promise<unknown> {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    }
+after:
+  src/client.ts: |
+    import { REQUEST_TIMEOUT } from './config';
+
+    export async function fetchJson(url: string): Promise<unknown> {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+expected:
+  - file: src/client.ts
+    lines: 5
+    category: bug
+    severity: major
+    title: REQUEST_TIMEOUT is in seconds but setTimeout expects milliseconds
+    quote: 'const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);'
+    crossFile: true

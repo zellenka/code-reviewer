@@ -294,11 +294,15 @@ function textBlock(
   breakpoints: { left: number },
 ): BetaTextBlockParam {
   const block: BetaTextBlockParam = { type: 'text', text };
-  if (cache && breakpoints.left > 0) {
-    breakpoints.left--;
-    block.cache_control = { type: 'ephemeral' };
-  }
+  if (takeBreakpoint(cache, breakpoints)) block.cache_control = { type: 'ephemeral' };
   return block;
+}
+
+/** True (and one breakpoint used up) when a cache hint can still get a breakpoint. */
+function takeBreakpoint(cache: boolean | undefined, breakpoints: { left: number }): boolean {
+  if (!cache || breakpoints.left <= 0) return false;
+  breakpoints.left--;
+  return true;
 }
 
 function toAnthropicMessage(message: Message, breakpoints: { left: number }): BetaMessageParam {
@@ -317,6 +321,9 @@ function toAnthropicMessage(message: Message, breakpoints: { left: number }): Be
           tool_use_id: part.callId,
           content: part.content,
           ...(part.isError ? { is_error: true } : {}),
+          ...(takeBreakpoint(part.cache, breakpoints)
+            ? { cache_control: { type: 'ephemeral' as const } }
+            : {}),
         });
         break;
       case 'opaque':

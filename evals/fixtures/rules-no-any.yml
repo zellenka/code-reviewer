@@ -1,0 +1,34 @@
+name: Repository rule (no any)
+description: AGENTS.md forbids the `any` type. The change adds a function taking `any`. Nothing else is wrong, so only the repo rule makes this a finding (P4-4).
+before:
+  AGENTS.md: |
+    # Guidelines for contributors and agents
+
+    - Run `pnpm test` before committing.
+    - Never use the `any` type. Use `unknown` and narrow it, or write a proper type.
+    - Keep functions small.
+  src/settings.ts: |
+    export interface Settings {
+      theme: 'light' | 'dark';
+      fontSize: number;
+    }
+after:
+  src/settings.ts: |
+    export interface Settings {
+      theme: 'light' | 'dark';
+      fontSize: number;
+    }
+
+    export function parseSettings(raw: any): Settings {
+      return {
+        theme: raw.theme === 'dark' ? 'dark' : 'light',
+        fontSize: typeof raw.fontSize === 'number' ? raw.fontSize : 14,
+      };
+    }
+expected:
+  - file: src/settings.ts
+    lines: 6
+    category: maintainability
+    severity: minor
+    title: 'Uses the `any` type, which AGENTS.md forbids'
+    quote: 'export function parseSettings(raw: any): Settings {'

@@ -13,6 +13,16 @@ function isInside(root: string, target: string): boolean {
 }
 
 /**
+ * Where an existing file inside the repo really lives (after symlinks), repo-relative with
+ * `/`. A committed `docs/notes.md → ../.env` gives `.env`, so callers can refuse secrets by
+ * what is read, not by the name asked for.
+ */
+export async function realRepoPath(root: string, abs: string): Promise<string> {
+  const [realRoot, real] = await Promise.all([realpath(path.resolve(root)), realpath(abs)]);
+  return path.relative(realRoot, real).split(path.sep).join('/');
+}
+
+/**
  * Resolves a repo-relative path to an absolute one inside `root`.
  * Rejects absolute paths, `..` escapes and symlinks that point outside the repo.
  * Throws `DiffSourceError('outsideRepo')`.

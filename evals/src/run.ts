@@ -1,10 +1,14 @@
 /**
- * Eval runner: `pnpm eval --provider mock|anthropic [--model id] [--fixture name] [--json out.json] [--strict]`
+ * Eval runner:
+ *   pnpm eval --provider mock|anthropic [--model id] [--mode single-pass|agentic|compare]
+ *             [--fixture name] [--json out.json] [--strict] [--no-summary]
  *
  * For each fixture: build a temp git repo (before → commit → after), take the unstaged
- * diff through node-host, run the real review pipeline, and score against the expected findings.
- * `mock` is an oracle that reports the expected findings (with wrong line numbers): it tests
- * the pipeline, not the model, and must score 100%. `anthropic` needs ANTHROPIC_API_KEY.
+ * diff through node-host, load the repo rules, run the real review pipeline, and score
+ * against the expected findings. `mock` is an oracle that reports the expected findings
+ * (with wrong line numbers; in agentic mode after one real tool call): it tests the
+ * pipeline, not the model, and must score 100%. `anthropic` needs ANTHROPIC_API_KEY.
+ * `--mode compare` runs single-pass and agentic on the same fixtures and prints both.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -25,11 +29,12 @@ import {
   type LLMProvider,
   type MockStep,
   type ModelInfo,
+  type ReviewConfig,
   type Usage,
 } from '@ai-review/core';
-import { GitCliDiffSource } from '@ai-review/node-host';
+import { FsWorkspaceTools, GitCliDiffSource, loadRepoRulesFromDisk } from '@ai-review/node-host';
 import { loadFixtures, type Fixture } from './fixtures';
-import { estimateError, scoreFixture, totals, type FixtureScore } from './score';
+import { estimateError, scoreFixture, totals, type FixtureScore, type Totals } from './score';
 
 const GIT_ENV = {
   ...process.env,
@@ -49,11 +54,24 @@ const GATES = {
   estimateError: 0.3,
 };
 
+type Mode = 'single-pass' | 'agentic';
+
+interface ModeRun {
+  mode: Mode;
+  scores: FixtureScore[];
+  totals: Totals;
+  usage: Usage;
+  costUsd?: number;
+  /** Agentic only: tool calls over all fixtures. */
+  toolCalls: number;
+}
+
 async function main(): Promise<number> {
   const { values } = parseArgs({
     options: {
       provider: { type: 'string', default: 'mock' },
       model: { type: 'string' },
+      mode: { type: 'string', default: 'single-pass' },
       fixture: { type: 'string' },
       json: { type: 'string' },
       strict: { type: 'boolean', default: false },
@@ -61,125 +79,187 @@ async function main(): Promise<number> {
       'no-summary': { type: 'boolean', default: false },
     },
   });
+  const modes: Mode[] =
+    values.mode === 'compare'
+      ? ['single-pass', 'agentic']
+      : values.mode === 'agentic' || values.mode === 'single-pass'
+        ? [values.mode]
+        : [];
+  if (!modes.length) {
+    console.error(`Unknown --mode "${values.mode}". Use single-pass, agentic or compare.`);
+    return 1;
+  }
   const summary = !values['no-summary'];
   const fixtures = await loadFixtures(undefined, values.fixture);
   if (!fixtures.length) {
     console.error('No fixtures matched.');
     return 1;
   }
+  const clean = new Set(fixtures.filter((f) => f.expected.length === 0).map((f) => f.id));
 
-  const scores: FixtureScore[] = [];
-  let usage: Usage = emptyUsage();
+  const runs: ModeRun[] = [];
   let model: ModelInfo | undefined;
-  for (const fixture of fixtures) {
-    const { provider, model: m } = await createProvider(values.provider!, values.model, fixture);
-    model = m;
-    const repo = makeRepo(fixture);
-    try {
-      const diff = await new GitCliDiffSource({ root: repo }).getDiff({ kind: 'unstaged' });
-      const changedLines = diff.files.reduce(
-        (n, f) =>
-          n + f.hunks.reduce((h, k) => h + k.lines.filter((l) => l.kind === 'add').length, 0),
-        0,
-      );
+  for (const mode of modes) {
+    console.log(`\n== ${mode} ==`);
+    const config: ReviewConfig = { ...DEFAULT_CONFIG, review: { ...DEFAULT_CONFIG.review, mode } };
+    const scores: FixtureScore[] = [];
+    let usage: Usage = emptyUsage();
+    let toolCalls = 0;
+    for (const fixture of fixtures) {
+      const { provider, model: m } = await createProvider(values.provider!, values.model, fixture);
+      model = m;
+      const repo = makeRepo(fixture);
       try {
-        const estimate = estimateReview(diff, {
-          model: m,
-          config: DEFAULT_CONFIG,
-          summary,
-        });
-        const result = await runReview(diff, {
-          provider,
-          model: m,
-          config: DEFAULT_CONFIG,
-          summary,
-          ...(values.concurrency ? { concurrency: Number(values.concurrency) } : {}),
-        });
-        usage = addUsage(usage, result.usage);
-        scores.push({
-          ...scoreFixture(fixture.id, fixture.expected, result.findings, {
-            changedLines,
-            outcomes: result.chunks.outcomes,
-            ...(result.errors.length ? { error: result.errors.join('; ') } : {}),
-          }),
-          summary: !!result.summary,
-          inputTokens: {
-            estimated: estimate.inputTokens,
-            actual:
-              result.usage.inputTokens +
-              (result.usage.cacheReadTokens ?? 0) +
-              (result.usage.cacheWriteTokens ?? 0),
-          },
-        });
-      } catch (err) {
-        scores.push(
-          scoreFixture(fixture.id, fixture.expected, [], {
-            changedLines,
-            outcomes: ['failed'],
-            error: err instanceof Error ? err.message : String(err),
-          }),
+        const diff = await new GitCliDiffSource({ root: repo }).getDiff({ kind: 'unstaged' });
+        const changedLines = diff.files.reduce(
+          (n, f) =>
+            n + f.hunks.reduce((h, k) => h + k.lines.filter((l) => l.kind === 'add').length, 0),
+          0,
         );
+        try {
+          const rules = await loadRepoRulesFromDisk(repo, config);
+          const workspace = new FsWorkspaceTools(repo);
+          const estimate = estimateReview(diff, { model: m, config, summary, rules, workspace });
+          const result = await runReview(diff, {
+            provider,
+            model: m,
+            config,
+            summary,
+            rules,
+            workspace,
+            ...(values.concurrency ? { concurrency: Number(values.concurrency) } : {}),
+          });
+          usage = addUsage(usage, result.usage);
+          toolCalls += result.agent?.toolCalls ?? 0;
+          scores.push({
+            ...scoreFixture(fixture.id, fixture.expected, result.findings, {
+              changedLines,
+              outcomes: result.chunks.outcomes,
+              ...(result.errors.length ? { error: result.errors.join('; ') } : {}),
+            }),
+            summary: !!result.summary,
+            inputTokens: {
+              estimated: estimate.inputTokens,
+              actual:
+                result.usage.inputTokens +
+                (result.usage.cacheReadTokens ?? 0) +
+                (result.usage.cacheWriteTokens ?? 0),
+            },
+            ...(result.agent ? { toolCalls: result.agent.toolCalls } : {}),
+          });
+        } catch (err) {
+          scores.push(
+            scoreFixture(fixture.id, fixture.expected, [], {
+              changedLines,
+              outcomes: ['failed'],
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        }
+      } finally {
+        rmSync(repo, { recursive: true, force: true, maxRetries: 3 });
       }
-    } finally {
-      rmSync(repo, { recursive: true, force: true, maxRetries: 3 });
+      printFixture(scores.at(-1)!, mode);
     }
-    printFixture(scores.at(-1)!);
+    const run: ModeRun = { mode, scores, totals: totals(scores, clean), usage, toolCalls };
+    if (model?.pricing) run.costUsd = estimateCostUsd(usage, model.pricing);
+    printTotals(run, values.provider!, model, summary);
+    runs.push(run);
+  }
+  if (runs.length === 2) printComparison(runs[0]!, runs[1]!);
+
+  if (values.json) {
+    const report =
+      runs.length === 1
+        ? { provider: values.provider, model: model?.id, ...runs[0]! }
+        : { provider: values.provider, model: model?.id, runs };
+    await writeFile(values.json, JSON.stringify(report, null, 2));
+    console.log(`report written to ${values.json}`);
   }
 
-  const clean = new Set(fixtures.filter((f) => f.expected.length === 0).map((f) => f.id));
-  const t = totals(scores, clean);
-  const cost = model?.pricing ? estimateCostUsd(usage, model.pricing) : undefined;
-  console.log('\n== Totals ==');
-  console.log(`provider: ${values.provider}${model ? ` (${model.id})` : ''}`);
+  if (values.provider === 'mock') {
+    // The oracle must be perfect; anything less is a pipeline bug.
+    const perfect = runs.every(
+      ({ totals: t, scores, mode, toolCalls }) =>
+        t.parseRate === 1 &&
+        t.precision === 1 &&
+        t.recall === 1 &&
+        t.errors === 0 &&
+        (!summary || scores.every((s) => s.summary)) &&
+        (mode !== 'agentic' || toolCalls > 0),
+    );
+    console.log(perfect ? '\nmock run: pipeline OK' : '\nmock run: pipeline FAILED');
+    return perfect ? 0 : 1;
+  }
+  const passed = runs.every(({ totals: t }) => passesGates(t));
+  console.log(passed ? '\nMVP gates: passed' : '\nMVP gates: NOT passed');
+  return values.strict && !passed ? 1 : 0;
+}
+
+function passesGates(t: Totals): boolean {
+  return (
+    t.parseRate >= GATES.parseRate &&
+    t.precision >= GATES.precision &&
+    t.cleanFindings <= GATES.cleanFindings &&
+    t.nitsPer100Lines <= GATES.nitsPer100Lines
+  );
+}
+
+function printTotals(
+  run: ModeRun,
+  provider: string,
+  model: ModelInfo | undefined,
+  summary: boolean,
+) {
+  const { totals: t, usage, scores } = run;
+  console.log(`\n-- totals (${run.mode}) --`);
+  console.log(`provider: ${provider}${model ? ` (${model.id})` : ''}`);
   console.log(`parse rate:  ${pct(t.parseRate)}   (gate ≥ ${pct(GATES.parseRate)})`);
   console.log(`precision:   ${pct(t.precision)}   (gate ≥ ${pct(GATES.precision)})`);
-  console.log(`recall:      ${pct(t.recall)}`);
+  console.log(`recall:      ${pct(t.recall)}   (cross-file: ${pct(t.crossFileRecall)})`);
   console.log(`clean-fixture findings: ${t.cleanFindings}   (gate ${GATES.cleanFindings})`);
   console.log(
     `nits / 100 changed lines: ${t.nitsPer100Lines.toFixed(2)}   (gate ≤ ${GATES.nitsPer100Lines})`,
   );
   console.log(
-    `usage: ${usage.inputTokens} in / ${usage.outputTokens} out, ${usage.requests} request(s)${cost !== undefined ? `, ≈ $${cost.toFixed(4)}` : ''}`,
+    `usage: ${usage.inputTokens} in (+${usage.cacheReadTokens ?? 0} cache read, +${usage.cacheWriteTokens ?? 0} cache write) / ${usage.outputTokens} out, ${usage.requests} request(s)${run.costUsd !== undefined ? `, ≈ $${run.costUsd.toFixed(4)}` : ''}`,
   );
+  if (run.mode === 'agentic') console.log(`tool calls:  ${run.toolCalls}`);
   if (t.errors) console.log(`fixtures with errors: ${t.errors}`);
   const withSummary = scores.filter((s) => s.summary).length;
   if (summary) console.log(`summaries:   ${withSummary}/${scores.length}`);
-  const estimates = scores.flatMap((s) => (s.inputTokens ? [estimateError(s.inputTokens)] : []));
-  const worstEstimate = estimates.length ? Math.max(...estimates.map(Math.abs)) : 0;
-  console.log(
-    `input-token estimate: worst error ${pct(worstEstimate)}   (target ≤ ${pct(GATES.estimateError)})`,
-  );
-
-  if (values.json) {
-    await writeFile(
-      values.json,
-      JSON.stringify(
-        { provider: values.provider, model: model?.id, totals: t, usage, scores },
-        null,
-        2,
-      ),
+  if (run.mode === 'single-pass') {
+    const estimates = scores.flatMap((s) => (s.inputTokens ? [estimateError(s.inputTokens)] : []));
+    const worst = estimates.length ? Math.max(...estimates.map(Math.abs)) : 0;
+    console.log(
+      `input-token estimate: worst error ${pct(worst)}   (target ≤ ${pct(GATES.estimateError)})`,
     );
-    console.log(`report written to ${values.json}`);
   }
+}
 
-  const passedGates =
-    t.parseRate >= GATES.parseRate &&
-    t.precision >= GATES.precision &&
-    t.cleanFindings <= GATES.cleanFindings &&
-    t.nitsPer100Lines <= GATES.nitsPer100Lines;
-  if (values.provider === 'mock') {
-    // The oracle must be perfect; anything less is a pipeline bug.
-    const perfect =
-      t.parseRate === 1 &&
-      t.precision === 1 &&
-      t.recall === 1 &&
-      t.errors === 0 &&
-      (!summary || withSummary === scores.length);
-    console.log(perfect ? '\nmock run: pipeline OK' : '\nmock run: pipeline FAILED');
-    return perfect ? 0 : 1;
+/** P4-6: side-by-side numbers and the fixtures only one mode got right. */
+function printComparison(a: ModeRun, b: ModeRun): void {
+  const row = (label: string, f: (r: ModeRun) => string) =>
+    console.log(`${label.padEnd(20)} ${f(a).padStart(14)} ${f(b).padStart(14)}`);
+  console.log('\n== comparison ==');
+  row('', (r) => r.mode);
+  row('precision', (r) => pct(r.totals.precision));
+  row('recall', (r) => pct(r.totals.recall));
+  row('cross-file recall', (r) => pct(r.totals.crossFileRecall));
+  row('clean findings', (r) => String(r.totals.cleanFindings));
+  row('requests', (r) => String(r.usage.requests));
+  row('input tokens', (r) =>
+    String(r.usage.inputTokens + (r.usage.cacheReadTokens ?? 0) + (r.usage.cacheWriteTokens ?? 0)),
+  );
+  row('output tokens', (r) => String(r.usage.outputTokens));
+  row('cost', (r) => (r.costUsd !== undefined ? `$${r.costUsd.toFixed(4)}` : '-'));
+  for (const [x, y] of [
+    [a, b],
+    [b, a],
+  ] as const) {
+    const only = x.scores.filter((s, i) => s.hits > (y.scores[i]?.hits ?? 0)).map((s) => s.id);
+    if (only.length) console.log(`found more with ${x.mode}: ${only.join(', ')}`);
   }
-  console.log(passedGates ? '\nMVP gates: passed' : '\nMVP gates: NOT passed');
-  return values.strict && !passedGates ? 1 : 0;
 }
 
 async function createProvider(
@@ -207,7 +287,10 @@ async function createProvider(
   throw new Error(`Unknown provider "${name}". Use mock or anthropic.`);
 }
 
-/** Reports every expected finding whose quote is in the request, 3 lines off. */
+/**
+ * Reports every expected finding whose quote is in the request, 3 lines off.
+ * With agent tools available, it first reads one file (once) to exercise the loop.
+ */
 function oracle(req: ChatRequest, fixture: Fixture): MockStep {
   if (!req.tools) {
     // The summary request (no tools): any non-empty markdown will do.
@@ -217,10 +300,17 @@ function oracle(req: ChatRequest, fixture: Fixture): MockStep {
       ],
     };
   }
-  const sent = req.messages
-    .flatMap((m) => m.content)
-    .map((p) => (p.type === 'text' ? p.text : ''))
-    .join('\n');
+  const parts = req.messages.flatMap((m) => m.content);
+  const exploring = req.tools.some((t) => t.name === 'read_file');
+  if (exploring && !parts.some((p) => p.type === 'tool_result')) {
+    const target = fixture.expected[0]?.file ?? Object.keys(fixture.after)[0]!;
+    return {
+      events: [
+        { type: 'tool_call', id: 'oracle_read', name: 'read_file', input: { path: target } },
+      ],
+    };
+  }
+  const sent = parts.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
   const findings = fixture.expected
     .filter((e) => sent.includes(e.quote.split('\n')[0]!.trim()))
     .map((e) => {
@@ -262,7 +352,7 @@ function makeRepo(fixture: Fixture): string {
   return root;
 }
 
-function printFixture(s: FixtureScore): void {
+function printFixture(s: FixtureScore, mode: Mode): void {
   const status = s.error
     ? 'ERROR'
     : s.expected === 0
@@ -270,8 +360,10 @@ function printFixture(s: FixtureScore): void {
         ? 'FP'
         : 'clean'
       : `${s.hits}/${s.expected}`;
+  const tools =
+    mode === 'agentic' && s.toolCalls !== undefined ? `, ${s.toolCalls} tool call(s)` : '';
   console.log(
-    `${s.id.padEnd(28)} ${status.padEnd(6)} reported ${s.reported}, false positives ${s.falsePositives.length}, parse ${s.outcomes.join(',')}`,
+    `${s.id.padEnd(28)} ${status.padEnd(6)} reported ${s.reported}, false positives ${s.falsePositives.length}, parse ${s.outcomes.join(',')}${tools}`,
   );
   if (s.inputTokens) {
     console.log(
