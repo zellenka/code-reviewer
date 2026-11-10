@@ -18,15 +18,22 @@ Free and open source. **Bring your own model:** GitHub Copilot (no key needed) o
 
 ## Usage
 
-1. Pick a model: **AI Review: Select Model** (status bar). Copilot needs no setup; for Claude run **AI Review: Set Anthropic API Key** first.
-2. Run one of:
+1. Click the **AI Review** icon in the Activity Bar (left side). The **Review** panel lets you:
+   - choose what to review: unstaged changes, staged changes, branch changes (with a base branch picker), the current file or the selection;
+   - pick the repository (when the workspace has several), the model, the review mode and whether to include surrounding code;
+   - press **Run Review** (or **Cancel Review** while it runs). Your choices are remembered per workspace.
+
+   Copilot needs no setup; for Claude press **Set API Key** in the panel (or run **AI Review: Set Anthropic API Key**).
+
+2. Or use the commands:
+   - **AI Review: Run Review** (uses the panel's choices) / **AI Review: Open Review Panel**
    - **AI Review: Review Unstaged Changes** (includes new, untracked files)
    - **AI Review: Review Staged Changes**
    - **AI Review: Review Branch Changes** (everything since the branch left `main`; set `aiReview.baseBranch` to change the base)
    - **AI Review: Review Current File** / **Review Selection** (also in the editor's right-click menu)
 3. Look at the findings:
    - **Inline comment threads** on the code, with buttons to apply or preview the fix, mark resolved, or dismiss.
-   - The **AI Review** view in the Source Control sidebar: a summary of the change (walkthrough + top risks), findings grouped by file (click to jump to the code), and review details (model, tokens, cost, dropped findings).
+   - The **Findings** view in the AI Review sidebar, below the panel: a summary of the change (walkthrough + top risks), findings grouped by file (click to jump to the code), and review details (model, tokens, cost, dropped findings).
    - The **Problems** panel: critical = error, major = warning, minor = info, nit = hint.
 4. Fix: when a finding suggests a change, use the light bulb (**Apply fix** or **Preview fix…**) or the thread's buttons. Fixes are normal edits, so **Undo** works.
 5. Keep editing: findings move with your code. If the code a finding refers to is changed or deleted, it's marked _outdated_ and its fix is disabled. **AI Review: Clear Findings** removes all findings.

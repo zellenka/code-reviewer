@@ -66,6 +66,24 @@ export interface ReviewDeps {
 }
 
 let running: vscode.CancellationTokenSource | undefined;
+const runningChanged = new vscode.EventEmitter<boolean>();
+/** Fires `true` when a review starts and `false` when no review is running any more. */
+export const onDidChangeReviewRunning = runningChanged.event;
+
+export function isReviewRunning(): boolean {
+  return !!running;
+}
+
+/** Cancels the running review, if any. Findings from finished parts are kept. */
+export function cancelReview(): void {
+  running?.cancel();
+}
+
+function setRunning(cts: vscode.CancellationTokenSource | undefined): void {
+  running = cts;
+  runningChanged.fire(!!cts);
+  void vscode.commands.executeCommand('setContext', 'aiReview.running', !!cts);
+}
 
 export async function reviewCommand(
   kind: ReviewKind,
@@ -95,7 +113,7 @@ export async function reviewCommand(
   // Starting a new review cancels the previous one.
   running?.cancel();
   const cts = new vscode.CancellationTokenSource();
-  running = cts;
+  setRunning(cts);
 
   try {
     const editor = vscode.window.activeTextEditor;
@@ -284,7 +302,7 @@ export async function reviewCommand(
     } else logger.error(err instanceof Error ? err : String(err));
     return { ok: false, message: err instanceof Error ? err.message : String(err) };
   } finally {
-    if (running === cts) running = undefined;
+    if (running === cts) setRunning(undefined);
     cts.dispose();
   }
 }

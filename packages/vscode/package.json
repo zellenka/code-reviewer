@@ -76,6 +76,24 @@
         "category": "AI Review"
       },
       {
+        "command": "aiReview.openPanel",
+        "title": "Open Review Panel",
+        "category": "AI Review",
+        "icon": "$(layout-sidebar-left)"
+      },
+      {
+        "command": "aiReview.runReview",
+        "title": "Run Review",
+        "category": "AI Review",
+        "icon": "$(play)"
+      },
+      {
+        "command": "aiReview.cancelReview",
+        "title": "Cancel Review",
+        "category": "AI Review",
+        "icon": "$(debug-stop)"
+      },
+      {
         "command": "aiReview.reviewStaged",
         "title": "Review Staged Changes",
         "category": "AI Review"
@@ -150,18 +168,23 @@
       }
     ],
     "views": {
-      "scm": [
+      "aiReview": [
+        {
+          "type": "webview",
+          "id": "aiReview.controls",
+          "name": "Review"
+        },
         {
           "id": "aiReview.findings",
-          "name": "AI Review",
-          "icon": "$(sparkle)"
+          "name": "Findings",
+          "icon": "media/ai-review.svg"
         }
       ]
     },
     "viewsWelcome": [
       {
         "view": "aiReview.findings",
-        "contents": "Review your local changes with AI. Findings show up here, inline in the editor and in the Problems panel.\n[Review Unstaged Changes](command:aiReview.reviewUnstaged)\n[Review Staged Changes](command:aiReview.reviewStaged)\n[Review Branch Changes](command:aiReview.reviewBranch)\nModel: [Select Model](command:aiReview.selectModel)"
+        "contents": "No review yet. Choose what to review above and press Run Review. Findings show up here, inline in the editor and in the Problems panel.\n[Run Review](command:aiReview.runReview)"
       }
     ],
     "configuration": {
@@ -365,6 +388,10 @@
         {
           "command": "aiReview.showSummary",
           "when": "aiReview.hasReview"
+        },
+        {
+          "command": "aiReview.cancelReview",
+          "when": "aiReview.running"
         }
       ],
       "comments/commentThread/title": [
@@ -396,8 +423,13 @@
       ],
       "view/title": [
         {
-          "command": "aiReview.reviewUnstaged",
-          "when": "view == aiReview.findings",
+          "command": "aiReview.runReview",
+          "when": "view == aiReview.controls && !aiReview.running",
+          "group": "navigation@1"
+        },
+        {
+          "command": "aiReview.cancelReview",
+          "when": "view == aiReview.controls && aiReview.running",
           "group": "navigation@1"
         },
         {
@@ -456,6 +488,15 @@
           "command": "aiReview.reviewUnstaged",
           "when": "scmProvider == git",
           "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiReview",
+          "title": "AI Review",
+          "icon": "media/ai-review.svg"
         }
       ]
     }

@@ -1,7 +1,15 @@
 import { MockProvider, type ChatRequest, type MockStep } from '@ai-review/core';
 import * as assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -153,6 +161,7 @@ suite('Review', () => {
     api.findings.clear();
     rmSync(path.join(root, '.codereview.yml'), { force: true });
     api.configs.forget(root);
+    await api.panel.update({ scope: 'unstaged', root: '', base: '' });
     const config = vscode.workspace.getConfiguration('aiReview');
     await config.update('provider', undefined, vscode.ConfigurationTarget.Global);
     await config.update('model', undefined, vscode.ConfigurationTarget.Global);
@@ -548,5 +557,86 @@ suite('Review', () => {
         vscode.ConfigurationTarget.Global,
       );
     }
+  });
+
+  test('the AI Review sidebar has the Review panel and the Findings view', () => {
+    const contributes = vscode.extensions.getExtension(EXTENSION_ID)!.packageJSON.contributes as {
+      viewsContainers: { activitybar: { id: string; icon: string }[] };
+      views: Record<string, { id: string; type?: string }[]>;
+    };
+    const container = contributes.viewsContainers.activitybar.find((c) => c.id === 'aiReview');
+    assert.ok(container, 'activity bar container');
+    assert.ok(
+      existsSync(path.join(__dirname, '..', '..', container.icon)),
+      'activity bar icon exists',
+    );
+    assert.deepStrictEqual(
+      contributes.views.aiReview!.map((v) => [v.id, v.type ?? 'tree']),
+      [
+        ['aiReview.controls', 'webview'],
+        ['aiReview.findings', 'tree'],
+      ],
+    );
+  });
+
+  test('Run Review uses the scope and base branch picked in the panel', async () => {
+    await api.panel.update({ scope: 'staged' });
+    let result = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.runReview', {
+      root,
+      silent: true,
+    });
+    assert.strictEqual(result.ok, true, result.message);
+    assert.deepStrictEqual(api.findings.session?.mode, { kind: 'staged' });
+    assert.deepStrictEqual(result.result?.reviewedFiles, ['src/staged.ts']);
+
+    await api.panel.update({ scope: 'branch', base: 'main' });
+    result = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.runReview', {
+      root,
+      silent: true,
+    });
+    assert.strictEqual(result.ok, true, result.message);
+    assert.deepStrictEqual(api.findings.session?.mode, { kind: 'branch', base: 'main' });
+    assert.ok(result.findings?.some((f) => f.title === KNOWN_BUGS[0]!.title));
+
+    // A base that doesn't exist is reported, not thrown.
+    await api.panel.update({ base: 'no-such-branch' });
+    result = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.runReview', {
+      root,
+      silent: true,
+    });
+    assert.strictEqual(result.ok, false);
+    assert.match(result.message ?? '', /no-such-branch/);
+    assert.strictEqual((await api.panel.snapshot()).last?.level, 'warn');
+
+    // A later review from any command replaces that error in the panel.
+    result = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewStaged', {
+      root,
+      silent: true,
+    });
+    assert.strictEqual(result.ok, true, result.message);
+    assert.strictEqual((await api.panel.snapshot()).last?.level, 'info');
+  });
+
+  test('panel state shows the open file, selection, model and branches', async () => {
+    await api.panel.update({ scope: 'selection', root });
+    const doc = await vscode.workspace.openTextDocument(path.join(root, 'src/calc.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    editor.selection = new vscode.Selection(3, 0, 5, 0);
+    const state = await api.panel.snapshot();
+    assert.strictEqual(state.scope, 'selection');
+    assert.match(state.file ?? '', /calc.ts$/);
+    assert.match(state.selection ?? '', /lines 4–5$/);
+    assert.strictEqual(state.model.ok, true);
+    assert.match(state.model.label, /Stub/);
+    assert.strictEqual(state.running, false);
+    assert.ok(Array.isArray(state.branches));
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
+  test('the panel can be opened from the command palette', async () => {
+    await vscode.commands.executeCommand('aiReview.openPanel');
+    const commands = await vscode.commands.getCommands(true);
+    assert.ok(commands.includes('aiReview.runReview'));
+    assert.ok(commands.includes('aiReview.cancelReview'));
   });
 });

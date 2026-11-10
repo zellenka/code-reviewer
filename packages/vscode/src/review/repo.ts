@@ -1,5 +1,5 @@
 import { DiffSourceError, toPosixPath, type Logger } from '@ai-review/core';
-import { GitCliDiffSource, findRepoRoot } from '@ai-review/node-host';
+import { GitCliDiffSource, createGitRunner, findRepoRoot } from '@ai-review/node-host';
 import { stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -61,6 +61,29 @@ export class RepoLocator {
       { placeHolder: 'Which repository do you want to review?' },
     );
     return picked ? this.create(picked.root, gitPath) : undefined;
+  }
+
+  /** All repositories in the workspace (absolute OS paths), without asking. */
+  async roots(): Promise<string[]> {
+    return this.knownRoots(await this.gitApi());
+  }
+
+  /** Local and remote-tracking branch names of `root`, for the base branch picker. */
+  async branches(root: string): Promise<string[]> {
+    try {
+      const git = createGitRunner(root, (await this.gitApi())?.git.path);
+      const { stdout } = await git(
+        ['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes'],
+        { allowFail: true },
+      );
+      return stdout
+        .split('\n')
+        .map((b) => b.trim())
+        .filter((b) => b && !b.endsWith('/HEAD') && b !== 'origin');
+    } catch (err) {
+      this.logger.debug(`listing branches failed: ${String(err)}`);
+      return [];
+    }
   }
 
   private create(root: string, gitPath: string | undefined): RepoContext {

@@ -6,7 +6,12 @@ import { AnthropicKeyStore, clearApiKeyCommand, setApiKeyCommand } from './provi
 import { VsCodeLmProvider } from './providers/copilot';
 import { ModelStatusBar, selectModelCommand } from './providers/picker';
 import { CONFIG_SECTION, ProviderRegistry, type Selection } from './providers/registry';
-import { reviewCommand, type ReviewCommandArgs, type ReviewKind } from './review/commands';
+import {
+  cancelReview,
+  reviewCommand,
+  type ReviewCommandArgs,
+  type ReviewKind,
+} from './review/commands';
 import { ReviewConfigService } from './review/config';
 import { FindingsDiagnostics } from './review/diagnostics';
 import { registerFindingCommands } from './review/findingCommands';
@@ -15,6 +20,7 @@ import { RepoLocator } from './review/repo';
 import { FindingStore } from './review/store';
 import { FindingThreads } from './review/threads';
 import { FindingsTree, SUMMARY_SCHEME, SummaryProvider } from './review/tree';
+import { ReviewPanel } from './ui/panel';
 
 /** Returned from `activate`; used by extension tests. Not a stable public API. */
 export interface ExtensionApi {
@@ -25,6 +31,7 @@ export interface ExtensionApi {
   findings: FindingStore;
   threads: FindingThreads;
   tree: FindingsTree;
+  panel: ReviewPanel;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi> {
@@ -140,11 +147,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       ),
     );
   }
+  const panel = new ReviewPanel(context, { registry, repos, store, logger });
   context.subscriptions.push(
+    panel,
     vscode.commands.registerCommand('aiReview.clearFindings', () => store.clear()),
+    vscode.commands.registerCommand('aiReview.runReview', (arg?: unknown) =>
+      panel.run(isArgs(arg) ? arg : {}),
+    ),
+    vscode.commands.registerCommand('aiReview.cancelReview', () => cancelReview()),
+    vscode.commands.registerCommand('aiReview.openPanel', () =>
+      vscode.commands.executeCommand('workbench.view.extension.aiReview'),
+    ),
   );
 
-  return { registry, keyStore, repos, configs, findings: store, threads, tree };
+  return { registry, keyStore, repos, configs, findings: store, threads, tree, panel };
 }
 
 export function deactivate(): void {}
@@ -160,6 +176,6 @@ function isArgs(arg: unknown): arg is ReviewCommandArgs {
     !!arg &&
     typeof arg === 'object' &&
     !(arg instanceof vscode.Uri) &&
-    ['root', 'path', 'startLine', 'endLine', 'base', 'silent'].some((k) => k in arg)
+    ['root', 'path', 'startLine', 'endLine', 'base', 'silent', 'confirmCost'].some((k) => k in arg)
   );
 }
