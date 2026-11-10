@@ -126,7 +126,10 @@ export class ProviderRegistry implements vscode.Disposable {
 }
 
 /** Write where the value is currently defined, so a workspace setting isn't silently shadowed. */
-function targetFor(config: vscode.WorkspaceConfiguration, key: string): vscode.ConfigurationTarget {
+export function targetFor(
+  config: vscode.WorkspaceConfiguration,
+  key: string,
+): vscode.ConfigurationTarget {
   const inspected = config.inspect(key);
   if (inspected?.workspaceFolderValue !== undefined)
     return vscode.ConfigurationTarget.WorkspaceFolder;

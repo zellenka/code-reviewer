@@ -9,6 +9,7 @@ VS Code extension for AI code review (CodeRabbit-like), later also a CI/PR bot. 
 - [x] **Phase 2 — Single-pass review (MVP)** (P2-0 … P2-10) — code done 2026-11-01; pending: live evals with Anthropic (P2-4 parse-rate AC, MVP precision gate), manual review run on a real repo with Copilot, dogfooding
 - [x] **Phase 3 — Real review UX** (P3-1 … P3-6) — code done 2026-11-02; pending: live check of the ±30% input-token estimate (P3-4 AC) with `pnpm eval --provider anthropic`, manual run in VS Code
 - [x] **Phase 4 — Context & agent loop** (P4-1 … P4-6) — code done 2026-11-08; pending live checks: P4-4 rule fixture, P4-5 cache reads (`pnpm test:live`), P4-6 comparison (`pnpm eval --provider anthropic --mode compare`)
+- [x] **Phase 4.1 — UI improvements** (P4.1-1 … P4.1-3) — done 2026-11-10 (manual check in VS Code passed: panel and review run)
 - [ ] **Phase 5 — Quality & state** (P5-1 … P5-4)
 - [ ] **Phase 6 — CI / PR bot** (P6-1 … P6-4)
 - [ ] **Phase 7 — Release** (P7-1, P7-2)
@@ -264,6 +265,16 @@ Each task: **ID · title** — description. *AC* = acceptance criteria. *Deps* =
 - **P4-4 · Repo rules** — load rules markdown (`.codereview.md`, `AGENTS.md`, `.github/copilot-instructions.md`), wrap as untrusted guidance in the system prompt with a cache hint. *AC:* a rule like "never use `any`" produces findings on a fixture (live eval). *Deps:* P2-0, P2-4
 - **P4-5 · Prompt caching & cost tuning** — cache breakpoints for system + rules + shared context across chunks (Anthropic). Note: caching only applies above a model-specific minimum prompt length — pad shared context or accept no caching for small prompts. *AC:* when shared prefix exceeds the minimum, the second chunk in a run shows cache-read tokens. *Deps:* P1-2, P4-4
 - **P4-6 · Agentic reviewer mode** — Reviewer uses AgentLoop + WorkspaceTools when `review.mode: agentic`; per-chunk budget; ends with `report_findings`. *AC:* on evals, agentic finds ≥ 1 cross-file bug that single-pass misses, with comparison report (precision, recall, cost). *Deps:* P4-2, P4-3, P5-1
+
+### Phase 4.1 — UI improvements ✅ Code done
+> **Implementation notes (2026-11-10):**
+> - **Sidebar:** an **AI Review** container in the Activity Bar (`media/ai-review.svg`) holds the **Review** panel (`aiReview.controls`, webview) and the **Findings** tree (`aiReview.findings`, moved from the Source Control sidebar). The SCM title button still starts an unstaged review.
+> - **Panel (`src/ui/panel.ts`):** scope, repository and base branch are remembered in `workspaceState`; mode and context toggles write the existing `aiReview.reviewMode` / `aiReview.includeContext` settings, so commands and the panel always agree. Running calls the existing `aiReview.review*` commands, so there is one review path. The webview only sends typed messages; values are validated (scope list, known repo roots, `isSafeRef` for the base) and only an allow-list of commands can be run. Strict CSP with a nonce, no remote resources, text set with `textContent`.
+> - **Refreshes:** debounced (100 ms); each refresh is numbered so a slow, older snapshot can't overwrite a newer one; the model (until providers change) and repo list (5 s) are cached because selection changes refresh often. Run is ignored while a review runs (double click). The panel's last error is cleared by any newer review.
+> - **Run state:** `reviewCommand` publishes `onDidChangeReviewRunning` and the `aiReview.running` context key; the panel swaps Run for Cancel and the view title shows Run/Cancel buttons.
+- **P4.1-1 · Activity Bar container** — icon on the left; clicking it shows the review controls and findings. *AC:* container and both views contributed (ext test).
+- **P4.1-2 · Review panel** — choose scope (unstaged, staged, branch + base, file, selection), repository, model, mode, context; Run / Cancel; last result with links to findings, summary, log. *AC:* Run Review uses the chosen scope and base (ext test); panel state reflects the open file, selection and model (ext test).
+- **P4.1-3 · Commands** — `AI Review: Run Review`, `Cancel Review`, `Open Review Panel`. *AC:* registered and runnable (ext test).
 
 ### Phase 5 — Quality & state
 - **P5-1 · Eval harness (full)** — grow `evals/` to 20–30 fixtures (seeded bugs, cross-file bugs, clean diffs, CRLF), scorer (precision/recall by file + line overlap + category), JSON report, compare two runs. Evals run on Anthropic only (Copilot is not available outside VS Code). *AC:* report printed + JSON saved; manually-triggered CI workflow. *Deps:* P2-8
