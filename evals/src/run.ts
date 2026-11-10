@@ -1,7 +1,8 @@
 /**
  * Eval runner:
  *   pnpm eval --provider mock|anthropic [--model id] [--mode single-pass|agentic|compare]
- *             [--fixture name] [--json out.json] [--strict] [--no-summary]
+ *             [--fixture name] [--json out.json] [--baseline old.json] [--strict] [--no-summary]
+ *             [--verify] [--verify-model id]
  *
  * For each fixture: build a temp git repo (before → commit → after), take the unstaged
  * diff through node-host, load the repo rules, run the real review pipeline, and score
@@ -9,6 +10,8 @@
  * (with wrong line numbers; in agentic mode after one real tool call): it tests the
  * pipeline, not the model, and must score 100%. `anthropic` needs ANTHROPIC_API_KEY.
  * `--mode compare` runs single-pass and agentic on the same fixtures and prints both.
+ * `--verify` turns on the verify pass (P5-2). `--baseline` compares with an earlier JSON
+ * report (also: `pnpm eval:compare a.json b.json`).
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -31,9 +34,11 @@ import {
   type ModelInfo,
   type ReviewConfig,
   type Usage,
+  VERIFY_TOOL_NAME,
 } from '@ai-review/core';
 import { FsWorkspaceTools, GitCliDiffSource, loadRepoRulesFromDisk } from '@ai-review/node-host';
-import { loadFixtures, type Fixture } from './fixtures';
+import { compareReports, loadReport, type Report } from './compare';
+import { expectedCategories, loadFixtures, type Fixture } from './fixtures';
 import { estimateError, scoreFixture, totals, type FixtureScore, type Totals } from './score';
 
 const GIT_ENV = {
@@ -58,12 +63,15 @@ type Mode = 'single-pass' | 'agentic';
 
 interface ModeRun {
   mode: Mode;
+  verify: boolean;
   scores: FixtureScore[];
   totals: Totals;
   usage: Usage;
   costUsd?: number;
   /** Agentic only: tool calls over all fixtures. */
   toolCalls: number;
+  /** Verify pass: findings checked and rejected over all fixtures. */
+  verified?: { checked: number; rejected: number; failed: number };
 }
 
 async function main(): Promise<number> {
@@ -74,6 +82,9 @@ async function main(): Promise<number> {
       mode: { type: 'string', default: 'single-pass' },
       fixture: { type: 'string' },
       json: { type: 'string' },
+      baseline: { type: 'string' },
+      verify: { type: 'boolean', default: false },
+      'verify-model': { type: 'string' },
       strict: { type: 'boolean', default: false },
       concurrency: { type: 'string' },
       'no-summary': { type: 'boolean', default: false },
@@ -96,18 +107,29 @@ async function main(): Promise<number> {
     return 1;
   }
   const clean = new Set(fixtures.filter((f) => f.expected.length === 0).map((f) => f.id));
+  const verify = values.verify || !!values['verify-model'];
 
   const runs: ModeRun[] = [];
   let model: ModelInfo | undefined;
   for (const mode of modes) {
     console.log(`\n== ${mode} ==`);
-    const config: ReviewConfig = { ...DEFAULT_CONFIG, review: { ...DEFAULT_CONFIG.review, mode } };
+    const config: ReviewConfig = {
+      ...DEFAULT_CONFIG,
+      review: { ...DEFAULT_CONFIG.review, mode, verify },
+    };
     const scores: FixtureScore[] = [];
     let usage: Usage = emptyUsage();
     let toolCalls = 0;
+    const verified = { checked: 0, rejected: 0, failed: 0 };
     for (const fixture of fixtures) {
       const { provider, model: m } = await createProvider(values.provider!, values.model, fixture);
       model = m;
+      const verifyModel = values['verify-model']
+        ? (await provider.listModels()).find((x) => x.id === values['verify-model'])
+        : undefined;
+      if (values['verify-model'] && !verifyModel) {
+        throw new Error(`Unknown verify model ${values['verify-model']}`);
+      }
       const repo = makeRepo(fixture);
       try {
         const diff = await new GitCliDiffSource({ root: repo }).getDiff({ kind: 'unstaged' });
@@ -127,10 +149,16 @@ async function main(): Promise<number> {
             summary,
             rules,
             workspace,
+            ...(verifyModel ? { verifyModel } : {}),
             ...(values.concurrency ? { concurrency: Number(values.concurrency) } : {}),
           });
           usage = addUsage(usage, result.usage);
           toolCalls += result.agent?.toolCalls ?? 0;
+          if (result.verify) {
+            verified.checked += result.verify.checked;
+            verified.rejected += result.verify.rejected;
+            verified.failed += result.verify.failed;
+          }
           scores.push({
             ...scoreFixture(fixture.id, fixture.expected, result.findings, {
               changedLines,
@@ -161,20 +189,27 @@ async function main(): Promise<number> {
       }
       printFixture(scores.at(-1)!, mode);
     }
-    const run: ModeRun = { mode, scores, totals: totals(scores, clean), usage, toolCalls };
+    const run: ModeRun = { mode, verify, scores, totals: totals(scores, clean), usage, toolCalls };
+    if (verify) run.verified = verified;
     if (model?.pricing) run.costUsd = estimateCostUsd(usage, model.pricing);
     printTotals(run, values.provider!, model, summary);
     runs.push(run);
   }
   if (runs.length === 2) printComparison(runs[0]!, runs[1]!);
 
+  const report: Report = {
+    provider: values.provider!,
+    ...(model ? { model: model.id } : {}),
+    createdAt: new Date().toISOString(),
+    runs,
+  };
   if (values.json) {
-    const report =
-      runs.length === 1
-        ? { provider: values.provider, model: model?.id, ...runs[0]! }
-        : { provider: values.provider, model: model?.id, runs };
     await writeFile(values.json, JSON.stringify(report, null, 2));
     console.log(`report written to ${values.json}`);
+  }
+  if (values.baseline) {
+    console.log(`\n== compared with ${values.baseline} ==`);
+    console.log(compareReports(await loadReport(values.baseline), report).join('\n'));
   }
 
   if (values.provider === 'mock') {
@@ -186,7 +221,8 @@ async function main(): Promise<number> {
         t.recall === 1 &&
         t.errors === 0 &&
         (!summary || scores.every((s) => s.summary)) &&
-        (mode !== 'agentic' || toolCalls > 0),
+        (mode !== 'agentic' || toolCalls > 0) &&
+        (!verify || (runs.every((r) => (r.verified?.checked ?? 0) > 0) && t.recall === 1)),
     );
     console.log(perfect ? '\nmock run: pipeline OK' : '\nmock run: pipeline FAILED');
     return perfect ? 0 : 1;
@@ -225,6 +261,11 @@ function printTotals(
     `usage: ${usage.inputTokens} in (+${usage.cacheReadTokens ?? 0} cache read, +${usage.cacheWriteTokens ?? 0} cache write) / ${usage.outputTokens} out, ${usage.requests} request(s)${run.costUsd !== undefined ? `, ≈ $${run.costUsd.toFixed(4)}` : ''}`,
   );
   if (run.mode === 'agentic') console.log(`tool calls:  ${run.toolCalls}`);
+  if (run.verified) {
+    console.log(
+      `verify pass: ${run.verified.rejected} of ${run.verified.checked} finding(s) rejected${run.verified.failed ? `, ${run.verified.failed} request(s) failed` : ''}`,
+    );
+  }
   if (t.errors) console.log(`fixtures with errors: ${t.errors}`);
   const withSummary = scores.filter((s) => s.summary).length;
   if (summary) console.log(`summaries:   ${withSummary}/${scores.length}`);
@@ -292,6 +333,24 @@ async function createProvider(
  * With agent tools available, it first reads one file (once) to exercise the loop.
  */
 function oracle(req: ChatRequest, fixture: Fixture): MockStep {
+  if (req.tools?.some((t) => t.name === VERIFY_TOOL_NAME)) {
+    // Verify pass: every finding the oracle reported is real.
+    const text = req.messages
+      .flatMap((m) => m.content)
+      .map((p) => (p.type === 'text' ? p.text : ''))
+      .join('\n');
+    const ids = [...text.matchAll(/<finding id="(F\d+)"/g)].map((m) => m[1]);
+    return {
+      events: [
+        {
+          type: 'tool_call',
+          id: 'oracle_verify',
+          name: VERIFY_TOOL_NAME,
+          input: { verdicts: ids.map((id) => ({ id, real: true, reason: 'oracle' })) },
+        },
+      ],
+    };
+  }
   if (!req.tools) {
     // The summary request (no tools): any non-empty markdown will do.
     return {
@@ -320,7 +379,7 @@ function oracle(req: ChatRequest, fixture: Fixture): MockStep {
         startLine: start + 3,
         endLine: end + 3,
         severity: e.severity,
-        category: e.category,
+        category: expectedCategories(e)[0],
         title: e.title,
         body: e.title,
         quote: e.quote,
@@ -339,7 +398,10 @@ function makeRepo(fixture: Fixture): string {
   const write = (files: Record<string, string>) => {
     for (const [rel, content] of Object.entries(files)) {
       mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
-      writeFileSync(path.join(root, rel), content);
+      writeFileSync(
+        path.join(root, rel),
+        fixture.eol === 'crlf' ? content.replace(/\r?\n/g, '\r\n') : content,
+      );
     }
   };
   git('init', '-q', '-b', 'main');

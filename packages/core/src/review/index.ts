@@ -14,3 +14,5 @@ export * from './markdown';
 export * from './symbols';
 export * from './context';
 export * from './rules';
+export * from './verify';
+export * from './incremental';

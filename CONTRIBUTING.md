@@ -14,12 +14,27 @@ pnpm build
 
 ## Layout
 
-| Path              | What                                                                                                                     |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `packages/core`   | Pure TypeScript review engine. **Must not import `vscode`** (enforced by ESLint) so it can run in the CLI, evals and CI. |
-| `packages/vscode` | The extension: commands, UI, VS Code-specific providers. Bundled with esbuild into `dist/extension.js`.                  |
+| Path                 | What                                                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `packages/core`      | Pure TypeScript review engine. **Must not import `vscode`** (enforced by ESLint) so it can run in the CLI, evals and CI. |
+| `packages/vscode`    | The extension: commands, UI, VS Code-specific providers. Bundled with esbuild into `dist/extension.js`.                  |
+| `packages/node-host` | Node implementations (git CLI diffs, file-system tools) used by evals and the future CLI.                                |
+| `evals/`             | Review-quality evals: fixture diffs with expected findings, a runner and a report comparer.                              |
 
-More packages (`node-host`, `cli`) and `evals/` are added in later phases — see [implementation-plan.md](implementation-plan.md).
+A `cli` package follows in a later phase — see [implementation-plan.md](implementation-plan.md).
+
+## Evals
+
+Fixtures live in `evals/fixtures/*.yml` (`before`/`after` files, `expected` findings; `eol: crlf` for CRLF files; `category` may list several accepted categories). A finding counts as a hit when file, lines (±2) and category match.
+
+```sh
+pnpm eval                                   # mock oracle: checks the pipeline, must be 100% (runs in CI)
+pnpm eval --provider anthropic --json a.json   # real model; needs ANTHROPIC_API_KEY
+pnpm eval --provider anthropic --verify --baseline a.json   # with the verify pass, compared with a.json
+pnpm eval:compare a.json b.json             # compare any two reports
+```
+
+`--mode compare` runs single-pass and agentic. The manual **Live tests** workflow runs the same against Anthropic and uploads the JSON reports.
 
 ## Everyday commands
 

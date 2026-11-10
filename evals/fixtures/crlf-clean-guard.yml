@@ -1,0 +1,17 @@
+name: Clean guard (CRLF)
+description: Adds a documented argument check. Correct; any finding is a false positive. The files use CRLF line endings.
+eol: crlf
+before:
+  src/clamp.ts: |
+    export function clamp(value: number, min: number, max: number): number {
+      return Math.min(Math.max(value, min), max);
+    }
+after:
+  src/clamp.ts: |
+    /** Limits `value` to the range [min, max]. Throws if min > max. */
+    export function clamp(value: number, min: number, max: number): number {
+      if (min > max) {
+        throw new RangeError(`min (${min}) must not be greater than max (${max})`);
+      }
+      return Math.min(Math.max(value, min), max);
+    }

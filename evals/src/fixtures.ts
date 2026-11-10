@@ -1,6 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import * as path from 'node:path';
-import { CATEGORIES, SEVERITIES } from '@ai-review/core';
+import { CATEGORIES, SEVERITIES, type Category } from '@ai-review/core';
 import { parse } from 'yaml';
 import { z } from 'zod';
 
@@ -8,7 +8,8 @@ const expectedSchema = z.object({
   file: z.string(),
   /** New-side line, or [start, end]. */
   lines: z.union([z.number().int(), z.tuple([z.number().int(), z.number().int()])]),
-  category: z.enum(CATEGORIES),
+  /** Accepted categories: one, or a list when several are reasonable (e.g. [security, bug]). */
+  category: z.union([z.enum(CATEGORIES), z.array(z.enum(CATEGORIES)).min(1)]),
   severity: z.enum(SEVERITIES),
   title: z.string(),
   /** Exact new-side code; the mock provider reports it. */
@@ -20,6 +21,8 @@ const expectedSchema = z.object({
 const fixtureSchema = z.object({
   name: z.string(),
   description: z.string(),
+  /** Line endings of the files written to the repo (the YAML itself is always LF). */
+  eol: z.enum(['lf', 'crlf']).default('lf'),
   /** Committed first. */
   before: z.record(z.string(), z.string()).default({}),
   /** Written to the working tree afterwards (reviewed as unstaged changes). */
@@ -48,6 +51,10 @@ export async function loadFixtures(dir = FIXTURES_DIR, filter?: string): Promise
     fixtures.push({ ...parsed.data, id });
   }
   return fixtures;
+}
+
+export function expectedCategories(e: ExpectedFinding): Category[] {
+  return typeof e.category === 'string' ? [e.category] : e.category;
 }
 
 export function expectedRange(e: ExpectedFinding): [number, number] {

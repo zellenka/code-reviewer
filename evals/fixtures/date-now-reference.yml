@@ -1,0 +1,19 @@
+name: Date.now not called
+description: Compares a timestamp with the Date.now function instead of its result, so the comparison is always false and sessions never expire.
+before:
+  src/session.js: |
+    export function isExpired(session) {
+      return false;
+    }
+after:
+  src/session.js: |
+    export function isExpired(session) {
+      return session.expiresAt < Date.now;
+    }
+expected:
+  - file: src/session.js
+    lines: 2
+    category: bug
+    severity: major
+    title: Date.now is not called, so the comparison is always false
+    quote: 'return session.expiresAt < Date.now;'

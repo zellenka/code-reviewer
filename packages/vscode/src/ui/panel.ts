@@ -62,6 +62,8 @@ export interface PanelState {
   model: { label: string; ok: boolean; detail?: string; needsKey: boolean };
   reviewMode: string;
   includeContext: boolean;
+  /** aiReview.verifyFindings is "on" ("auto" follows the repo config, default off). */
+  verifyFindings: boolean;
   running: boolean;
   last?: { text: string; level: 'info' | 'warn' | 'error'; hasSummary: boolean; open: number };
 }
@@ -228,6 +230,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
       model: await (this.modelCache ??= this.model()),
       reviewMode: settings.get<string>('reviewMode') ?? 'auto',
       includeContext: settings.get<boolean>('includeContext') ?? true,
+      verifyFindings: settings.get<string>('verifyFindings') === 'on',
       running: isReviewRunning(),
       ...(last ? { last } : {}),
     };
@@ -304,6 +307,9 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
         return;
       case 'includeContext':
         if (typeof value === 'boolean') await writeSetting('includeContext', value);
+        return;
+      case 'verifyFindings':
+        if (typeof value === 'boolean') await writeSetting('verifyFindings', value ? 'on' : 'off');
         return;
       case 'run':
         // A double click must not start a second review that cancels the first.

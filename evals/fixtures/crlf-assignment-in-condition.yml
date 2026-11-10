@@ -1,0 +1,22 @@
+name: Assignment in condition (CRLF)
+description: A strict comparison became an assignment, so the cart is emptied and the early return never runs. The files use CRLF line endings.
+eol: crlf
+before:
+  src/cart.js: |
+    export function cartTotal(cart) {
+      if (cart.items.length === 0) return 0;
+      return cart.items.reduce((sum, item) => sum + item.price, 0);
+    }
+after:
+  src/cart.js: |
+    export function cartTotal(cart) {
+      if (cart.items.length = 0) return 0;
+      return cart.items.reduce((sum, item) => sum + item.price * item.qty, 0);
+    }
+expected:
+  - file: src/cart.js
+    lines: 2
+    category: bug
+    severity: critical
+    title: Assigns 0 to cart.items.length instead of comparing, which empties the cart
+    quote: 'if (cart.items.length = 0) return 0;'

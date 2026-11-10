@@ -7,6 +7,7 @@ import {
 } from '@ai-review/core';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import type { FindingStatusStore } from './state';
 
 export type FindingStatus = 'open' | 'resolved' | 'dismissed';
 
@@ -50,7 +51,8 @@ export class FindingStore implements vscode.Disposable {
 
   readonly onDidChange = this.emitter.event;
 
-  constructor() {
+  /** `statuses` persists dismissed/resolved findings across reviews and reloads. */
+  constructor(private readonly statuses?: FindingStatusStore) {
     this.subscriptions.push(
       vscode.workspace.onDidChangeTextDocument((e) => this.onEdit(e)),
       vscode.workspace.onDidSaveTextDocument((doc) => this.reanchorDocument(doc)),
@@ -101,7 +103,9 @@ export class FindingStore implements vscode.Disposable {
       for (const finding of list) {
         let key = finding.id;
         for (let n = 2; this.items.has(key); n++) key = `${finding.id}#${n}`;
-        this.items.set(key, { ...reanchor(finding, lines), key, uri, status: 'open' });
+        // A finding the user dismissed or resolved before keeps that status.
+        const status = this.statuses?.lookup(session.root, finding) ?? 'open';
+        this.items.set(key, { ...reanchor(finding, lines), key, uri, status });
       }
     }
     this.emitter.fire({});
@@ -112,6 +116,7 @@ export class FindingStore implements vscode.Disposable {
     const item = this.items.get(key);
     if (!item || item.status === status) return;
     item.status = status;
+    if (this.current) void this.statuses?.set(this.current.root, item, status);
     // Only open findings are re-anchored while editing; catch up when reopened.
     if (status === 'open' && item.anchor === 'line') {
       const doc = vscode.workspace.textDocuments.find((d) => uriKey(d.uri) === uriKey(item.uri));

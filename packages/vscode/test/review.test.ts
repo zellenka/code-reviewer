@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension';
 import type { ReviewCommandResult } from '../src/review/commands';
+import { FindingStatusStore } from '../src/review/state';
 
 const manifest = JSON.parse(
   readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'),
@@ -67,7 +68,16 @@ const KNOWN_BUGS = [
     suggestion: 'return a / b; // dup',
     body: 'Fix the operator. ![x](https://example.invalid/leak.png)',
   },
+  {
+    file: 'src/ux-state.ts',
+    title: 'state bug',
+    quote: 'return a * b; // state',
+    suggestion: 'return a / b; // state',
+  },
 ];
+
+/** When set, the stub words its findings differently (new title, shorter quote, new fingerprint). */
+let reword = false;
 
 /** Stub model: reports known bugs found in the diff; answers summary requests with text. */
 function reviewer(req: ChatRequest): MockStep {
@@ -83,9 +93,9 @@ function reviewer(req: ChatRequest): MockStep {
     endLine: 2,
     severity: 'major',
     category: 'bug',
-    title: b.title,
+    title: reword ? `Reworded: ${b.title}` : b.title,
     body: b.body ?? 'Fix the operator.',
-    quote: b.quote,
+    quote: reword ? b.quote.slice(0, -1) : b.quote,
     suggestion: b.suggestion,
     confidence: 0.95,
   }));
@@ -159,6 +169,9 @@ suite('Review', () => {
   teardown(async () => {
     vscode.Disposable.from(...disposables.splice(0)).dispose();
     api.findings.clear();
+    // Each test starts without earlier reviews or dismissed findings.
+    await api.snapshots.clear();
+    await api.statuses.clear();
     rmSync(path.join(root, '.codereview.yml'), { force: true });
     api.configs.forget(root);
     await api.panel.update({ scope: 'unstaged', root: '', base: '' });
@@ -638,5 +651,142 @@ suite('Review', () => {
     const commands = await vscode.commands.getCommands(true);
     assert.ok(commands.includes('aiReview.runReview'));
     assert.ok(commands.includes('aiReview.cancelReview'));
+  });
+
+  test('a dismissed finding stays dismissed in the next review, even reworded', async () => {
+    const key = await reviewOne('src/ux-state.ts', DIV('state'));
+    await vscode.commands.executeCommand('aiReview.dismissFinding', key);
+    assert.strictEqual(api.statuses.size, 1);
+
+    // Same finding again (exact fingerprint), after a full re-review.
+    await vscode.commands.executeCommand('aiReview.clearFindings');
+    let result = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+      root,
+      path: 'src/ux-state.ts',
+      silent: true,
+    });
+    assert.strictEqual(result.result?.findings.length, 1);
+    assert.strictEqual(api.findings.open().length, 0);
+    assert.strictEqual(api.findings.all()[0]!.status, 'dismissed');
+    assert.strictEqual(vscode.languages.getDiagnostics(uriOf('src/ux-state.ts')).length, 0);
+
+    // Reworded title and a slightly different quote: a new fingerprint, matched fuzzily.
+    await vscode.commands.executeCommand('aiReview.clearFindings');
+    reword = true;
+    try {
+      result = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+        root,
+        path: 'src/ux-state.ts',
+        silent: true,
+      });
+    } finally {
+      reword = false;
+    }
+    const [reworded] = api.findings.all();
+    assert.match(reworded!.title, /^Reworded/);
+    assert.notStrictEqual(reworded!.id, key);
+    assert.strictEqual(reworded!.status, 'dismissed');
+
+    // Forgetting brings it back.
+    await vscode.commands.executeCommand('aiReview.forgetFindingStatus', { silent: true });
+    await vscode.commands.executeCommand('aiReview.clearFindings');
+    await vscode.commands.executeCommand('aiReview.reviewFile', {
+      root,
+      path: 'src/ux-state.ts',
+      silent: true,
+    });
+    assert.strictEqual(api.findings.open().length, 1);
+  });
+
+  test('dismissed state is saved in workspace storage and read back after a reload', async () => {
+    const values = new Map<string, unknown>();
+    const memento: vscode.Memento = {
+      keys: () => [...values.keys()],
+      get: <T>(k: string, d?: T) => (values.has(k) ? (values.get(k) as T) : d),
+      update: (k: string, v: unknown) => {
+        values.set(k, JSON.parse(JSON.stringify(v ?? null)));
+        return Promise.resolve();
+      },
+    };
+    const finding = {
+      id: 'abc',
+      file: 'src/x.ts',
+      startLine: 1,
+      endLine: 1,
+      anchor: 'line' as const,
+      severity: 'major' as const,
+      category: 'bug' as const,
+      title: 't',
+      body: '',
+      quote: 'const total = price * quantity;',
+      confidence: 1,
+    };
+    await new FindingStatusStore(memento).set(root, finding, 'dismissed');
+    const reloaded = new FindingStatusStore(memento);
+    assert.strictEqual(reloaded.lookup(root, finding), 'dismissed');
+    assert.strictEqual(
+      reloaded.lookup(root, {
+        ...finding,
+        id: 'other',
+        quote: 'const total = price  * quantity ;',
+      }),
+      'dismissed',
+    );
+    assert.strictEqual(
+      reloaded.lookup(root, { ...finding, id: 'x', category: 'security' }),
+      undefined,
+    );
+    assert.strictEqual(reloaded.lookup(path.join(root, 'other'), finding), undefined);
+  });
+
+  test('re-review after a one-line edit sends one chunk and keeps the other findings', async () => {
+    const first = await vscode.commands.executeCommand<ReviewCommandResult>(
+      'aiReview.reviewUnstaged',
+      { root, silent: true },
+    );
+    assert.strictEqual(first.ok, true, first.message);
+    // Earlier tests leave untracked files with bugs, so count rather than assume.
+    const found = first.findings?.length ?? 0;
+    assert.ok(found >= 1);
+    const before = stub.requests.length;
+
+    write('src/new.ts', 'export const n = 2;\n');
+    try {
+      const second = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewUnstaged',
+        { root, silent: true },
+      );
+      assert.strictEqual(second.ok, true, second.message);
+      const reviews = stub.requests.slice(before).filter((r) => r.tools);
+      assert.strictEqual(reviews.length, 1);
+      assert.strictEqual(second.result?.chunks.total, 1);
+      const sent = JSON.stringify(reviews[0]!.messages);
+      assert.ok(sent.includes('export const n = 2;'));
+      assert.ok(!sent.includes('return a + b;'));
+      assert.strictEqual(second.result?.incremental?.newHunks, 1);
+      assert.strictEqual(second.result?.incremental?.carried, found);
+      // The other findings (incl. calc.ts) were carried over and stay on the right line.
+      assert.strictEqual(second.findings?.length, found);
+      assert.strictEqual(
+        vscode.languages.getDiagnostics(uriOf('src/calc.ts'))[0]?.range.start.line,
+        3,
+      );
+
+      // Clear Findings starts over: everything is sent again.
+      await vscode.commands.executeCommand('aiReview.clearFindings');
+      const mark = stub.requests.length;
+      const third = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewUnstaged',
+        { root, silent: true },
+      );
+      assert.strictEqual(third.result?.incremental, undefined);
+      assert.ok(
+        stub.requests
+          .slice(mark)
+          .some((r) => r.tools && JSON.stringify(r.messages).includes('return a + b;')),
+      );
+    } finally {
+      write('src/new.ts', 'export const n = 1;\n');
+    }
   });
 });

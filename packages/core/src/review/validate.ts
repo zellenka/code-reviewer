@@ -171,8 +171,8 @@ function buildContext(file: FileDiff, original?: FileDiff): FileContext {
       }
     });
   }
-  const ctx: FileContext = { file, lines: contentLines(file), changed, hunkRanges };
-  if (original) ctx.originalLines = contentLines(original);
+  const ctx: FileContext = { file, lines: newSideLines(file), changed, hunkRanges };
+  if (original) ctx.originalLines = newSideLines(original);
   return ctx;
 }
 
@@ -184,7 +184,8 @@ function findNewLine(lines: FileDiff['hunks'][number]['lines'], from: number, st
   return undefined;
 }
 
-function contentLines(file: FileDiff): (string | undefined)[] {
+/** New-side lines (index 0 = line 1); `undefined` where only the hunks are known. */
+export function newSideLines(file: FileDiff): (string | undefined)[] {
   if (file.newContent !== undefined) return splitLines(normalizeEol(file.newContent));
   const lines: (string | undefined)[] = [];
   for (const hunk of file.hunks) {

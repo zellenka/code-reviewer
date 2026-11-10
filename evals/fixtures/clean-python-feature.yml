@@ -1,0 +1,46 @@
+name: Clean feature (Python)
+description: Adds an optional, validated length limit to slugify, with tests. Correct; any finding is a false positive.
+before:
+  app/slug.py: |
+    import re
+
+
+    def slugify(text: str) -> str:
+        text = text.strip().lower()
+        return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+  tests/test_slug.py: |
+    from app.slug import slugify
+
+
+    def test_slugify():
+        assert slugify("Hello, World!") == "hello-world"
+after:
+  app/slug.py: |
+    import re
+
+
+    def slugify(text: str, max_length: int = 60) -> str:
+        """Turns text into a URL slug, e.g. "Hello, World!" -> "hello-world"."""
+        if max_length < 1:
+            raise ValueError("max_length must be at least 1")
+        text = text.strip().lower()
+        slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+        return slug[:max_length].rstrip("-")
+  tests/test_slug.py: |
+    import pytest
+
+    from app.slug import slugify
+
+
+    def test_slugify():
+        assert slugify("Hello, World!") == "hello-world"
+
+
+    def test_max_length():
+        assert slugify("one two three", max_length=7) == "one-two"
+        assert slugify("abc", max_length=10) == "abc"
+
+
+    def test_max_length_must_be_positive():
+        with pytest.raises(ValueError):
+            slugify("abc", max_length=0)

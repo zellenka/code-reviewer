@@ -1,0 +1,23 @@
+name: XSS via innerHTML
+description: User-written comment text is inserted with innerHTML instead of textContent, so a comment can run script in other users' browsers.
+before:
+  src/comments.js: |
+    export function renderComment(list, comment) {
+      const item = document.createElement('li');
+      item.textContent = `${comment.author}: ${comment.text}`;
+      list.appendChild(item);
+    }
+after:
+  src/comments.js: |
+    export function renderComment(list, comment) {
+      const item = document.createElement('li');
+      item.innerHTML = `<b>${comment.author}</b>: ${comment.text}`;
+      list.appendChild(item);
+    }
+expected:
+  - file: src/comments.js
+    lines: 3
+    category: [security, bug]
+    severity: critical
+    title: Comment author and text are inserted as HTML (cross-site scripting)
+    quote: 'item.innerHTML = `<b>${comment.author}</b>: ${comment.text}`;'

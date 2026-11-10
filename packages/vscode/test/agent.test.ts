@@ -131,6 +131,9 @@ suite('Context & agentic review', () => {
   teardown(async () => {
     vscode.Disposable.from(...disposables.splice(0)).dispose();
     api.findings.clear();
+    // Each test starts without earlier reviews or dismissed findings.
+    await api.snapshots.clear();
+    await api.statuses.clear();
     rmSync(path.join(root, '.codereview.yml'), { force: true });
     api.configs.forget(root);
     await vscode.workspace

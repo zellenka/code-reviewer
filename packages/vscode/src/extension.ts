@@ -17,6 +17,8 @@ import { FindingsDiagnostics } from './review/diagnostics';
 import { registerFindingCommands } from './review/findingCommands';
 import { FindingCodeActions, FixPreviewProvider, PREVIEW_SCHEME } from './review/fixes';
 import { RepoLocator } from './review/repo';
+import { SnapshotStore } from './review/snapshots';
+import { FindingStatusStore } from './review/state';
 import { FindingStore } from './review/store';
 import { FindingThreads } from './review/threads';
 import { FindingsTree, SUMMARY_SCHEME, SummaryProvider } from './review/tree';
@@ -29,6 +31,8 @@ export interface ExtensionApi {
   repos: RepoLocator;
   configs: ReviewConfigService;
   findings: FindingStore;
+  statuses: FindingStatusStore;
+  snapshots: SnapshotStore;
   threads: FindingThreads;
   tree: FindingsTree;
   panel: ReviewPanel;
@@ -102,7 +106,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   const repos = new RepoLocator(logger);
   const configs = new ReviewConfigService(logger);
-  const store = new FindingStore();
+  const statuses = new FindingStatusStore(context.workspaceState);
+  const snapshots = new SnapshotStore(context.workspaceState);
+  const store = new FindingStore(statuses);
   const threads = new FindingThreads(store);
   const tree = new FindingsTree(store);
   const previews = new FixPreviewProvider();
@@ -126,7 +132,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     ),
     ...registerFindingCommands({ store, threads, previews }),
   );
-  const deps = { registry, repos, configs, store, logger };
+  const deps = { registry, repos, configs, store, logger, snapshots };
   const reviewCommands: [string, ReviewKind][] = [
     ['aiReview.reviewStaged', 'staged'],
     ['aiReview.reviewUnstaged', 'unstaged'],
@@ -150,7 +156,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const panel = new ReviewPanel(context, { registry, repos, store, logger });
   context.subscriptions.push(
     panel,
-    vscode.commands.registerCommand('aiReview.clearFindings', () => store.clear()),
+    vscode.commands.registerCommand('aiReview.clearFindings', async () => {
+      store.clear();
+      // A fresh start: the next review sends everything again.
+      await snapshots.clear();
+    }),
+    vscode.commands.registerCommand(
+      'aiReview.forgetFindingStatus',
+      async (options?: { silent?: boolean }) => {
+        const n = await statuses.clear();
+        if (!options?.silent) {
+          void vscode.window.showInformationMessage(
+            `AI Review: forgot ${n} dismissed or resolved finding(s). They will show again in the next review.`,
+          );
+        }
+        return n;
+      },
+    ),
     vscode.commands.registerCommand('aiReview.runReview', (arg?: unknown) =>
       panel.run(isArgs(arg) ? arg : {}),
     ),
@@ -160,7 +182,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     ),
   );
 
-  return { registry, keyStore, repos, configs, findings: store, threads, tree, panel };
+  return {
+    registry,
+    keyStore,
+    repos,
+    configs,
+    findings: store,
+    statuses,
+    snapshots,
+    threads,
+    tree,
+    panel,
+  };
 }
 
 export function deactivate(): void {}

@@ -32,6 +32,8 @@ export interface ReviewConfig {
   review: {
     mode: (typeof REVIEW_MODES)[number];
     categories: Category[];
+    /** Second opinion on each finding before it is shown (P5-2). */
+    verify: boolean;
   };
 }
 
@@ -45,6 +47,7 @@ export const DEFAULT_CONFIG: ReviewConfig = {
   review: {
     mode: 'single-pass',
     categories: ['bug', 'security', 'performance', 'maintainability', 'test'],
+    verify: false,
   },
 };
 
@@ -62,6 +65,7 @@ export const configFileSchema = z
       .object({
         mode: z.enum(REVIEW_MODES).optional(),
         categories: z.array(z.enum(CATEGORIES)).optional(),
+        verify: z.boolean().optional(),
       })
       .strict()
       .optional(),

@@ -26,7 +26,8 @@
     "format:check": "prettier --check .",
     "changeset": "changeset",
     "clean": "pnpm -r run clean",
-    "eval": "tsc -b evals && tsx evals/src/run.ts"
+    "eval": "tsc -b evals && tsx evals/src/run.ts",
+    "eval:compare": "tsx evals/src/compare.ts"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.7",
