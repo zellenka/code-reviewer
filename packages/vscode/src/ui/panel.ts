@@ -12,6 +12,7 @@ import {
   type ReviewCommandArgs,
   type ReviewCommandResult,
 } from '../review/commands';
+import type { ReviewConfigService } from '../review/config';
 import { relativeToRepo, type RepoLocator } from '../review/repo';
 import type { FindingStore } from '../review/store';
 import { panelHtml } from './panelHtml';
@@ -62,7 +63,7 @@ export interface PanelState {
   model: { label: string; ok: boolean; detail?: string; needsKey: boolean };
   reviewMode: string;
   includeContext: boolean;
-  /** aiReview.verifyFindings is "on" ("auto" follows the repo config, default off). */
+  /** Verify pass on: aiReview.verifyFindings "on", or "auto" and `review.verify` in the repo config. */
   verifyFindings: boolean;
   running: boolean;
   last?: { text: string; level: 'info' | 'warn' | 'error'; hasSummary: boolean; open: number };
@@ -96,6 +97,8 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
       repos: RepoLocator;
       store: FindingStore;
       logger: Logger;
+      /** Repo configs, for settings that default to `.codereview.yml` ("auto"). */
+      configs?: ReviewConfigService;
     },
   ) {
     const refresh = () => this.scheduleRefresh();
@@ -111,6 +114,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
         refresh();
       }),
       onDidChangeReviewRunning(refresh),
+      ...(deps.configs ? [deps.configs.onDidChange(refresh)] : []),
       vscode.window.onDidChangeActiveTextEditor(refresh),
       vscode.window.onDidChangeTextEditorSelection(refresh),
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
@@ -230,10 +234,21 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
       model: await (this.modelCache ??= this.model()),
       reviewMode: settings.get<string>('reviewMode') ?? 'auto',
       includeContext: settings.get<boolean>('includeContext') ?? true,
-      verifyFindings: settings.get<string>('verifyFindings') === 'on',
+      verifyFindings: await this.verifyOn(settings.get<string>('verifyFindings'), branchRoot),
       running: isReviewRunning(),
       ...(last ? { last } : {}),
     };
+  }
+
+  /** "on"/"off" win; "auto" shows what the repo's `.codereview.yml` says (default off). */
+  private async verifyOn(setting: string | undefined, root: string): Promise<boolean> {
+    if (setting === 'on') return true;
+    if (setting === 'off' || !root || !this.deps.configs) return false;
+    try {
+      return (await this.deps.configs.get(root)).review.verify;
+    } catch {
+      return false;
+    }
   }
 
   private async model(): Promise<PanelState['model']> {

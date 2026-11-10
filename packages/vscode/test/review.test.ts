@@ -646,6 +646,24 @@ suite('Review', () => {
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
   });
 
+  test('the panel shows double-checking as on when the repo config turns it on', async () => {
+    const config = vscode.workspace.getConfiguration('aiReview');
+    await api.panel.update({ root });
+    try {
+      assert.strictEqual((await api.panel.snapshot()).verifyFindings, false);
+      write('.codereview.yml', 'review:\n  verify: true\n');
+      api.configs.forget(root);
+      assert.strictEqual((await api.panel.snapshot()).verifyFindings, true);
+      // An explicit setting wins over the repo config.
+      await config.update('verifyFindings', 'off', vscode.ConfigurationTarget.Global);
+      assert.strictEqual((await api.panel.snapshot()).verifyFindings, false);
+    } finally {
+      await config.update('verifyFindings', undefined, vscode.ConfigurationTarget.Global);
+      rmSync(path.join(root, '.codereview.yml'), { force: true });
+      api.configs.forget(root);
+    }
+  });
+
   test('the panel can be opened from the command palette', async () => {
     await vscode.commands.executeCommand('aiReview.openPanel');
     const commands = await vscode.commands.getCommands(true);

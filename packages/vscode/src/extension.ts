@@ -153,7 +153,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       ),
     );
   }
-  const panel = new ReviewPanel(context, { registry, repos, store, logger });
+  const panel = new ReviewPanel(context, { registry, repos, store, logger, configs });
   context.subscriptions.push(
     panel,
     vscode.commands.registerCommand('aiReview.clearFindings', async () => {
