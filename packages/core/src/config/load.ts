@@ -89,6 +89,7 @@ function applyFile(file: ConfigFile): ReviewConfig {
   if (file.language) config.language = file.language;
   if (file.review?.mode) config.review.mode = file.review.mode;
   if (file.review?.categories) config.review.categories = [...new Set(file.review.categories)];
+  if (file.review?.verify !== undefined) config.review.verify = file.review.verify;
   return config;
 }
 

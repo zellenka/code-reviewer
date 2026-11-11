@@ -126,6 +126,11 @@
         "icon": "$(clear-all)"
       },
       {
+        "command": "aiReview.forgetFindingStatus",
+        "title": "Forget Dismissed and Resolved Findings",
+        "category": "AI Review"
+      },
+      {
         "command": "aiReview.showSummary",
         "title": "Show Review Summary",
         "category": "AI Review",
@@ -297,6 +302,26 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Also replace long random-looking strings with `[REDACTED]` before sending code to the model. Known secret formats (API keys, private keys, passwords in code) are always redacted."
+        },
+        "aiReview.verifyFindings": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Use the repository setting (`review.verify` in `.codereview.yml`, default off).",
+            "Double-check every finding with one extra request per file that has findings, and drop the ones the model rejects.",
+            "Show findings without the extra check."
+          ],
+          "default": "auto",
+          "markdownDescription": "Verify pass: after the review, ask the model once more whether each finding is a real issue, and drop rejected ones. Fewer false positives, at the cost of one extra request per file with findings."
+        },
+        "aiReview.incrementalReview": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Re-reviewing the same scope (unstaged, staged, branch, file) only sends the changes made since the last complete review, and keeps findings on code that didn't change. The model, mode, settings and repo rules must be the same, else everything is sent. **Clear Findings** starts over."
         },
         "aiReview.summary": {
           "type": "boolean",

@@ -13,6 +13,10 @@ on:
         type: choice
         options: [single-pass, agentic, compare]
         default: single-pass
+      verify:
+        description: Also run with the verify pass and compare (P5-2; about doubles the eval cost)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,9 +42,16 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EVAL_MODEL: ${{ inputs.model }}
           EVAL_MODE: ${{ inputs.mode }}
+      - name: Evals with the verify pass, compared with the run above
+        if: inputs.verify
+        run: pnpm eval --provider anthropic --model "$EVAL_MODEL" --mode "$EVAL_MODE" --verify --json eval-report-verify.json --baseline eval-report.json
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVAL_MODEL: ${{ inputs.model }}
+          EVAL_MODE: ${{ inputs.mode }}
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: eval-report
-          path: eval-report.json
+          path: eval-report*.json
           if-no-files-found: ignore

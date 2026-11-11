@@ -30,6 +30,7 @@ language: de
 review:
   mode: agentic
   categories: [bug, style]
+  verify: true
 `);
     expect(warnings).toEqual([]);
     expect(config).toEqual({
@@ -40,7 +41,7 @@ review:
       ignore: ['**/*.generated.ts'],
       rules: 'docs/rules.md',
       language: 'de',
-      review: { mode: 'agentic', categories: ['bug', 'style'] },
+      review: { mode: 'agentic', categories: ['bug', 'style'], verify: true },
     });
   });
 

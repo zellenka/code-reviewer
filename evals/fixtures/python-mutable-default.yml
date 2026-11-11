@@ -1,0 +1,23 @@
+name: Mutable default argument (Python)
+description: A list default argument is shared between all instances, so tags added to one item show up on every item created without tags.
+before:
+  app/item.py: |
+    class Item:
+        def __init__(self, name):
+            self.name = name
+after:
+  app/item.py: |
+    class Item:
+        def __init__(self, name, tags=[]):
+            self.name = name
+            self.tags = tags
+
+        def add_tag(self, tag):
+            self.tags.append(tag)
+expected:
+  - file: app/item.py
+    lines: 2
+    category: bug
+    severity: major
+    title: The default tags list is shared by every Item, so add_tag changes all of them
+    quote: 'def __init__(self, name, tags=[]):'

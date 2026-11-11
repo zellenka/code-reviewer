@@ -1,0 +1,28 @@
+name: Misspelled status (cross-file)
+description: The new check compares against 'canceled', but the stored status (defined in an unchanged file) is 'cancelled', so cancelled orders can still be refunded. Only visible by reading src/status.js.
+before:
+  src/status.js: |
+    /** Order states as stored in the database. */
+    export const OrderStatus = Object.freeze({
+      OPEN: 'open',
+      SHIPPED: 'shipped',
+      CANCELLED: 'cancelled',
+    });
+  src/refund.js: |
+    export function canRefund(order) {
+      return order.paid;
+    }
+after:
+  src/refund.js: |
+    export function canRefund(order) {
+      if (order.status === 'canceled') return false;
+      return order.paid;
+    }
+expected:
+  - file: src/refund.js
+    lines: 2
+    category: bug
+    severity: major
+    title: "Compares with 'canceled', but the stored status is 'cancelled' (OrderStatus.CANCELLED)"
+    quote: "if (order.status === 'canceled') return false;"
+    crossFile: true

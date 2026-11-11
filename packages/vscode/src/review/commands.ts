@@ -26,6 +26,7 @@ import { showProviderError } from '../providers/errorUi';
 import type { ProviderRegistry } from '../providers/registry';
 import type { ReviewConfigService } from './config';
 import { relativeToRepo, type RepoLocator } from './repo';
+import type { SnapshotStore } from './snapshots';
 import type { FindingStore } from './store';
 import { formatTokens } from './tree';
 import { VsCodeSymbolProvider, VsCodeWorkspaceTools } from './workspace';
@@ -63,6 +64,8 @@ export interface ReviewDeps {
   configs: ReviewConfigService;
   store: FindingStore;
   logger: Logger;
+  /** Last complete review per scope, for incremental re-reviews. */
+  snapshots?: SnapshotStore;
 }
 
 let running: vscode.CancellationTokenSource | undefined;
@@ -151,6 +154,12 @@ export async function reviewCommand(
     const concurrency = settings.get<number>('concurrency') || undefined;
     const summary = settings.get<boolean>('summary') ?? true;
     const redactHighEntropy = settings.get<boolean>('redactHighEntropyStrings') ?? false;
+    const verifySetting = settings.get<string>('verifyFindings');
+    const verify = verifySetting === 'on' ? true : verifySetting === 'off' ? false : undefined;
+    const previous =
+      (settings.get<boolean>('incrementalReview') ?? true)
+        ? deps.snapshots?.get(repo.root, mode)
+        : undefined;
 
     const outcome = await vscode.window.withProgress(
       {
@@ -192,6 +201,8 @@ export async function reviewCommand(
             ...(symbols ? { symbols } : {}),
             workspace: new VsCodeWorkspaceTools(repo.root, logger),
             agentLimits,
+            ...(verify !== undefined ? { verify } : {}),
+            ...(previous ? { previous } : {}),
           };
           const estimate = estimateReview(diff, reviewOptions);
           logger.info(describeEstimate(estimate, model));
@@ -224,6 +235,10 @@ export async function reviewCommand(
                 progress.report({ message: 'writing the summary…' });
                 return;
               }
+              if (p.phase === 'verify') {
+                progress.report({ message: `double-checking ${p.findings} finding(s)…` });
+                return;
+              }
               const increment = p.chunksTotal ? ((p.chunksDone - done) / p.chunksTotal) * 100 : 0;
               done = p.chunksDone;
               progress.report({
@@ -254,6 +269,7 @@ export async function reviewCommand(
       const message = `No changes to review (${describeMode(mode)}).`;
       notify(message);
       deps.store.clear();
+      await deps.snapshots?.set(repo.root, mode, undefined);
       return { ok: true, findings: [], message };
     }
 
@@ -266,6 +282,8 @@ export async function reviewCommand(
     logger.info(
       `input tokens: estimated ${estimate.inputTokens}, actual ${actualInput}${result.usage.estimated ? ' (counted locally)' : ''}`,
     );
+    // Cancelled or a part failed (no snapshot): keep the last one, it still matches its hunks.
+    if (result.snapshot) await deps.snapshots?.set(repo.root, mode, result.snapshot);
     const findings = await deps.store.set(
       { root: repo.root, mode, model, result, finishedAt: new Date() },
       result.findings,
@@ -391,6 +409,14 @@ export function summarize(result: ReviewResult, model?: ModelInfo): string {
     parts.push('no issues found');
   }
   parts.push(`${result.reviewedFiles.length} file(s) reviewed`);
+  if (result.incremental) {
+    parts.push(
+      result.incremental.newHunks
+        ? `${result.incremental.newHunks} changed hunk(s) re-reviewed, ${result.incremental.carried} finding(s) kept`
+        : 'nothing changed since the last review',
+    );
+  }
+  if (result.verify?.rejected) parts.push(`${result.verify.rejected} rejected on double-check`);
   if (result.agent) parts.push(`${result.agent.toolCalls} tool call(s)`);
   if (result.skipped.length) parts.push(`${result.skipped.length} skipped`);
   const tokens = result.usage.inputTokens + result.usage.outputTokens;
@@ -414,7 +440,8 @@ function describeEstimate(e: ReviewEstimate, model: ModelInfo): string {
     e.inputTokensHigh !== undefined
       ? `${e.inputTokens}–${e.inputTokensHigh}`
       : String(e.inputTokens);
-  return `estimate for ${model.id} (${e.mode}): ${e.files} file(s), ${e.requests} request(s), ~${input} input tokens, ${e.outputTokens.low}–${e.outputTokens.high} output tokens${cost}`;
+  const verify = e.verify ? `, verify pass up to ${e.verify.maxRequests} more request(s)` : '';
+  return `estimate for ${model.id} (${e.mode}): ${e.files} file(s), ${e.requests} request(s), ~${input} input tokens, ${e.outputTokens.low}–${e.outputTokens.high} output tokens${cost}${verify}`;
 }
 
 function logResult(result: ReviewResult, logger: Logger): void {
@@ -424,4 +451,9 @@ function logResult(result: ReviewResult, logger: Logger): void {
   for (const e of result.errors) logger.warn(e);
   if (result.redactions) logger.info(`${result.redactions} secret(s) redacted before sending`);
   if (result.rules?.length) logger.info(`repo rules applied: ${result.rules.join(', ')}`);
+  if (result.incremental) {
+    logger.info(
+      `incremental: ${result.incremental.newHunks} new hunk(s) sent, ${result.incremental.reusedHunks} reused, ${result.incremental.carried} finding(s) carried over`,
+    );
+  }
 }

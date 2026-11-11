@@ -18,6 +18,9 @@ export class ReviewConfigService implements vscode.Disposable {
   private readonly cache = new Map<string, ReturnType<typeof parseConfig>>();
   private readonly warned = new Set<string>();
   private readonly watcher: vscode.FileSystemWatcher;
+  private readonly emitter = new vscode.EventEmitter<string>();
+  /** Fires with the repo root when its config file changed. */
+  readonly onDidChange = this.emitter.event;
 
   constructor(private readonly logger: Logger) {
     this.watcher = vscode.workspace.createFileSystemWatcher(`**/${CONFIG_FILE_NAME}`);
@@ -25,6 +28,7 @@ export class ReviewConfigService implements vscode.Disposable {
       const root = path.dirname(uri.fsPath);
       this.forget(root);
       this.logger.info(`${CONFIG_FILE_NAME} changed in ${root}; reloading`);
+      this.emitter.fire(root);
     };
     this.watcher.onDidChange(invalidate);
     this.watcher.onDidCreate(invalidate);
@@ -74,6 +78,7 @@ export class ReviewConfigService implements vscode.Disposable {
 
   dispose(): void {
     this.watcher.dispose();
+    this.emitter.dispose();
   }
 }
 

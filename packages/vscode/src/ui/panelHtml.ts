@@ -170,6 +170,7 @@ export function panelHtml(cspSource: string, nonce: string): string {
     <option value="agentic">Agentic: may read related files (slower)</option>
   </select>
   <label class="check"><input type="checkbox" id="context"><span>Include surrounding code</span></label>
+  <label class="check" title="One extra request per file with findings; drops findings the model rejects on a second look."><input type="checkbox" id="verify"><span>Double-check findings</span></label>
 
   <button class="primary" id="run">Run Review</button>
   <button class="primary" id="cancel" hidden><span class="spinner" aria-hidden="true"></span>Cancel Review</button>
@@ -198,6 +199,7 @@ export function panelHtml(cspSource: string, nonce: string): string {
   $('repo').addEventListener('change', () => send('root', $('repo').value));
   $('mode').addEventListener('change', () => send('reviewMode', $('mode').value));
   $('context').addEventListener('change', () => send('includeContext', $('context').checked));
+  $('verify').addEventListener('change', () => send('verifyFindings', $('verify').checked));
   $('run').addEventListener('click', () => {
     if (document.activeElement === $('base')) send('base', $('base').value);
     send('run');
@@ -253,6 +255,8 @@ export function panelHtml(cspSource: string, nonce: string): string {
     $('mode').disabled = s.running;
     $('context').checked = s.includeContext;
     $('context').disabled = s.running;
+    $('verify').checked = s.verifyFindings;
+    $('verify').disabled = s.running;
 
     const missingTarget = s.scope in targets && !targets[s.scope];
     $('run').hidden = s.running;

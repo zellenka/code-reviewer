@@ -1,0 +1,34 @@
+name: New undefined return (cross-file)
+description: findUser used to throw for unknown ids and now returns undefined, but emailDomain in an unchanged file dereferences the result without a check. Plain JavaScript, so no compiler catches it.
+before:
+  src/users.js: |
+    const users = new Map();
+
+    /** Returns the user with this id. Throws if there is none. */
+    export function findUser(id) {
+      const user = users.get(id);
+      if (!user) throw new Error(`no user ${id}`);
+      return user;
+    }
+  src/mail.js: |
+    import { findUser } from './users.js';
+
+    export function emailDomain(id) {
+      return findUser(id).email.split('@')[1];
+    }
+after:
+  src/users.js: |
+    const users = new Map();
+
+    /** Returns the user with this id, or undefined if there is none. */
+    export function findUser(id) {
+      return users.get(id);
+    }
+expected:
+  - file: src/users.js
+    lines: 5
+    category: bug
+    severity: major
+    title: findUser can now return undefined, but emailDomain in src/mail.js uses the result unchecked
+    quote: 'return users.get(id);'
+    crossFile: true

@@ -1,0 +1,45 @@
+name: Ignored error (Go)
+description: The error from os.ReadFile is discarded, so a missing file surfaces as a confusing JSON error ("unexpected end of JSON input") instead of the real cause.
+before:
+  config/config.go: |
+    package config
+
+    type Config struct {
+    	Port int `json:"port"`
+    }
+
+    func Default() *Config {
+    	return &Config{Port: 8080}
+    }
+after:
+  config/config.go: |
+    package config
+
+    import (
+    	"encoding/json"
+    	"os"
+    )
+
+    type Config struct {
+    	Port int `json:"port"`
+    }
+
+    func Default() *Config {
+    	return &Config{Port: 8080}
+    }
+
+    func Load(path string) (*Config, error) {
+    	data, _ := os.ReadFile(path)
+    	var cfg Config
+    	if err := json.Unmarshal(data, &cfg); err != nil {
+    		return nil, err
+    	}
+    	return &cfg, nil
+    }
+expected:
+  - file: config/config.go
+    lines: 17
+    category: bug
+    severity: major
+    title: The os.ReadFile error is ignored, hiding why loading failed
+    quote: 'data, _ := os.ReadFile(path)'

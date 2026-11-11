@@ -1,0 +1,30 @@
+name: Async callback in forEach
+description: forEach does not wait for async callbacks, so saveAll returns before any user is saved and save errors become unhandled rejections.
+before:
+  src/db.ts: |
+    export interface User {
+      id: string;
+      name: string;
+    }
+
+    export async function saveUser(user: User): Promise<void> {
+      await fetch(`/api/users/${user.id}`, { method: 'PUT', body: JSON.stringify(user) });
+    }
+after:
+  src/sync.ts: |
+    import { saveUser, type User } from './db';
+
+    /** Saves every user and returns how many were saved. */
+    export async function saveAll(users: User[]): Promise<number> {
+      users.forEach(async (user) => {
+        await saveUser(user);
+      });
+      return users.length;
+    }
+expected:
+  - file: src/sync.ts
+    lines: 5
+    category: bug
+    severity: major
+    title: forEach does not await the async callback, so saveAll returns before the saves finish
+    quote: 'users.forEach(async (user) => {'

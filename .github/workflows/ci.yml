@@ -35,6 +35,8 @@ jobs:
       - run: pnpm test
       - name: Evals (mock provider, checks the pipeline)
         run: pnpm eval --provider mock --mode compare
+      - name: Evals with the verify pass (mock provider)
+        run: pnpm eval --provider mock --verify
       - name: Extension tests (headless, Linux)
         if: runner.os == 'Linux'
         run: xvfb-run -a pnpm test:ext

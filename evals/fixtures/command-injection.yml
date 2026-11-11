@@ -1,0 +1,30 @@
+name: Command injection
+description: A query parameter is interpolated into a shell command, so a request like ?branch=main;rm -rf / runs arbitrary commands.
+before:
+  src/routes.ts: |
+    import type { Request, Response } from 'express';
+
+    export function health(_req: Request, res: Response): void {
+      res.send('ok');
+    }
+after:
+  src/routes.ts: |
+    import { execSync } from 'node:child_process';
+    import type { Request, Response } from 'express';
+
+    export function health(_req: Request, res: Response): void {
+      res.send('ok');
+    }
+
+    export function branchLog(req: Request, res: Response): void {
+      const branch = String(req.query.branch ?? 'main');
+      const log = execSync(`git log --oneline -n 20 ${branch}`, { encoding: 'utf8' });
+      res.type('text/plain').send(log);
+    }
+expected:
+  - file: src/routes.ts
+    lines: 10
+    category: security
+    severity: critical
+    title: The branch query parameter is passed to a shell (command injection)
+    quote: "const log = execSync(`git log --oneline -n 20 ${branch}`, { encoding: 'utf8' });"

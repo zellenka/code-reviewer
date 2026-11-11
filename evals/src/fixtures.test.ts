@@ -6,11 +6,15 @@ import { matches, scoreFixture, totals } from './score';
 describe('eval fixtures', async () => {
   const fixtures = await loadFixtures();
 
-  it('has 5–30 fixtures including a clean one and a cross-file one', () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(5);
+  it('has 20–30 fixtures covering clean, cross-file and CRLF cases', () => {
+    expect(fixtures.length).toBeGreaterThanOrEqual(20);
     expect(fixtures.length).toBeLessThanOrEqual(30);
-    expect(fixtures.some((f) => f.expected.some((e) => e.crossFile))).toBe(true);
-    expect(fixtures.some((f) => f.expected.length === 0)).toBe(true);
+    expect(
+      fixtures.filter((f) => f.expected.some((e) => e.crossFile)).length,
+    ).toBeGreaterThanOrEqual(3);
+    expect(fixtures.filter((f) => f.expected.length === 0).length).toBeGreaterThanOrEqual(3);
+    expect(fixtures.some((f) => f.eol === 'crlf' && f.expected.length > 0)).toBe(true);
+    expect(fixtures.some((f) => f.eol === 'crlf' && f.expected.length === 0)).toBe(true);
   });
 
   for (const fixture of fixtures) {
@@ -58,6 +62,12 @@ describe('scoring', () => {
     expect(matches(finding('a.ts', 12), expected[0]!)).toBe(true);
     expect(matches(finding('a.ts', 13), expected[0]!)).toBe(false);
     expect(matches(finding('b.ts', 10), expected[0]!)).toBe(false);
+  });
+
+  it('requires an accepted category', () => {
+    const security = { ...finding('a.ts', 10), category: 'security' as const };
+    expect(matches(security, expected[0]!)).toBe(false);
+    expect(matches(security, { ...expected[0]!, category: ['security', 'bug'] })).toBe(true);
   });
 
   it('computes precision, recall, clean findings and nit rate', () => {

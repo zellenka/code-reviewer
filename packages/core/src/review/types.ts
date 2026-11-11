@@ -1,5 +1,6 @@
 import type { Category, Severity } from '../config/schema';
 import type { Usage } from '../provider/types';
+import type { ReviewSnapshot } from './incremental';
 
 export interface Finding {
   /** Fingerprint: sha1(file + "\n" + category + "\n" + normalize(quote)). */
@@ -48,7 +49,8 @@ export type DropReason =
   | 'lowConfidence'
   | 'unanchored'
   | 'outsideChangedLines'
-  | 'duplicate';
+  | 'duplicate'
+  | 'rejectedByVerify';
 
 export const DROP_REASON_LABELS: Record<DropReason, string> = {
   invalid: 'invalid model output',
@@ -59,6 +61,7 @@ export const DROP_REASON_LABELS: Record<DropReason, string> = {
   unanchored: 'quoted code not found',
   outsideChangedLines: 'outside changed lines',
   duplicate: 'duplicate',
+  rejectedByVerify: 'rejected by the verify pass',
 };
 
 export type SkipReason =
@@ -100,6 +103,12 @@ export interface ReviewResult {
   mode: 'single-pass' | 'agentic';
   /** Repo rules files that were applied. */
   rules?: string[];
+  /** Incremental re-review (P5-4): hunks sent now vs. reviewed before, findings carried over. */
+  incremental?: { newHunks: number; reusedHunks: number; carried: number };
+  /** Pass as `previous` to the next review of the same scope. Missing after a cancelled or partly failed review. */
+  snapshot?: ReviewSnapshot;
+  /** Verify pass (P5-2): findings checked, rejected, and requests that failed (findings kept). */
+  verify?: { checked: number; rejected: number; failed: number };
   /** Agentic reviews: totals over all parts. `limitStops` = parts stopped by a limit. */
   agent?: { turns: number; toolCalls: number; limitStops: number };
 }

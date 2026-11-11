@@ -1,5 +1,5 @@
 import type { Finding, ParseOutcome } from '@ai-review/core';
-import { expectedRange, type ExpectedFinding } from './fixtures';
+import { expectedCategories, expectedRange, type ExpectedFinding } from './fixtures';
 
 /** Reported lines may be off by this much and still count as the same location. */
 export const LINE_TOLERANCE = 2;
@@ -33,8 +33,10 @@ export function estimateError(t: { estimated: number; actual: number }): number 
   return t.estimated ? t.actual / t.estimated - 1 : 0;
 }
 
+/** Same file, overlapping lines (± LINE_TOLERANCE) and an accepted category. */
 export function matches(finding: Finding, expected: ExpectedFinding): boolean {
   if (finding.file !== expected.file) return false;
+  if (!expectedCategories(expected).includes(finding.category)) return false;
   const [start, end] = expectedRange(expected);
   return finding.startLine <= end + LINE_TOLERANCE && start - LINE_TOLERANCE <= finding.endLine;
 }

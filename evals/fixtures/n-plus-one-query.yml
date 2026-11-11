@@ -1,0 +1,40 @@
+name: N+1 queries
+description: Loads each post's author with its own query inside the loop, so listing 500 posts makes 501 database round trips. One query with a join or WHERE id = ANY(...) would do.
+before:
+  src/db.ts: |
+    export interface Db {
+      query<T>(sql: string, params?: unknown[]): Promise<T[]>;
+    }
+after:
+  src/posts.ts: |
+    import type { Db } from './db';
+
+    export interface Author {
+      id: number;
+      name: string;
+    }
+
+    export interface Post {
+      id: number;
+      title: string;
+      authorId: number;
+    }
+
+    export async function postsWithAuthors(db: Db): Promise<(Post & { author?: Author })[]> {
+      const posts = await db.query<Post>('SELECT id, title, author_id AS "authorId" FROM posts');
+      const result = [];
+      for (const post of posts) {
+        const [author] = await db.query<Author>('SELECT id, name FROM authors WHERE id = $1', [
+          post.authorId,
+        ]);
+        result.push({ ...post, author });
+      }
+      return result;
+    }
+expected:
+  - file: src/posts.ts
+    lines: [18, 20]
+    category: performance
+    severity: major
+    title: One authors query per post (N+1); load all authors in one query
+    quote: "const [author] = await db.query<Author>('SELECT id, name FROM authors WHERE id = $1', ["

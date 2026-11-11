@@ -24,14 +24,22 @@ import { renderRules, type RepoRules } from './rules';
 import { buildSummarySystemPrompt, summarizeReview } from './summarize';
 import type { SymbolIndex } from './symbols';
 import type { DropReason, RawFinding, ReviewResult, SkippedFile } from './types';
+import {
+  createSnapshot,
+  planIncremental,
+  snapshotKey,
+  type IncrementalPlan,
+  type ReviewSnapshot,
+} from './incremental';
 import { validateFindings } from './validate';
+import { estimateVerify, verifyFindings } from './verify';
 
 export interface ReviewProgress {
   chunksTotal: number;
   chunksDone: number;
   findings: number;
-  /** 'summary' while the summary request runs. */
-  phase?: 'review' | 'summary';
+  /** 'verify' / 'summary' while those requests run. */
+  phase?: 'review' | 'verify' | 'summary';
 }
 
 export interface ReviewOptions {
@@ -69,6 +77,16 @@ export interface ReviewOptions {
   workspace?: WorkspaceTools;
   /** Per-part limits of the agentic reviewer. */
   agentLimits?: Partial<AgentLimits>;
+  /** Verify pass: a second request per file asks whether each finding is real. Default: `config.review.verify`. */
+  verify?: boolean;
+  /** Model for the verify pass (same provider), e.g. a cheaper one. Default: `model`. */
+  verifyModel?: ModelInfo;
+  /**
+   * The last review of the same scope (`ReviewResult.snapshot`). Hunks reviewed then are
+   * not sent again and their findings are carried over. Ignored when the model, mode,
+   * config or rules changed since.
+   */
+  previous?: ReviewSnapshot;
 }
 
 /** Errors that will fail every chunk the same way: stop the whole review. */
@@ -132,8 +150,17 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
   options.signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
-    const prepared = prepareReview(diff, options);
-    const { files, skipped, redacted, chunks, outputTokens, mode } = prepared;
+    const { key, plan } = planReview(diff, options, logger);
+    const prepared = prepareReview(plan?.diff ?? diff, options);
+    const { files, redacted, chunks, outputTokens, mode } = prepared;
+    // Incremental: report on the whole diff, even the files that needed no new requests.
+    const all = plan ? filterFiles(diff.files, config.ignore) : undefined;
+    const skipped = all?.skipped ?? prepared.skipped;
+    if (plan) {
+      logger.info(
+        `incremental review: ${plan.newHunks} new hunk(s), ${plan.reusedHunks} reviewed before, ${plan.carried.length} finding(s) carried over`,
+      );
+    }
     if (config.review.mode === 'agentic' && mode !== 'agentic') {
       logger.warn(
         model.supportsTools
@@ -162,7 +189,7 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
       usage: emptyUsage(),
       dropped: [],
       skipped,
-      reviewedFiles: files.map((f) => f.path),
+      reviewedFiles: (all?.files ?? files).map((f) => f.path),
       chunks: { total: chunks.length, completed: 0, failed: 0, outcomes: [] },
       cancelled: false,
       errors: [],
@@ -277,12 +304,70 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
     result.findings = validated.findings;
     const dropped = new Map<DropReason, number>(validated.dropped);
     if (invalid) dropped.set('invalid', (dropped.get('invalid') ?? 0) + invalid);
+
+    if ((options.verify ?? config.review.verify) && !result.cancelled && result.findings.length) {
+      options.onProgress?.({
+        chunksTotal: chunks.length,
+        chunksDone: chunks.length,
+        findings: result.findings.length,
+        phase: 'verify',
+      });
+      const checked = await verifyFindings({
+        provider,
+        model: options.verifyModel ?? model,
+        config,
+        files: redacted.files,
+        findings: result.findings,
+        signal: controller.signal,
+        concurrency,
+        logger,
+      });
+      result.usage = addUsage(result.usage, checked.usage);
+      result.verify = {
+        checked: result.findings.length,
+        rejected: checked.rejected.length,
+        failed: checked.failed,
+      };
+      result.findings = checked.findings;
+      if (checked.rejected.length) dropped.set('rejectedByVerify', checked.rejected.length);
+      if (checked.failed) {
+        result.errors.push(
+          `Verify: ${checked.failed} request(s) failed; their findings are shown unchecked.`,
+        );
+      }
+      result.cancelled = !!options.signal?.aborted;
+      logger.info(
+        `verify pass: ${checked.rejected.length} of ${result.verify.checked} finding(s) rejected`,
+      );
+    }
+    if (plan) {
+      // A new finding with the same fingerprint replaces the carried one.
+      const ids = new Set(result.findings.map((f) => f.id));
+      const carried = plan.carried.filter((f) => !ids.has(f.id));
+      result.findings = [...result.findings, ...carried].sort(
+        (a, b) =>
+          a.file.localeCompare(b.file) || a.startLine - b.startLine || a.endLine - b.endLine,
+      );
+      result.incremental = {
+        newHunks: plan.newHunks,
+        reusedHunks: plan.reusedHunks,
+        carried: carried.length,
+      };
+    }
     result.dropped = [...dropped].map(([reason, count]) => ({ reason, count }));
     logger.info(
       `review done: ${result.findings.length} finding(s), ${result.chunks.failed} failed part(s)${result.agent ? `, ${result.agent.toolCalls} tool call(s) in ${result.agent.turns} turn(s)` : ''}${result.cancelled ? ', cancelled' : ''}`,
     );
 
-    if (options.summary && !result.cancelled && result.chunks.completed > 0) {
+    if (options.summary && plan && chunks.length === 0 && options.previous?.summary) {
+      // Nothing new was reviewed: the last summary still describes these changes.
+      result.summary = options.previous.summary;
+    } else if (
+      options.summary &&
+      !result.cancelled &&
+      // Nothing new but no earlier summary (summary just turned on): write one now.
+      (result.chunks.completed > 0 || (plan && chunks.length === 0 && all!.files.length > 0))
+    ) {
       options.onProgress?.({
         chunksTotal: chunks.length,
         chunksDone: chunks.length,
@@ -294,7 +379,10 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
           provider,
           model,
           config,
-          files: redacted.files,
+          // Incremental: summarize the whole change, not just the new hunks.
+          files: all
+            ? redactFiles(all.files, { highEntropy: options.redactHighEntropy ?? false }).files
+            : redacted.files,
           skipped,
           findings: result.findings,
           signal: controller.signal,
@@ -309,6 +397,10 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
         logger.warn(`summary failed: ${error.message}`);
         result.errors.push(`Summary: ${error.message}`);
       }
+    }
+    // Only a complete review may be built on: otherwise the next one starts over.
+    if (!result.cancelled && result.chunks.failed === 0) {
+      result.snapshot = createSnapshot(key, all?.files ?? files, result.findings, result.summary);
     }
     return result;
   } finally {
@@ -371,6 +463,44 @@ type PrepareOptions = Pick<
   workspace?: unknown;
 };
 
+/** Agentic needs repo access and a model that can call tools; else single-pass. */
+function resolveMode(options: PrepareOptions): 'single-pass' | 'agentic' {
+  return options.config.review.mode === 'agentic' &&
+    options.workspace &&
+    options.model.supportsTools
+    ? 'agentic'
+    : 'single-pass';
+}
+
+/**
+ * The snapshot key of this review and, when `previous` was made with the same key,
+ * the incremental plan (what's new, what's carried over).
+ */
+function planReview(
+  diff: UnifiedDiff,
+  options: PrepareOptions & { previous?: ReviewSnapshot; verify?: boolean },
+  logger?: Logger,
+): { key: string; plan?: IncrementalPlan } {
+  const key = snapshotKey({
+    modelId: options.model.id,
+    config: options.config,
+    mode: resolveMode(options),
+    context: options.context ?? true,
+    ...(options.rules ? { rules: options.rules } : {}),
+    ...(options.verify !== undefined ? { verify: options.verify } : {}),
+  });
+  if (!options.previous) return { key };
+  if (options.previous.key !== key) {
+    logger?.info(
+      'model, mode, settings or rules changed since the last review: reviewing everything',
+    );
+    return { key };
+  }
+  // Ignored files are never reviewed, so they are never "new" either.
+  const reviewable = { files: filterFiles(diff.files, options.config.ignore).files };
+  return { key, plan: planIncremental(reviewable, options.previous) };
+}
+
 /**
  * Filter → redact → context → chunk. Throws ReviewTooLargeError when the diff needs too
  * many requests.
@@ -378,10 +508,7 @@ type PrepareOptions = Pick<
 export function prepareReview(diff: UnifiedDiff, options: PrepareOptions): PreparedReview {
   const { model, config } = options;
   const jsonOnly = !model.supportsTools;
-  const mode =
-    config.review.mode === 'agentic' && options.workspace && model.supportsTools
-      ? 'agentic'
-      : 'single-pass';
+  const mode = resolveMode(options);
   const agentLimits = { ...DEFAULT_AGENT_LIMITS, ...options.agentLimits };
   const { files, skipped } = filterFiles(diff.files, config.ignore);
   const redacted = redactFiles(files, { highEntropy: options.redactHighEntropy ?? false });
@@ -450,6 +577,8 @@ export function prepareReview(diff: UnifiedDiff, options: PrepareOptions): Prepa
 export const OUTPUT_TOKENS_PER_REQUEST = { low: 150, high: 2_000 } as const;
 /** Extra output per agentic turn (tool calls) at the high end. */
 export const OUTPUT_TOKENS_PER_AGENT_TURN = 400;
+/** Output tokens of one verify request at the high end. */
+export const VERIFY_OUTPUT_TOKENS_PER_REQUEST = 600;
 /** Output tokens of the summary request. */
 export const SUMMARY_OUTPUT_TOKENS = { low: 200, high: 800 } as const;
 
@@ -467,6 +596,11 @@ export interface ReviewEstimate {
   outputTokens: { low: number; high: number };
   /** USD; only when the model has pricing. Prompt caching of the shared prefix is included. */
   costUsd?: { low: number; high: number };
+  /**
+   * Verify pass: at most one request per reviewed file, only for files with findings, so
+   * it is counted in the high end of the cost only.
+   */
+  verify?: { maxRequests: number; maxInputTokens: number };
 }
 
 /**
@@ -476,10 +610,11 @@ export interface ReviewEstimate {
  */
 export function estimateReview(
   diff: UnifiedDiff,
-  options: PrepareOptions & { summary?: boolean },
+  options: PrepareOptions & { summary?: boolean; verify?: boolean; previous?: ReviewSnapshot },
 ): ReviewEstimate {
   const { model, config } = options;
-  const prepared = prepareReview(diff, options);
+  const { plan } = planReview(diff, options);
+  const prepared = prepareReview(plan?.diff ?? diff, options);
   const parts = prepared.chunks.length;
   const shared = prepared.sharedPrefixTokens;
   const perPart = prepared.chunks.map((chunk) =>
@@ -529,6 +664,13 @@ export function estimateReview(
     outputTokens,
   };
   if (inputTokensHigh !== undefined) estimate.inputTokensHigh = inputTokensHigh;
+  const verify =
+    (options.verify ?? config.review.verify) && parts > 0
+      ? estimateVerify(prepared.redacted.files, config)
+      : undefined;
+  if (verify) {
+    estimate.verify = { maxRequests: verify.requests, maxInputTokens: verify.inputTokens };
+  }
   if (model.pricing) {
     // With caching, the shared prefix is written once and read by the other parts.
     const cached =
@@ -542,10 +684,18 @@ export function estimateReview(
     });
     estimate.costUsd = {
       low: estimateCostUsd(usage(inputTokens, outputTokens.low), model.pricing),
-      high: estimateCostUsd(
-        usage(inputTokensHigh ?? inputTokens, outputTokens.high),
-        model.pricing,
-      ),
+      high:
+        estimateCostUsd(usage(inputTokensHigh ?? inputTokens, outputTokens.high), model.pricing) +
+        (verify
+          ? estimateCostUsd(
+              {
+                inputTokens: verify.inputTokens,
+                outputTokens: verify.requests * VERIFY_OUTPUT_TOKENS_PER_REQUEST,
+                requests: verify.requests,
+              },
+              model.pricing,
+            )
+          : 0),
     };
   }
   return estimate;
