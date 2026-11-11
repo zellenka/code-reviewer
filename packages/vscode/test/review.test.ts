@@ -647,16 +647,24 @@ suite('Review', () => {
   });
 
   test('the panel shows double-checking as on when the repo config turns it on', async () => {
+    // Asks for the test repo directly: it's outside the workspace, so whether the panel
+    // lists it depends on when the Git extension finds it.
     const config = vscode.workspace.getConfiguration('aiReview');
-    await api.panel.update({ root });
     try {
-      assert.strictEqual((await api.panel.snapshot()).verifyFindings, false);
+      assert.strictEqual(await api.panel.verifyOn(root), false);
       write('.codereview.yml', 'review:\n  verify: true\n');
       api.configs.forget(root);
-      assert.strictEqual((await api.panel.snapshot()).verifyFindings, true);
+      assert.strictEqual(await api.panel.verifyOn(root), true);
       // An explicit setting wins over the repo config.
       await config.update('verifyFindings', 'off', vscode.ConfigurationTarget.Global);
-      assert.strictEqual((await api.panel.snapshot()).verifyFindings, false);
+      assert.strictEqual(await api.panel.verifyOn(root), false);
+      await config.update('verifyFindings', 'on', vscode.ConfigurationTarget.Global);
+      rmSync(path.join(root, '.codereview.yml'), { force: true });
+      api.configs.forget(root);
+      assert.strictEqual(await api.panel.verifyOn(root), true);
+      // No repository known: only an explicit "on" ticks the box.
+      await config.update('verifyFindings', undefined, vscode.ConfigurationTarget.Global);
+      assert.strictEqual(await api.panel.verifyOn(''), false);
     } finally {
       await config.update('verifyFindings', undefined, vscode.ConfigurationTarget.Global);
       rmSync(path.join(root, '.codereview.yml'), { force: true });

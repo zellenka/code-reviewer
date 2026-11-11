@@ -234,14 +234,20 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
       model: await (this.modelCache ??= this.model()),
       reviewMode: settings.get<string>('reviewMode') ?? 'auto',
       includeContext: settings.get<boolean>('includeContext') ?? true,
-      verifyFindings: await this.verifyOn(settings.get<string>('verifyFindings'), branchRoot),
+      verifyFindings: await this.verifyOn(branchRoot, settings.get<string>('verifyFindings')),
       running: isReviewRunning(),
       ...(last ? { last } : {}),
     };
   }
 
-  /** "on"/"off" win; "auto" shows what the repo's `.codereview.yml` says (default off). */
-  private async verifyOn(setting: string | undefined, root: string): Promise<boolean> {
+  /**
+   * Whether the "Double-check findings" box shows as ticked for `root`: "on"/"off" win;
+   * "auto" shows what the repo's `.codereview.yml` says (default off).
+   */
+  async verifyOn(
+    root: string,
+    setting = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('verifyFindings'),
+  ): Promise<boolean> {
     if (setting === 'on') return true;
     if (setting === 'off' || !root || !this.deps.configs) return false;
     try {
