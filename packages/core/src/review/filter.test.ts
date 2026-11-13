@@ -318,3 +318,310 @@ describe('redaction', () => {
     expect(f.hunks[0]!.lines[0]!.text).toContain('AKIA');
   });
 });
+
+/** Lines that are code, references, templates or placeholders; never secrets. */
+const NOT_SECRETS = [
+  'password = getPassword()',
+  'const token = await fetchToken(user);',
+  'this.apiKey = options.apiKey;',
+  'token: string;',
+  '  password: process.env.DB_PASSWORD,',
+  'secret = os.environ["SECRET"]',
+  'PASSWORD=${DB_PASSWORD}',
+  'PASSWORD=$DB_PASSWORD',
+  'password: {{ .Values.password }}',
+  'token: ${{ secrets.GITHUB_TOKEN }}',
+  'api_key: <your-api-key>',
+  'password=changeme',
+  'password: changeme',
+  'password: null',
+  'password: true',
+  'password: false',
+  'password: undefined',
+  'password = None',
+  'password=undefined',
+  'tokenCount = maxTokens - usedTokens',
+  'if (password == other.password)',
+  'if (password==otherPassword1x2) {',
+  '  passwordField: PasswordInput,',
+  // More shapes of ordinary code and config.
+  'self.password = password',
+  'conn = connect(user=user, password=password)',
+  '    password=db_password',
+  '    api_key=openaiApiKey',
+  'token := nextToken()',
+  'secret: Uint8Array',
+  'privateKey: Float64Array',
+  'token: Promise<string>',
+  'password: Optional[str] = None',
+  'tokenEncoding: base64url',
+  'private_key_type: secp256k1',
+  'secret_region: eu-central-1',
+  'secretName: tls-cert-2024',
+  'private_key_path: /etc/ssl/private/server1.key',
+  'password_file: /run/secrets/db2_password',
+  'token_url: https://example.com/oauth2/v1/token',
+  'maxTokens: 4096000000',
+  'password: !secret db_password',
+  'password: *default_password1',
+  'password=%DB_PASSWORD_2%',
+  'password: user.credentials1.password2',
+  'token = oauth2Client',
+  'token = response',
+  'password: required',
+  'password = username',
+  '<input type=password name=password>',
+  'const harmless = "hello world";',
+  'export const DEFAULT_MAX_TOKENS = 8192;',
+  'Authorization: Bearer ${token}',
+  "headers.Authorization = 'Bearer ' + token;",
+  'headers: { Authorization: `Bearer ${apiKey}` },',
+  'Authorization: Bearer <your-token-goes-right-here>',
+  'Authorization: Bearer YOUR_ACCESS_TOKEN_GOES_HERE',
+  'Use bearer authentication for every request.',
+];
+
+describe('redaction patterns (characterization)', () => {
+  // Built from parts so that secret scanners do not flag this file.
+  const stripe = `sk_live_${'a1B2'.repeat(6)}`;
+  const slack = `xoxb-${'1234567890'}-abcdefghij`;
+  const cases: [string, string, string][] = [
+    ['aws-access-key', 'key = AKIAIOSFODNN7EXAMPLE', 'key = [REDACTED:aws-access-key]'],
+    [
+      'aws-secret-key (unquoted)',
+      'aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      'aws_secret_access_key = [REDACTED:aws-secret-key]',
+    ],
+    ['github-token', 'GH=ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'GH=[REDACTED:github-token]'],
+    [
+      'github-token (fine-grained)',
+      'x github_pat_abcdefghijklmnopqrstuv_1 y',
+      'x [REDACTED:github-token] y',
+    ],
+    [
+      'anthropic-key',
+      'k = sk-ant-api03-abcdefghijklmnopqrstuvwxyz',
+      'k = [REDACTED:anthropic-key]',
+    ],
+    ['openai-key', 'k = sk-proj-abcdefghijklmnopqrstuvwxyz012345', 'k = [REDACTED:openai-key]'],
+    ['slack-token', `slack(${slack})`, 'slack([REDACTED:slack-token])'],
+    [
+      'google-api-key',
+      'g = AIzaSyA1234567890abcdefghijklmnopqrstuv',
+      'g = [REDACTED:google-api-key]',
+    ],
+    ['stripe-key', `stripe(${stripe})`, 'stripe([REDACTED:stripe-key])'],
+    ['npm-token', 'n = npm_abcdefghijklmnopqrstuvwxyz0123456789', 'n = [REDACTED:npm-token]'],
+    [
+      'jwt',
+      'j = eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop',
+      'j = [REDACTED:jwt]',
+    ],
+    [
+      'connection-string-password',
+      'DATABASE_URL=postgres://admin:s3cretPass@db:5432/x',
+      'DATABASE_URL=postgres://admin:[REDACTED:connection-string-password]@db:5432/x',
+    ],
+  ];
+  it.each(cases)('%s', (_label, input, expected) => {
+    const { text, count } = redactText(input);
+    expect(text).toBe(expected);
+    expect(count).toBe(1);
+  });
+
+  it('quoted secret: keeps the name and the quotes, replaces the value', () => {
+    const quoted: [string, string][] = [
+      ['const password = "hunter2hunter2";', 'const password = "[REDACTED:secret]";'],
+      ["password: 'hunter2hunter2'", "password: '[REDACTED:secret]'"],
+      ['const apiKey = `abcdefgh`;', 'const apiKey = `[REDACTED:secret]`;'],
+      ['  "db_password": "plainsecretvalue",', '  "db_password": "[REDACTED:secret]",'],
+      ['api-key="abcd-efgh-1234"', 'api-key="[REDACTED:secret]"'],
+      ['passwordHash = "abcdefgh12345678"', 'passwordHash = "[REDACTED:secret]"'],
+      [
+        'spring.datasource.password="plainsecret"',
+        'spring.datasource.password="[REDACTED:secret]"',
+      ],
+      ['PRIVATE_KEY="abcdefgh12345678"', 'PRIVATE_KEY="[REDACTED:secret]"'],
+      [
+        'login(user, password="plainsecret", x=1)',
+        'login(user, password="[REDACTED:secret]", x=1)',
+      ],
+    ];
+    for (const [input, expected] of quoted) {
+      const { text, count } = redactText(input);
+      expect(text).toBe(expected);
+      expect(count).toBe(1);
+    }
+  });
+
+  it('quoted secret: short values, values with spaces and other names are left alone', () => {
+    const lines = [
+      'const password = "short";',
+      'const password = "1234567";',
+      'password: "two words here"',
+      'const greeting = "hunter2hunter2";',
+      'const password = "";',
+      'password = prompt("Enter your password")',
+    ];
+    for (const line of lines) expect(redactText(line)).toEqual({ text: line, count: 0 });
+  });
+
+  it('a value replaced by an earlier pattern is counted once and not redacted again', () => {
+    const cases2: [string, string][] = [
+      ['token: "ghp_abcdefghijklmnopqrstuvwxyz0123456789"', 'token: "[REDACTED:github-token]"'],
+      ['token: ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'token: [REDACTED:github-token]'],
+      ['API_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'API_TOKEN=[REDACTED:github-token]'],
+      [
+        'password=postgres://admin:s3cretPass@db:5432/x',
+        'password=postgres://admin:[REDACTED:connection-string-password]@db:5432/x',
+      ],
+      [
+        'PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY----- MIIEowIBAAKCAQEA1234 -----END RSA PRIVATE KEY-----',
+        'PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----[REDACTED:private-key]-----END RSA PRIVATE KEY-----',
+      ],
+      [
+        'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop',
+        'Authorization: Bearer [REDACTED:jwt]',
+      ],
+    ];
+    for (const [input, expected] of cases2) {
+      const { text, count } = redactText(input);
+      expect(text).toBe(expected);
+      expect(count).toBe(1);
+    }
+  });
+
+  it('quoted secret: a whole quoted URL is replaced even after its password was (counted twice)', () => {
+    // Existing behaviour, recorded as it is: nothing of the URL leaks, the count is 2.
+    expect(redactText('password="postgres://admin:s3cretPass@db:5432/x"')).toEqual({
+      text: 'password="[REDACTED:secret]"',
+      count: 2,
+    });
+  });
+
+  it('a multi-line private key after an unquoted key name keeps the F1 placeholders', () => {
+    const { text, count } = redactText(
+      [
+        'private_key: -----BEGIN PRIVATE KEY-----',
+        'MIIEvQIBADANBgkq1234',
+        '-----END PRIVATE KEY-----',
+      ].join('\n'),
+    );
+    expect(text.split('\n')).toEqual([
+      'private_key: -----BEGIN PRIVATE KEY-----',
+      '[REDACTED:private-key]',
+      '-----END PRIVATE KEY-----',
+    ]);
+    expect(count).toBe(1);
+  });
+
+  it.each(NOT_SECRETS)('leaves code alone: %s', (line) => {
+    expect(redactText(line)).toEqual({ text: line, count: 0 });
+    expect(redactText(line, { highEntropy: true })).toEqual({ text: line, count: 0 });
+  });
+});
+
+describe('unquoted secrets (F2)', () => {
+  const bearer = 'abcdEFGH1234abcdEFGH1234abcdEFGH1234';
+  const cases: [string, string][] = [
+    // The four reproduced lines.
+    ['password: hunter2hunter2', 'password: [REDACTED:secret]'],
+    ['DB_PASSWORD=plainsecretvalue', 'DB_PASSWORD=[REDACTED:secret]'],
+    ['spring.datasource.password=plainsecretvalue', 'spring.datasource.password=[REDACTED:secret]'],
+    [`Authorization: Bearer ${bearer}`, 'Authorization: Bearer [REDACTED:bearer-token]'],
+    // Realistic values.
+    ['DB_PASSWORD=Xk9#mP2$vL8qR4', 'DB_PASSWORD=[REDACTED:secret]'],
+    ['password: S3cr3t!Pass', 'password: [REDACTED:secret]'],
+    ['  password: S3cr3t!Pass  ', '  password: [REDACTED:secret]  '],
+    ['export API_TOKEN=abcdEFGH1234abcdEFGH1234', 'export API_TOKEN=[REDACTED:secret]'],
+    ['SECRET_KEY=a1b2c3d4e5f6a7b8', 'SECRET_KEY=[REDACTED:secret]'],
+    ['client_secret = 5f4dcc3b5aa765d61d8327deb882cf99', 'client_secret = [REDACTED:secret]'],
+    ['"password": hunter2hunter2', '"password": [REDACTED:secret]'],
+    [
+      '//registry.npmjs.org/:_authToken=abcd1234efgh5678',
+      '//registry.npmjs.org/:_authToken=[REDACTED:secret]',
+    ],
+    [
+      'docker run -e DB_PASSWORD=Xk9#mP2$vL8qR4 -p 80:80 app',
+      'docker run -e DB_PASSWORD=[REDACTED:secret] -p 80:80 app',
+    ],
+    ['mysql --password=hunter2hunter2 -u root', 'mysql --password=[REDACTED:secret] -u root'],
+    [
+      `curl -H "Authorization: Bearer ${bearer}" https://api.example.com`,
+      'curl -H "Authorization: Bearer [REDACTED:bearer-token]" https://api.example.com',
+    ],
+    [`  authorization: bearer ${bearer}`, '  authorization: bearer [REDACTED:bearer-token]'],
+    [
+      `headers = { Authorization: 'Bearer ${bearer}' }`,
+      "headers = { Authorization: 'Bearer [REDACTED:bearer-token]' }",
+    ],
+  ];
+  it.each(cases)('redacts %s', (input, expected) => {
+    const { text, count } = redactText(input);
+    expect(text).toBe(expected);
+    expect(count).toBe(1);
+  });
+
+  it('counts once per value and keeps the line count', () => {
+    const input = [
+      'db:',
+      '  user: admin',
+      '  password: hunter2hunter2',
+      'TOKEN=abcd1234efgh5678 SECRET=wxyz9876stuv5432',
+      '',
+    ].join('\n');
+    const { text, count } = redactText(input);
+    expect(count).toBe(3);
+    expect(text.split('\n')).toEqual([
+      'db:',
+      '  user: admin',
+      '  password: [REDACTED:secret]',
+      'TOKEN=[REDACTED:secret] SECRET=[REDACTED:secret]',
+      '',
+    ]);
+  });
+
+  it('works together with high-entropy redaction', () => {
+    expect(redactText('password: hunter2hunter2', { highEntropy: true })).toEqual({
+      text: 'password: [REDACTED:secret]',
+      count: 1,
+    });
+  });
+
+  it('redactFiles redacts unquoted secrets in hunks and content', () => {
+    const f = file('application.properties', 'spring.datasource.password=plainsecretvalue\n');
+    const { files, count } = redactFiles([f]);
+    expect(count).toBe(1);
+    expect(JSON.stringify(files)).not.toContain('plainsecretvalue');
+    expect(files[0]!.hunks[0]!.lines[0]!.text).toBe('spring.datasource.password=[REDACTED:secret]');
+  });
+});
+
+describe('redaction of hostile lines', () => {
+  // Lines an author of a reviewed change controls. A pattern that backtracks on them would
+  // freeze the review, so each must come back quickly (the bound is generous for slow CI).
+  const cases: [string, string, number][] = [
+    ['token + 40 digits + x', 'token' + '1'.repeat(40) + 'x', 0],
+    ['password_ + "12" x30 + !', 'password_' + '12'.repeat(30) + '!', 0],
+    ['secret + "_1" x40 + " x"', 'secret' + '_1'.repeat(40) + ' x', 0],
+    ['token + "key" x60 + space', 'token' + 'key'.repeat(60) + ' ', 0],
+    ['20,000 a + password', 'a'.repeat(20000) + 'password', 0],
+    ['"a.b-" x5000 + token', 'a.b-'.repeat(5000) + 'token', 0],
+    ['Bearer + 50,000 a', 'Bearer ' + 'a'.repeat(50000), 0],
+    ['Bearer + 50,000 a1', 'Bearer ' + 'a1'.repeat(25000), 1],
+    ['Bearer + spaces, 2000 times', ('Bearer' + ' '.repeat(40)).repeat(2000), 0],
+    ['minified line', 'var token=a.b(c);password=d;'.repeat(3000), 0],
+    ['minified line inside quotes', '"' + 'token=a.b(c);password=d;'.repeat(3600) + '"', 0],
+    ['token=value; 5000 times, ending in a quote', 'token=abcdefgh;'.repeat(5000) + '"', 0],
+    ['token + 5000 spaces, 20 times', ('token' + ' '.repeat(5000)).repeat(20), 0],
+    ['token= + 90,000 digits and letters', 'token=' + 'a1'.repeat(45000), 1],
+  ];
+  it.each(cases)('%s', (_label, line, expectedCount) => {
+    const start = performance.now();
+    const { text, count } = redactText(line);
+    const ms = performance.now() - start;
+    expect(count).toBe(expectedCount);
+    if (expectedCount === 0) expect(text).toBe(line);
+    expect(ms).toBeLessThan(1000);
+  });
+});
