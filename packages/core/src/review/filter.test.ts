@@ -129,6 +129,145 @@ describe('redaction', () => {
     ]);
   });
 
+  it('counts PEM body lines, keeps blank lines and leaves text around the block alone', () => {
+    const input = [
+      'const before = 1;',
+      'const key =',
+      '  "-----BEGIN PRIVATE KEY-----\\n" +',
+      '  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n" +',
+      '',
+      '  "abcdEFGH5678\\n" +',
+      '  "-----END PRIVATE KEY-----\\n";',
+      'const after = 2;',
+    ];
+    const { text, count } = redactText(input.join('\n'));
+    expect(count).toBe(2);
+    expect(text.split('\n')).toEqual([
+      input[0],
+      input[1],
+      input[2],
+      '[REDACTED:private-key]',
+      '',
+      '[REDACTED:private-key]',
+      input[6],
+      input[7],
+    ]);
+  });
+
+  it('reset() leaves a private key block', () => {
+    const r = createRedactor();
+    r.line('-----BEGIN PRIVATE KEY-----');
+    expect(r.line('MIIEvQIBADANBgkqhkiG9w0BAQEFAASC')).toBe('[REDACTED:private-key]');
+    r.reset();
+    expect(r.line('const x = 1;')).toBe('const x = 1;');
+    expect(r.count).toBe(1);
+  });
+
+  it('redactFiles tracks a key block inside a hunk and resets between hunks', () => {
+    const f: FileDiff = {
+      path: 'k.ts',
+      status: 'modified',
+      binary: false,
+      hunks: [
+        {
+          oldStart: 1,
+          oldLines: 0,
+          newStart: 1,
+          newLines: 2,
+          lines: [
+            { kind: 'add', text: '-----BEGIN PRIVATE KEY-----', newLine: 1 },
+            { kind: 'add', text: 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASC', newLine: 2 },
+          ],
+        },
+        {
+          oldStart: 40,
+          oldLines: 1,
+          newStart: 42,
+          newLines: 1,
+          lines: [{ kind: 'ctx', text: 'const x = 1;', oldLine: 40, newLine: 42 }],
+        },
+      ],
+    };
+    const { files, count } = redactFiles([f]);
+    expect(count).toBe(1);
+    expect(files[0]!.hunks.map((h) => h.lines.map((l) => l.text))).toEqual([
+      ['-----BEGIN PRIVATE KEY-----', '[REDACTED:private-key]'],
+      ['const x = 1;'],
+    ]);
+  });
+
+  it('redacts a private key stored on one line (JSON-escaped)', () => {
+    const input = [
+      '{',
+      '  "type": "service_account",',
+      '  "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj\\n-----END PRIVATE KEY-----\\n",',
+      '  "client_email": "x@y.iam.gserviceaccount.com"',
+      '}',
+    ];
+    const { text, count } = redactText(input.join('\n'));
+    expect(count).toBe(1);
+    expect(text.split('\n')).toEqual([
+      input[0],
+      input[1],
+      '  "private_key": "-----BEGIN PRIVATE KEY-----[REDACTED:private-key]-----END PRIVATE KEY-----\\n",',
+      input[3],
+      input[4],
+    ]);
+  });
+
+  it('redacts a private key stored on one line (plain)', () => {
+    const r = createRedactor();
+    expect(
+      r.line(
+        'KEY=-----BEGIN RSA PRIVATE KEY----- MIIEowIBAAKCAQEA1234 abcdEFGH5678 -----END RSA PRIVATE KEY-----',
+      ),
+    ).toBe(
+      'KEY=-----BEGIN RSA PRIVATE KEY-----[REDACTED:private-key]-----END RSA PRIVATE KEY-----',
+    );
+    expect(r.count).toBe(1);
+    // The block is closed: the next line is ordinary code.
+    expect(r.line('const x = 1;')).toBe('const x = 1;');
+  });
+
+  it('redacts two private keys on one line', () => {
+    const { text, count } = redactText(
+      'a="-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkq\\n-----END PRIVATE KEY-----" b="-----BEGIN EC PRIVATE KEY-----\\nMHcCAQEEIIrYSSNQ\\n-----END EC PRIVATE KEY-----"',
+    );
+    expect(count).toBe(2);
+    expect(text).toBe(
+      'a="-----BEGIN PRIVATE KEY-----[REDACTED:private-key]-----END PRIVATE KEY-----" b="-----BEGIN EC PRIVATE KEY-----[REDACTED:private-key]-----END EC PRIVATE KEY-----"',
+    );
+  });
+
+  it('redacts key material that shares a line with the BEGIN or END marker', () => {
+    const r = createRedactor();
+    const out = [
+      'key: "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC',
+      'abcdEFGH5678',
+      'TAILOFKEYMATERIAL99\\n-----END PRIVATE KEY-----"',
+      'after',
+    ].map((l) => r.line(l));
+    expect(out).toEqual([
+      'key: "-----BEGIN PRIVATE KEY-----[REDACTED:private-key]',
+      '[REDACTED:private-key]',
+      '[REDACTED:private-key]-----END PRIVATE KEY-----"',
+      'after',
+    ]);
+    expect(r.count).toBe(3);
+  });
+
+  it('redactFiles redacts a one-line private key in hunks and content', () => {
+    const line =
+      '  "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj\\n-----END PRIVATE KEY-----\\n",';
+    const f = file('sa.json', `{\n${line}\n  "a": 1\n}\n`);
+    const { files, count } = redactFiles([f]);
+    expect(count).toBe(1);
+    expect(JSON.stringify(files)).not.toContain('MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj');
+    expect(files[0]!.hunks[0]!.lines).toHaveLength(f.hunks[0]!.lines.length);
+    expect(files[0]!.hunks[0]!.lines[2]!.text).toBe('  "a": 1');
+    expect(files[0]!.newContent!.split('\n')).toHaveLength(f.newContent!.split('\n').length);
+  });
+
   it('a hunk starting inside a private key block is still redacted', () => {
     const content = [
       'const key = `',

@@ -32,6 +32,9 @@ const PATTERNS: { label: string; re: RegExp }[] = [
 const PRIVATE_KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/;
 const PRIVATE_KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/;
 
+/** Quotes, `\n` escapes and punctuation next to a marker are not key material. */
+const hasKeyMaterial = (s: string): boolean => /[A-Za-z0-9]/.test(s.replace(/\\[nrt]/g, ''));
+
 export const REDACTED_MARK = '[REDACTED';
 
 export interface RedactOptions {
@@ -48,23 +51,39 @@ export interface Redactor {
 
 export function createRedactor(options: RedactOptions = {}): Redactor {
   let inKeyBlock = false;
+  /**
+   * Replaces key material that shares a line with a BEGIN/END marker (one-line keys,
+   * `"private_key": "-----BEGIN ...\n...\n-----END ...\n"`). Markers and outside text stay.
+   */
+  const keyMarkerLine = (text: string): string => {
+    let out = '';
+    let rest = text;
+    for (;;) {
+      const marker = (inKeyBlock ? PRIVATE_KEY_END : PRIVATE_KEY_BEGIN).exec(rest);
+      const before = marker ? rest.slice(0, marker.index) : rest;
+      if (inKeyBlock && hasKeyMaterial(before)) {
+        redactor.count++;
+        out += '[REDACTED:private-key]';
+      } else out += before;
+      if (!marker) return out;
+      out += marker[0];
+      rest = rest.slice(marker.index + marker[0].length);
+      inKeyBlock = !inKeyBlock;
+    }
+  };
   const redactor: Redactor = {
     count: 0,
     reset() {
       inKeyBlock = false;
     },
     line(text: string): string {
-      if (inKeyBlock) {
-        if (PRIVATE_KEY_END.test(text)) inKeyBlock = false;
-        else if (text.trim()) {
-          redactor.count++;
-          return '[REDACTED:private-key]';
-        }
-        return text;
+      if (inKeyBlock && !PRIVATE_KEY_END.test(text)) {
+        if (!text.trim()) return text;
+        redactor.count++;
+        return '[REDACTED:private-key]';
       }
-      if (PRIVATE_KEY_BEGIN.test(text) && !PRIVATE_KEY_END.test(text)) inKeyBlock = true;
 
-      let out = text;
+      let out = keyMarkerLine(text);
       for (const { label, re } of PATTERNS) {
         re.lastIndex = 0;
         out = out.replace(re, (...m: string[]) => {
