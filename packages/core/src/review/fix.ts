@@ -19,7 +19,9 @@ export interface FixEdit {
  * Computes the edit that replaces a finding's `quote` with its `suggestion` in the
  * current document lines. The quote is re-anchored first. Returns undefined when
  * there's no suggestion, or the quote can't be found reliably (fuzzy matches are
- * not used: the code changed, and replacing it could lose the user's edits).
+ * not used: the code changed, and replacing it could lose the user's edits). A
+ * quote that is part of a line is also refused when it occurs more than once on
+ * it, or starts or ends inside a longer name (`count` in `discount`).
  * Pass `searchRange` to only look near the finding, so an identical line elsewhere
  * in the file is never edited.
  */
@@ -43,12 +45,16 @@ export function computeFix(
 
   if (match.method === 'exact') {
     if (q.length === 1) {
-      startColumn = nearestIndex(first, q[0]!);
+      const at = soleIndex(first, q[0]!);
+      if (at === undefined) return undefined;
+      startColumn = at;
       endColumn = startColumn + q[0]!.length;
     } else {
       startColumn = first.length - q[0]!.length;
       endColumn = q.at(-1)!.length;
     }
+    // A word character on both sides of an edge: the quote is part of a longer name.
+    if (splitsWord(first, startColumn) || splitsWord(last, endColumn)) return undefined;
   } else {
     // Whitespace differs: only safe when the quote covers whole lines (ignoring indent).
     const whole =
@@ -95,7 +101,20 @@ function indentOf(line: string): number {
   return i < 0 ? line.length : i;
 }
 
-/** First occurrence; quotes are short, so a repeated substring on one line is rare. */
-function nearestIndex(line: string, part: string): number {
-  return Math.max(0, line.indexOf(part));
+/**
+ * Where `part` is on `line`, or undefined when it occurs more than once (overlaps
+ * count): which one the model meant is a guess, even if only one is a whole name.
+ */
+function soleIndex(line: string, part: string): number | undefined {
+  const at = line.indexOf(part);
+  return at >= 0 && line.indexOf(part, at + 1) < 0 ? at : undefined;
+}
+
+/** Identifier characters (`$` for JS, letters of any script). */
+const WORD_BEFORE = /[\p{L}\p{N}\p{M}_$]$/u;
+const WORD_AFTER = /^[\p{L}\p{N}\p{M}_$]/u;
+
+/** True when `column` falls between two identifier characters of `line`. */
+function splitsWord(line: string, column: number): boolean {
+  return WORD_BEFORE.test(line.slice(0, column)) && WORD_AFTER.test(line.slice(column));
 }

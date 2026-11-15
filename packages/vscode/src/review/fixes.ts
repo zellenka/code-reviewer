@@ -122,12 +122,13 @@ async function plan(store: FindingStore, key: string): Promise<Planned> {
       searchRange,
     });
     if (!stillThere) store.markStale(key);
-    return {
-      ok: false,
-      message: stillThere
-        ? 'The code changed since the review, so the fix can’t be applied automatically.'
-        : 'The code this finding refers to is gone; the fix can’t be applied.',
-    };
+    // An exact match is only refused when the quote is ambiguous within its line.
+    const message = !stillThere
+      ? 'The code this finding refers to is gone; the fix can’t be applied.'
+      : stillThere.method === 'exact'
+        ? 'The quoted code appears more than once on its line, or inside a longer name, so the fix can’t be applied automatically.'
+        : 'The code changed since the review, so the fix can’t be applied automatically.';
+    return { ok: false, message };
   }
   return { ok: true, finding, doc, edit };
 }

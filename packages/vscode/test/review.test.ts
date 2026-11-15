@@ -93,6 +93,12 @@ const KNOWN_BUGS = [
       confidence: 0.8,
     },
   },
+  {
+    file: 'src/ux-partial.ts',
+    title: 'partial quote',
+    quote: 'count18',
+    suggestion: 'count18 - 1',
+  },
 ];
 
 /** When set, the stub words its findings differently (new title, shorter quote, new fingerprint). */
@@ -575,6 +581,27 @@ suite('Review', () => {
     assert.strictEqual(outcome.ok, false);
     assert.strictEqual(doc.lineAt(45).text, '  return a * b; // dup');
     await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
+  test('a fix whose quote is also part of a longer name on its line is refused, not misapplied', async () => {
+    const content = '// math\n\nexport function total() {\n  return discount18 + count18;\n}\n';
+    const key = await reviewOne('src/ux-partial.ts', content);
+    assert.strictEqual(api.findings.get(key)?.startLine, 4);
+
+    for (const command of ['aiReview.applyFix', 'aiReview.previewFix']) {
+      const outcome = await vscode.commands.executeCommand<{ ok: boolean; message?: string }>(
+        command,
+        key,
+        { silent: true, accept: true },
+      );
+      assert.strictEqual(outcome.ok, false, command);
+      assert.match(outcome.message ?? '', /more than once on its line, or inside a longer name/);
+    }
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-partial.ts'));
+    assert.strictEqual(doc.getText(), content);
+    // Still open and current: the code is there, it just needs a manual edit.
+    assert.strictEqual(api.findings.get(key)?.status, 'open');
+    assert.ok(!api.findings.get(key)?.stale);
   });
 
   test('tree lists findings by file; clicking one reveals its range; summary is shown', async () => {
