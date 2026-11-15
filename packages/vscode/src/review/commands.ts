@@ -199,7 +199,11 @@ export async function reviewCommand(
             rules,
             context: includeContext,
             ...(symbols ? { symbols } : {}),
-            workspace: new VsCodeWorkspaceTools(repo.root, logger),
+            workspace: new VsCodeWorkspaceTools(
+              repo.root,
+              logger,
+              repo.gitPath ? { gitPath: repo.gitPath } : {},
+            ),
             agentLimits,
             ...(verify !== undefined ? { verify } : {}),
             ...(previous ? { previous } : {}),

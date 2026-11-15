@@ -1,4 +1,12 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  appendFileSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -6,8 +14,15 @@ import { createReviewTools, type AgentTool } from '@ai-review/core';
 import { loadRepoRulesFromDisk, readRepoText } from './rules';
 import { FsWorkspaceTools } from './tools';
 
+/** The tools show only the files git lists (untracked ones too), so they need a repo. */
+const gitInit = (dir: string) => {
+  mkdirSync(dir, { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+};
+
 const base = mkdtempSync(path.join(tmpdir(), 'air-rules-'));
 const root = path.join(base, 'repo');
+gitInit(root);
 mkdirSync(path.join(root, '.github'), { recursive: true });
 writeFileSync(path.join(root, 'AGENTS.md'), '- Never use `any`.\n');
 writeFileSync(path.join(root, '.github', 'copilot-instructions.md'), 'Prefer early returns.\n');
@@ -43,8 +58,11 @@ describe('repo rules on disk', () => {
 });
 
 describe('review tools on FsWorkspaceTools', () => {
-  const tools = new Map(createReviewTools(new FsWorkspaceTools(root)).map((t) => [t.def.name, t]));
+  // A new instance per call: the tests add files, and an instance lists the files once.
   const run = (name: string, input: unknown) => {
+    const tools = new Map(
+      createReviewTools(new FsWorkspaceTools(root)).map((t) => [t.def.name, t]),
+    );
     const tool = tools.get(name)! as unknown as AgentTool<unknown>;
     return tool.run(tool.schema.parse(input), new AbortController().signal);
   };
@@ -100,7 +118,7 @@ describe('review tools on FsWorkspaceTools', () => {
 
   it('search_code hides hits past the point where a large file is cut', async () => {
     const dir = path.join(base, 'repo4');
-    mkdirSync(dir, { recursive: true });
+    gitInit(dir);
     writeFileSync(
       path.join(dir, 'large.ts'),
       [
@@ -130,10 +148,9 @@ describe('review tools on FsWorkspaceTools', () => {
 
 describe('secret files behind other names', () => {
   // A directory junction needs no privileges on Windows (file symlinks may).
-  mkdirSync(path.join(root, '.git'), { recursive: true });
-  writeFileSync(
+  appendFileSync(
     path.join(root, '.git', 'config'),
-    '[remote] url = https://user:pw@example.invalid',
+    '[remote "origin"]\n\turl = https://user:pw@example.invalid\n',
   );
   let linked = true;
   try {
@@ -166,7 +183,7 @@ describe('secret files behind other names', () => {
 describe('grep with a model-written pattern', () => {
   it('fails fast on a catastrophic regex instead of blocking the host', async () => {
     const dir = path.join(base, 'repo3');
-    mkdirSync(dir, { recursive: true });
+    gitInit(dir);
     writeFileSync(path.join(dir, 'a.txt'), `${'a'.repeat(40)}!\n`);
     const ws = new FsWorkspaceTools(dir, { grepTimeoutMs: 300 });
     const started = Date.now();

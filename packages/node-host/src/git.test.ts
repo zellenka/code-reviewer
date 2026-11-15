@@ -209,7 +209,8 @@ describe('sandbox + FsWorkspaceTools', () => {
   let outside: string;
 
   beforeAll(() => {
-    root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'air-fs-')));
+    // A repo: the tools show only the files git lists (untracked ones too).
+    ({ root } = makeRepo());
     outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'air-out-')));
     mkdirSync(path.join(root, 'src'));
     mkdirSync(path.join(root, 'node_modules', 'x'), { recursive: true });

@@ -20,6 +20,8 @@ export interface RepoContext {
   /** Absolute OS path of the repo root. */
   root: string;
   source: GitCliDiffSource;
+  /** The Git extension's git binary, when it has one. */
+  gitPath?: string;
 }
 
 /**
@@ -94,7 +96,7 @@ export class RepoLocator {
         vscode.workspace.getConfiguration('aiReview').get<string>('baseBranch') || undefined,
       logger: this.logger,
     });
-    return { root, source };
+    return { root, source, ...(gitPath ? { gitPath } : {}) };
   }
 
   private async knownRoots(api: GitApi | undefined): Promise<string[]> {

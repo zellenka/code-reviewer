@@ -9,9 +9,12 @@ import {
   toPosixPath,
   type WorkspaceTools,
 } from '@ai-review/core';
-import { realRepoPath, resolveInRepo } from './sandbox';
+import { createGitRunner } from './git';
+import { pathKey, realRepoPath, resolveInRepo } from './sandbox';
 
 export interface FsWorkspaceToolsOptions {
+  /** Git executable that lists the repository's files. Default `git`. */
+  gitPath?: string;
   /** Max characters returned by `readFile`. Default 100k. */
   maxReadChars?: number;
   /** Max grep matches. Default 200. */
@@ -60,13 +63,27 @@ parentPort.on('message', (texts) => {
 });
 `;
 
-/** Read-only file tools sandboxed to the repo root (no LSP: references fall back to grep). */
+/** Files git shows (keys from `pathKey`), and the directories that hold them. */
+interface GitFiles {
+  files: Set<string>;
+  dirs: Set<string>;
+}
+
+/**
+ * Read-only file tools sandboxed to the repo root (no LSP: references fall back to grep).
+ * They show only the files git shows: tracked ones, and untracked ones that aren't ignored,
+ * as the diff modes do. Ignored files (`.aws/credentials`, `*.tfvars`, …) often hold
+ * secrets the protected-path list doesn't name. The list is read once per instance (one
+ * review). If git can't list the files (not a repo, git missing), nothing is read.
+ */
 export class FsWorkspaceTools implements WorkspaceTools {
   readonly root: string;
   private readonly maxReadChars: number;
   private readonly maxGrepResults: number;
   private readonly skipDirs: Set<string>;
   private readonly grepTimeoutMs: number;
+  private readonly gitPath: string | undefined;
+  private gitFiles?: Promise<GitFiles>;
 
   constructor(root: string, options: FsWorkspaceToolsOptions = {}) {
     this.root = path.resolve(root);
@@ -74,14 +91,11 @@ export class FsWorkspaceTools implements WorkspaceTools {
     this.maxGrepResults = options.maxGrepResults ?? 200;
     this.skipDirs = new Set(options.skipDirs ?? DEFAULT_SKIP);
     this.grepTimeoutMs = options.grepTimeoutMs ?? 3_000;
+    this.gitPath = options.gitPath;
   }
 
   async readFile(relPath: string, range?: { start: number; end: number }): Promise<string> {
-    const abs = await resolveInRepo(this.root, relPath);
-    // Callers check the name they ask for; this checks what a symlink points to.
-    if (isProtectedPath(await realRepoPath(this.root, abs))) {
-      throw new Error(`${relPath} can't be read: it may contain secrets.`);
-    }
+    const abs = await this.resolveReadable(relPath);
     let text = normalizeEol(await readFile(abs, 'utf8'));
     if (range) {
       const lines = splitLines(text);
@@ -95,10 +109,51 @@ export class FsWorkspaceTools implements WorkspaceTools {
     return text;
   }
 
+  /**
+   * Absolute path of a file the tools may open: inside the repo, shown by git, not a
+   * secret file. Hosts that open files another way (e.g. a language server) call this first.
+   */
+  protected async resolveReadable(relPath: string): Promise<string> {
+    const abs = await resolveInRepo(this.root, relPath);
+    const { files } = await this.listGitFiles();
+    const notShown = () => new Error(`${relPath} can't be read: it is ignored by git or missing.`);
+    // Checked by name before the file is looked up, so the answer doesn't tell whether an
+    // ignored file exists. A path under a listed symlink (git lists the link) is checked by
+    // its target.
+    const rel = toPosixPath(path.relative(this.root, abs));
+    const viaLink = !files.has(pathKey(rel));
+    if (viaLink && !ancestors(rel).some((dir) => files.has(pathKey(dir)))) throw notShown();
+    let real: string;
+    try {
+      real = await realRepoPath(this.root, abs);
+    } catch (err) {
+      if (viaLink) throw notShown();
+      throw err;
+    }
+    // Callers check the name they ask for; this checks what a symlink points to.
+    if (isProtectedPath(real)) {
+      throw new Error(`${relPath} can't be read: it may contain secrets.`);
+    }
+    if (!files.has(pathKey(real))) throw notShown();
+    return abs;
+  }
+
+  /** Whether git shows `rel` (repo-relative, `/`). Hosts filter paths from other sources with it. */
+  protected async isListed(rel: string): Promise<boolean> {
+    return (await this.listGitFiles()).files.has(pathKey(toPosixPath(rel)));
+  }
+
+  /** `git ls-files`, once per instance: a file created during the review is not shown. */
+  private listGitFiles(): Promise<GitFiles> {
+    this.gitFiles ??= gitFileList(this.root, this.gitPath);
+    return this.gitFiles;
+  }
+
   async grep(
     pattern: string,
     glob?: string,
   ): Promise<{ path: string; line: number; text: string }[]> {
+    const { files: listed, dirs } = await this.listGitFiles();
     let regex: RegExp;
     try {
       regex = new RegExp(pattern);
@@ -134,12 +189,14 @@ export class FsWorkspaceTools implements WorkspaceTools {
       for (const entry of entries) {
         if (results.length >= this.maxGrepResults) return;
         const abs = path.join(dir, entry.name);
+        const rel = toPosixPath(path.relative(this.root, abs));
         if (entry.isDirectory()) {
-          if (!this.skipDirs.has(entry.name)) await walk(abs);
+          // A directory with no file git shows (ignored, a nested repo) isn't entered.
+          if (!this.skipDirs.has(entry.name) && dirs.has(pathKey(rel))) await walk(abs);
           continue;
         }
         if (!entry.isFile()) continue; // symlinks are not followed
-        const rel = toPosixPath(path.relative(this.root, abs));
+        if (!listed.has(pathKey(rel))) continue;
         if (matchGlob && !matchGlob(rel)) continue;
         // Never even scanned, so matches can't hint at their content.
         if (isProtectedPath(rel)) continue;
@@ -207,6 +264,45 @@ export class FsWorkspaceTools implements WorkspaceTools {
   async getSymbolAt(_relPath: string, _line: number): ReturnType<WorkspaceTools['getSymbolAt']> {
     return null;
   }
+}
+
+/**
+ * Tracked files plus untracked ones that aren't ignored (.gitignore at any depth,
+ * .git/info/exclude, the user's excludes file). Submodules and nested repos are listed as
+ * one entry, so their files aren't shown. Fails with a message that hides git's output.
+ */
+async function gitFileList(root: string, gitPath?: string): Promise<GitFiles> {
+  const git = createGitRunner(root, gitPath);
+  let stdout: string;
+  try {
+    ({ stdout } = await git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']));
+  } catch (err) {
+    throw new Error("Files can't be read: git could not list the repository's files.", {
+      cause: err,
+    });
+  }
+  const files = new Set<string>();
+  const dirs = new Set<string>();
+  for (const p of stdout.split('\0')) {
+    // `nested/` is an untracked repository inside this one.
+    if (!p || p.endsWith('/')) continue;
+    const key = pathKey(p);
+    files.add(key);
+    for (const dir of ancestors(key)) {
+      if (dirs.has(dir)) break;
+      dirs.add(dir);
+    }
+  }
+  return { files, dirs };
+}
+
+/** `a/b/c` → `a/b`, `a`. */
+function ancestors(rel: string): string[] {
+  const out: string[] = [];
+  for (let i = rel.lastIndexOf('/'); i > 0; i = rel.lastIndexOf('/', i - 1)) {
+    out.push(rel.slice(0, i));
+  }
+  return out;
 }
 
 function identifierAt(text: string, index: number): string | undefined {

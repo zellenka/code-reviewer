@@ -4,11 +4,13 @@ import { DiffSourceError } from '@ai-review/core';
 
 const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin';
 
+/** `p` as paths are compared: lower case where the file system ignores case. */
+export function pathKey(p: string): string {
+  return caseInsensitive ? p.toLowerCase() : p;
+}
+
 function isInside(root: string, target: string): boolean {
-  const rel = path.relative(
-    caseInsensitive ? root.toLowerCase() : root,
-    caseInsensitive ? target.toLowerCase() : target,
-  );
+  const rel = path.relative(pathKey(root), pathKey(target));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
