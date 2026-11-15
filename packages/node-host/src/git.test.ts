@@ -202,6 +202,87 @@ describe('GitCliDiffSource', () => {
       (e) => isDiffSourceError(e) && e.kind === 'outsideRepo',
     );
   });
+
+  it('file and selection modes: CRLF is normalized; binary, oversized and missing files', async () => {
+    const crlf = await source.getDiff({ kind: 'file', path: 'crlf.txt' });
+    expect(crlf.files[0]).toMatchObject({
+      status: 'modified',
+      binary: false,
+      newContent: 'x\nY\n',
+    });
+    expect(crlf.files[0]!.hunks[0]!.lines.map((l) => l.text)).toEqual(['x', 'Y']);
+    const sel = await source.getDiff({
+      kind: 'selection',
+      path: 'crlf.txt',
+      startLine: 2,
+      endLine: 2,
+    });
+    expect(sel.files[0]!.hunks[0]!.lines).toEqual([{ kind: 'add', text: 'Y', newLine: 2 }]);
+
+    const img = await source.getDiff({ kind: 'file', path: 'img.png' });
+    expect(img.files).toEqual([{ path: 'img.png', status: 'modified', binary: true, hunks: [] }]);
+    write('big.txt', 'x'.repeat(2 * 1024 * 1024 + 1));
+    try {
+      const big = await source.getDiff({ kind: 'file', path: 'big.txt' });
+      expect(big.files).toEqual([{ path: 'big.txt', status: 'modified', binary: true, hunks: [] }]);
+    } finally {
+      rmSync(path.join(root, 'big.txt'));
+    }
+    await expect(source.getDiff({ kind: 'file', path: 'missing.txt' })).rejects.toSatisfy(
+      (e) => isDiffSourceError(e) && e.kind === 'notFound',
+    );
+  });
+
+  it('file and selection modes review unsaved editor text; the diff modes ignore it (F19)', async () => {
+    const asked: string[] = [];
+    const buffers: Record<string, string> = {
+      'keep.txt': 'zero\r\none\r\nTWO\r\nthree\r\n',
+      'img.png': 'text in the editor\0',
+      'big.txt': 'y'.repeat(2 * 1024 * 1024 + 1),
+    };
+    const unsaved = new GitCliDiffSource({
+      root,
+      unsavedText: (abs) => {
+        asked.push(abs);
+        return buffers[path.relative(root, abs).split(path.sep).join('/')];
+      },
+    });
+
+    const file = await unsaved.getDiff({ kind: 'file', path: 'keep.txt' });
+    expect(file.files[0]).toMatchObject({
+      status: 'modified',
+      newContent: 'zero\none\nTWO\nthree\n',
+    });
+    expect(file.files[0]!.hunks[0]!.lines.map((l) => l.text)).toEqual([
+      'zero',
+      'one',
+      'TWO',
+      'three',
+    ]);
+    const sel = await unsaved.getDiff({
+      kind: 'selection',
+      path: 'keep.txt',
+      startLine: 3,
+      endLine: 3,
+    });
+    expect(sel.files[0]!.hunks[0]!.lines).toEqual([{ kind: 'add', text: 'TWO', newLine: 3 }]);
+    expect(asked).toContain(path.join(root, 'keep.txt'));
+
+    // Same binary and size rules as the file; a buffer for a file not on disk is used too.
+    expect((await unsaved.getDiff({ kind: 'file', path: 'img.png' })).files[0]!.binary).toBe(true);
+    expect((await unsaved.getDiff({ kind: 'file', path: 'big.txt' })).files[0]!.binary).toBe(true);
+    // The sandbox comes first: an outside path never reaches the host.
+    asked.length = 0;
+    await expect(unsaved.getDiff({ kind: 'file', path: '../etc/passwd' })).rejects.toSatisfy(
+      (e) => isDiffSourceError(e) && e.kind === 'outsideRepo',
+    );
+    expect(asked).toEqual([]);
+
+    // Diffs are about saved content.
+    const { files } = await unsaved.getDiff({ kind: 'unstaged' });
+    expect(files.find((f) => f.path === 'keep.txt')!.newContent).toBe('one\nTWO\nthree\n');
+    expect(asked).toEqual([]);
+  });
 });
 
 describe('sandbox + FsWorkspaceTools', () => {

@@ -106,6 +106,18 @@ const KNOWN_BUGS = [
     quote: 'count18',
     suggestion: 'count18 - 1',
   },
+  {
+    file: 'src/ux-buf.ts',
+    title: 'unsaved bug',
+    quote: 'return a * b; // buf',
+    suggestion: 'return a / b; // buf',
+  },
+  {
+    file: 'src/ux-sel-buf.ts',
+    title: 'unsaved selected bug',
+    quote: 'return a * b; // sel-buf',
+    suggestion: 'return a / b; // sel-buf',
+  },
 ];
 
 /** When set, the stub words its findings differently (new title, shorter quote, new fingerprint). */
@@ -346,6 +358,34 @@ suite('Review', () => {
     const sent = JSON.stringify(stub.requests[0]!.messages);
     assert.ok(sent.includes('twice'));
     assert.ok(!sent.includes('return a + b;'));
+  });
+
+  test('review file of a secret file sends nothing', async () => {
+    const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+      'aiReview.reviewFile',
+      { root, path: '.env', silent: true },
+    );
+    assert.strictEqual(result.ok, true, result.message);
+    assert.ok(result.result?.skipped.some((s) => s.path === '.env' && s.reason === 'secret'));
+    assert.ok(!JSON.stringify(stub.requests).includes('do-not-send-this'));
+  });
+
+  test('review file or selection of an untitled document asks for a file', async () => {
+    const doc = await vscode.workspace.openTextDocument({ content: 'const x = 1;\n' });
+    const editor = await vscode.window.showTextDocument(doc);
+    editor.selection = new vscode.Selection(0, 0, 0, 5);
+    try {
+      for (const command of ['aiReview.reviewFile', 'aiReview.reviewSelection']) {
+        const result = await vscode.commands.executeCommand<ReviewCommandResult>(command, {
+          silent: true,
+        });
+        assert.strictEqual(result.ok, false, command);
+        assert.strictEqual(result.message, 'Open a file to review it.', command);
+      }
+      assert.strictEqual(stub.requests.length, 0);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
   });
 
   test('.codereview.yml thresholds apply, and invalid config falls back to defaults', async () => {
@@ -999,6 +1039,176 @@ suite('Review', () => {
       );
     } finally {
       write('src/new.ts', 'export const n = 1;\n');
+    }
+  });
+
+  // ---------- Unsaved editor changes (F19) ----------
+
+  /** What the review requests (not the summary) sent to the model. */
+  const sentForReview = (from = 0) =>
+    JSON.stringify(
+      stub.requests
+        .slice(from)
+        .filter((r) => r.tools)
+        .map((r) => r.messages),
+    );
+  const revertAndClose = async (doc: vscode.TextDocument) => {
+    await vscode.window.showTextDocument(doc);
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  };
+
+  test('review file of a document with unsaved edits reviews the editor text (F19)', async () => {
+    write('src/ux-buf.ts', DIV('clean'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-buf.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    try {
+      // Unsaved: two lines above the function, and a bug only the editor has.
+      await editor.edit((e) => {
+        e.insert(new vscode.Position(0, 0), '// a\n// b\n');
+        e.replace(doc.lineAt(3).range, '  return a * b; // buf');
+      });
+      assert.ok(doc.isDirty);
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root, path: 'src/ux-buf.ts', silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      const sent = sentForReview();
+      assert.ok(sent.includes('     6 +   return a * b; // buf'), sent);
+      assert.ok(!sent.includes('// clean'));
+      // Anchored on the editor's line, as shown.
+      assert.deepStrictEqual(
+        result.findings?.map((f) => [f.title, f.startLine, !!f.stale]),
+        [['unsaved bug', 6, false]],
+      );
+      assert.strictEqual(vscode.languages.getDiagnostics(doc.uri)[0]?.range.start.line, 5);
+      assert.strictEqual(readFileSync(path.join(root, 'src/ux-buf.ts'), 'utf8'), DIV('clean'));
+    } finally {
+      await revertAndClose(doc);
+    }
+
+    // The snapshot holds the editor text: the file on disk is a different hunk, sent again.
+    const mark = stub.requests.length;
+    const again = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+      root,
+      path: 'src/ux-buf.ts',
+      silent: true,
+    });
+    assert.strictEqual(again.ok, true, again.message);
+    assert.ok(sentForReview(mark).includes('     4 +   return a * b; // clean'));
+    assert.deepStrictEqual(again.result?.incremental, {
+      newHunks: 1,
+      reusedHunks: 0,
+      carried: 0,
+    });
+    assert.deepStrictEqual(again.findings, []);
+  });
+
+  test('review selection of a document with unsaved edits sends the selected editor lines (F19)', async () => {
+    write('src/ux-sel-buf.ts', DIV('plain'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-sel-buf.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    try {
+      await editor.edit((e) => {
+        e.insert(new vscode.Position(0, 0), '// a\n// b\n// c\n');
+        e.replace(doc.lineAt(3).range, '  return a * b; // sel-buf');
+      });
+      // Line 7 in the editor (line 4 on disk).
+      editor.selection = new vscode.Selection(6, 0, 7, 0);
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewSelection',
+        { root, silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      assert.deepStrictEqual(api.findings.session?.mode, {
+        kind: 'selection',
+        path: 'src/ux-sel-buf.ts',
+        startLine: 7,
+        endLine: 7,
+      });
+      const sent = sentForReview();
+      assert.ok(sent.includes('     7 +   return a * b; // sel-buf'), sent);
+      assert.ok(!sent.includes('export function div'));
+      assert.ok(!sent.includes('// plain'));
+      assert.deepStrictEqual(
+        result.findings?.map((f) => [f.title, f.startLine]),
+        [['unsaved selected bug', 7]],
+      );
+    } finally {
+      await revertAndClose(doc);
+    }
+  });
+
+  test('unsaved edits get the same secret handling: secret files are refused, keys redacted (F19)', async () => {
+    const env = await vscode.workspace.openTextDocument(uriOf('.env'));
+    write('src/ux-key.ts', DIV('nokey'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-key.ts'));
+    try {
+      const envEditor = await vscode.window.showTextDocument(env);
+      await envEditor.edit((e) =>
+        e.insert(new vscode.Position(0, 0), 'TYPED_TOKEN=typed-but-not-saved\n'),
+      );
+      const editor = await vscode.window.showTextDocument(doc);
+      await editor.edit((e) => {
+        e.insert(new vscode.Position(0, 0), 'const id = "AKIAIOSFODNN7EXAMPLE";\n');
+        e.replace(doc.lineAt(3).range, '  return a * b; // key');
+      });
+      assert.ok(env.isDirty && doc.isDirty);
+
+      const secret = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root, path: '.env', silent: true },
+      );
+      assert.strictEqual(secret.ok, true, secret.message);
+      assert.ok(secret.result?.skipped.some((s) => s.path === '.env' && s.reason === 'secret'));
+
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root, path: 'src/ux-key.ts', silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      const sent = JSON.stringify(stub.requests.map((r) => r.messages));
+      assert.ok(!sent.includes('typed-but-not-saved') && !sent.includes('do-not-send-this'));
+      assert.ok(!sent.includes('AKIAIOSFODNN7EXAMPLE'));
+      // The rest of the editor text is reviewed, with the key redacted.
+      assert.ok(sent.includes('     1 + const id = \\"[REDACTED:aws-access-key]\\";'), sent);
+      assert.ok(sent.includes('     5 +   return a * b; // key'));
+    } finally {
+      await revertAndClose(doc);
+      await revertAndClose(env);
+    }
+  });
+
+  test('unstaged and branch reviews say which unsaved edits they leave out; staged does not (F19)', async () => {
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/calc.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    try {
+      await editor.edit((e) => e.insert(new vscode.Position(0, 0), '// not saved\n'));
+      for (const command of ['aiReview.reviewUnstaged', 'aiReview.reviewBranch']) {
+        const result = await vscode.commands.executeCommand<ReviewCommandResult>(command, {
+          root,
+          base: 'main',
+          silent: true,
+        });
+        assert.strictEqual(result.ok, true, result.message);
+        assert.match(
+          result.message ?? '',
+          /Not included: unsaved changes in src\/calc\.ts \(save to review them\)\.$/,
+          `${command}: ${result.message}`,
+        );
+      }
+      // What git sees is reviewed, not the editor text.
+      assert.ok(!JSON.stringify(stub.requests).includes('// not saved'));
+
+      // Staged reviews the index, which unsaved edits never reach.
+      const staged = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewStaged',
+        { root, silent: true },
+      );
+      assert.strictEqual(staged.ok, true, staged.message);
+      assert.doesNotMatch(staged.message ?? '', /unsaved/);
+    } finally {
+      await revertAndClose(doc);
     }
   });
 

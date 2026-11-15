@@ -78,6 +78,12 @@ export interface GitCliDiffSourceOptions {
   gitPath?: string;
   /** Base for `branch` mode when the mode doesn't name one. Default: auto-detect. */
   defaultBase?: string | (() => string | undefined);
+  /**
+   * The text of an editor with unsaved changes to `absPath`, if any. File and selection
+   * reviews use it in place of the file on disk, so they review what the user sees and
+   * selected. The diff modes always read what git sees.
+   */
+  unsavedText?: (absPath: string) => string | undefined;
   logger?: Logger;
 }
 
@@ -123,7 +129,7 @@ export class GitCliDiffSource implements DiffSource {
       case 'file':
       case 'selection': {
         const rel = toPosixPath(mode.path);
-        const content = await this.readWorkingFile(rel);
+        const content = await this.readWorkingFile(rel, { unsaved: true });
         if (content === undefined) throw new DiffSourceError('notFound', `File not found: ${rel}`);
         const range =
           mode.kind === 'selection' ? { startLine: mode.startLine, endLine: mode.endLine } : {};
@@ -225,15 +231,18 @@ export class GitCliDiffSource implements DiffSource {
    * Normalized working-tree content; `\0` marks binary/oversized; undefined if missing.
    * `inDiff`: the path came from git, so symlinks aren't followed (git already shows the
    * link target as the content) and unreadable paths are skipped instead of failing the review.
+   * `unsaved`: an editor's unsaved text wins over the file (same size cap and binary check).
    */
   private async readWorkingFile(
     rel: string,
-    options: { inDiff?: boolean } = {},
+    options: { inDiff?: boolean; unsaved?: boolean } = {},
   ): Promise<string | undefined> {
     try {
       const abs = await resolveInRepo(this.root, rel);
+      const unsaved = options.unsaved ? this.options.unsavedText?.(abs) : undefined;
+      if (unsaved !== undefined) this.logger.info(`${rel}: reviewing the unsaved editor text`);
       if (options.inDiff && (await lstat(abs)).isSymbolicLink()) return undefined;
-      const buf = await readFile(abs);
+      const buf = unsaved !== undefined ? Buffer.from(unsaved, 'utf8') : await readFile(abs);
       if (buf.length > MAX_FILE_BYTES || buf.subarray(0, 8000).includes(0)) return '\0';
       return normalizeEol(buf.toString('utf8'));
     } catch (err) {

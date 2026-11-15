@@ -25,7 +25,7 @@ import * as vscode from 'vscode';
 import { showProviderError } from '../providers/errorUi';
 import type { ProviderRegistry } from '../providers/registry';
 import type { ReviewConfigService } from './config';
-import { relativeToRepo, type RepoLocator } from './repo';
+import { relativeToRepo, unsavedFiles, type RepoLocator } from './repo';
 import type { SnapshotStore } from './snapshots';
 import type { FindingStore } from './store';
 import { formatTokens } from './tree';
@@ -168,6 +168,18 @@ export async function reviewCommand(
       (settings.get<boolean>('incrementalReview') ?? true)
         ? deps.snapshots?.get(repo.root, mode)
         : undefined;
+    // File and selection reviews read unsaved editor text; git diffs only see saved files,
+    // so say which edits are left out. Staged reviews the index: unsaved edits aren't in it,
+    // just like saved but unstaged ones, so it doesn't warn.
+    const unsaved =
+      mode.kind === 'unstaged' || mode.kind === 'branch' ? unsavedFiles(repo.root) : [];
+    if (unsaved.length) {
+      logger.warn(`unsaved changes are not included in this review: ${unsaved.join(', ')}`);
+    }
+    const withUnsavedNote = (message: string) =>
+      unsaved.length
+        ? `${message.replace(/\.$/, '')}. Not included: unsaved changes in ${listFiles(unsaved)} (save to review them).`
+        : message;
 
     const outcome = await vscode.window.withProgress(
       {
@@ -290,8 +302,8 @@ export async function reviewCommand(
     }
     if ('cancelled' in outcome) return keepPrevious();
     if (outcome.empty) {
-      const message = `No changes to review (${describeMode(mode)}).`;
-      notify(message);
+      const message = withUnsavedNote(`No changes to review (${describeMode(mode)}).`);
+      notify(message, unsaved.length ? 'warn' : 'info');
       deps.store.clear();
       await deps.snapshots?.set(repo.root, mode, undefined);
       return { ok: true, findings: [], message };
@@ -321,9 +333,10 @@ export async function reviewCommand(
     if (result.snapshot && running === cts) {
       await deps.snapshots?.set(repo.root, mode, result.snapshot);
     }
-    const message = summarize(result, model);
+    const message = withUnsavedNote(summarize(result, model));
     if (!args.silent) {
-      const level = result.errors.length && !result.findings.length ? 'warn' : 'info';
+      const level =
+        (result.errors.length && !result.findings.length) || unsaved.length ? 'warn' : 'info';
       const show =
         level === 'warn' ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
       const actions = [
@@ -420,6 +433,12 @@ function buildMode(
       return { kind, path: rel, startLine, endLine };
     }
   }
+}
+
+/** `a, b, c and 2 more`. */
+function listFiles(paths: string[]): string {
+  const shown = paths.slice(0, 3).join(', ');
+  return paths.length > 3 ? `${shown} and ${paths.length - 3} more` : shown;
 }
 
 function toRepoPath(root: string, target: string): string | undefined {
