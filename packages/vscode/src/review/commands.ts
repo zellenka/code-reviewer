@@ -105,6 +105,14 @@ export async function reviewCommand(
           : vscode.window.showInformationMessage;
     void show(`AI Review: ${message}`);
   };
+  /** Cancelled before any part finished: there's nothing new to show, so the last review stays. */
+  const keepPrevious = (
+    outcome: Pick<ReviewCommandResult, 'result' | 'estimate'> = {},
+  ): ReviewCommandResult => {
+    logger.info('review cancelled before any part finished; the previous findings are kept');
+    notify(deps.store.session ? 'Cancelled. The previous findings are kept.' : 'Cancelled.');
+    return { ok: false, message: 'cancelled', ...outcome };
+  };
 
   if (!vscode.workspace.isTrusted) {
     const message =
@@ -173,9 +181,13 @@ export async function reviewCommand(
           token.onCancellationRequested(() => controller.abort()),
           cts.token.onCancellationRequested(() => controller.abort()),
         ];
+        // Cancelled already (e.g. while the repository was looked up).
+        if (token.isCancellationRequested || cts.token.isCancellationRequested) controller.abort();
         try {
           progress.report({ message: 'collecting changes…' });
           const diff = await repo.source.getDiff(mode);
+          // Nothing was reviewed, so nothing changes (not even for an empty diff).
+          if (controller.signal.aborted) return { cancelled: true as const };
           if (!diff.files.length) return { empty: true as const };
 
           const rules = await loadRepoRulesFromDisk(repo.root, config, {
@@ -191,6 +203,8 @@ export async function reviewCommand(
               { logger },
             );
           }
+          // Don't ask about the cost of a review that was cancelled.
+          if (controller.signal.aborted) return { cancelled: true as const };
           const reviewOptions = {
             model,
             config,
@@ -269,6 +283,12 @@ export async function reviewCommand(
       logger.info('review cancelled at the cost confirmation');
       return { ok: false, message: 'cancelled', estimate: outcome.estimate };
     }
+    // A newer review cancelled this one; the findings, snapshot and summary are its now.
+    if (running !== cts) {
+      logger.info('review superseded by a newer one; its results are dropped');
+      return { ok: false, message: 'cancelled' };
+    }
+    if ('cancelled' in outcome) return keepPrevious();
     if (outcome.empty) {
       const message = `No changes to review (${describeMode(mode)}).`;
       notify(message);
@@ -286,12 +306,21 @@ export async function reviewCommand(
     logger.info(
       `input tokens: estimated ${estimate.inputTokens}, actual ${actualInput}${result.usage.estimated ? ' (counted locally)' : ''}`,
     );
-    // Cancelled or a part failed (no snapshot): keep the last one, it still matches its hunks.
-    if (result.snapshot) await deps.snapshots?.set(repo.root, mode, result.snapshot);
+    // A cancelled review replaces the last one only once a part has finished.
+    if (result.cancelled && !result.chunks.completed) return keepPrevious({ result, estimate });
     const findings = await deps.store.set(
       { root: repo.root, mode, model, result, finishedAt: new Date() },
       result.findings,
     );
+    if (!findings) {
+      logger.info('a newer review or Clear Findings replaced this review; its results are dropped');
+      return { ok: false, message: 'cancelled' };
+    }
+    // Cancelled or a part failed (no snapshot): keep the last one, it still matches its hunks.
+    // Superseded meanwhile: the newer review writes it.
+    if (result.snapshot && running === cts) {
+      await deps.snapshots?.set(repo.root, mode, result.snapshot);
+    }
     const message = summarize(result, model);
     if (!args.silent) {
       const level = result.errors.length && !result.findings.length ? 'warn' : 'info';

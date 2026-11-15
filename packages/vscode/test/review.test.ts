@@ -1,4 +1,10 @@
-import { MockProvider, type ChatRequest, type MockStep } from '@ai-review/core';
+import {
+  MockProvider,
+  type ChatRequest,
+  type Finding,
+  type LLMProvider,
+  type MockStep,
+} from '@ai-review/core';
 import * as assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
 import {
@@ -15,6 +21,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension';
 import type { ReviewCommandResult } from '../src/review/commands';
+import { FixPreviewProvider, previewFix } from '../src/review/fixes';
 import { FindingStatusStore } from '../src/review/state';
 
 const manifest = JSON.parse(
@@ -132,6 +139,45 @@ function reviewer(req: ChatRequest): MockStep {
   };
 }
 
+/** A held review request: it waits until `release()`, then the stub answers it. */
+interface Gate {
+  arrived: boolean;
+  release: () => void;
+  opened: Promise<void>;
+  /** Answer even if the review was cancelled meanwhile, as a provider may finish a response in flight. */
+  ignoreCancel: boolean;
+}
+
+/** Review requests whose diff contains a key wait at its gate. */
+const gates = new Map<string, Gate>();
+
+function hold(quote: string, ignoreCancel = false): Gate {
+  let release!: () => void;
+  const opened = new Promise<void>((resolve) => (release = resolve));
+  const gate: Gate = { arrived: false, release, opened, ignoreCancel };
+  gates.set(quote, gate);
+  return gate;
+}
+
+/** The stub, with review requests held at their gates (see `hold`). */
+function gated(inner: MockProvider): LLMProvider {
+  return {
+    id: inner.id,
+    listModels: () => inner.listModels(),
+    countTokens: (model, text) => inner.countTokens(model, text),
+    async *chat(req) {
+      const text = JSON.stringify(req.messages);
+      const gate = req.tools ? [...gates].find(([quote]) => text.includes(quote))?.[1] : undefined;
+      if (gate) {
+        gate.arrived = true;
+        await gate.opened;
+        if (gate.ignoreCancel) req = { ...req, signal: new AbortController().signal };
+      }
+      yield* inner.chat(req);
+    },
+  };
+}
+
 const DIV = (tag: string, eol = '\n') =>
   [
     '// math',
@@ -190,11 +236,17 @@ suite('Review', () => {
       fallback: reviewer,
     });
     disposables.push(
-      api.registry.register('copilot', { label: 'Stub', provider: stub, isAvailable: () => true }),
+      api.registry.register('copilot', {
+        label: 'Stub',
+        provider: gated(stub),
+        isAvailable: () => true,
+      }),
     );
   });
 
   teardown(async () => {
+    for (const gate of gates.values()) gate.release();
+    gates.clear();
     vscode.Disposable.from(...disposables.splice(0)).dispose();
     api.findings.clear();
     // Each test starts without earlier reviews or dismissed findings.
@@ -947,6 +999,209 @@ suite('Review', () => {
       );
     } finally {
       write('src/new.ts', 'export const n = 1;\n');
+    }
+  });
+
+  // ---------- Cancelled and overlapping reviews ----------
+
+  const startReview = (rel: string) =>
+    Promise.resolve(
+      vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+        root,
+        path: rel,
+        silent: true,
+      }),
+    );
+  const titles = () => api.findings.all().map((f) => f.title);
+  const isRunning = async () => (await api.panel.snapshot()).running;
+
+  test('a new review replaces the previous findings', async () => {
+    await reviewOne('src/ux-track.ts', DIV('track'));
+    await reviewOne('src/ux-lf.ts', DIV('lf'));
+    assert.deepStrictEqual(titles(), ['div() multiplies']);
+    assert.deepStrictEqual(api.findings.session?.mode, { kind: 'file', path: 'src/ux-lf.ts' });
+  });
+
+  test('cancelling keeps the findings of finished parts; the running state follows the review', async () => {
+    await reviewOne('src/ux-track.ts', DIV('track'));
+    write('src/ux-lf.ts', DIV('lf'));
+    const gate = hold('return a * b; // lf', true);
+    assert.strictEqual(await isRunning(), false);
+    const pending = startReview('src/ux-lf.ts');
+    await until(() => gate.arrived);
+    assert.strictEqual(await isRunning(), true);
+
+    await vscode.commands.executeCommand('aiReview.cancelReview');
+    gate.release();
+    const result = await pending;
+    assert.strictEqual(result.ok, true, result.message);
+    assert.strictEqual(result.result?.cancelled, true);
+    assert.strictEqual(result.result?.chunks.completed, 1);
+    assert.match(result.message ?? '', /^Cancelled\. 1 finding\(s\) .*\(from finished parts\)$/);
+    // The finished part's findings replace the previous review's.
+    assert.deepStrictEqual(titles(), ['div() multiplies']);
+    assert.strictEqual(api.findings.session?.result.cancelled, true);
+    // Not complete, so the next review of this scope doesn't build on it.
+    assert.strictEqual(api.snapshots.get(root, { kind: 'file', path: 'src/ux-lf.ts' }), undefined);
+    assert.strictEqual(await isRunning(), false);
+  });
+
+  test('cancelling before any part finishes keeps the previous findings (F20)', async () => {
+    await reviewOne('src/ux-track.ts', DIV('track'));
+    const session = api.findings.session;
+    write('src/ux-lf.ts', DIV('lf'));
+    const unchanged = (result: ReviewCommandResult, step: string) => {
+      assert.doesNotMatch(result.message ?? '', /no issues found/, `${step}: ${result.message}`);
+      assert.deepStrictEqual(titles(), ['tracked bug'], step);
+      assert.strictEqual(api.findings.session, session, step);
+    };
+
+    // 1. While the changes are collected ("collecting changes…").
+    const resolve = api.repos.resolve;
+    let entered = false;
+    let proceed!: () => void;
+    const resolving = new Promise<void>((r) => (proceed = r));
+    api.repos.resolve = async (target) => {
+      entered = true;
+      await resolving;
+      return resolve.call(api.repos, target);
+    };
+    let result: ReviewCommandResult;
+    try {
+      const pending = startReview('src/ux-lf.ts');
+      await until(() => entered);
+      await vscode.commands.executeCommand('aiReview.cancelReview');
+      proceed();
+      result = await pending;
+    } finally {
+      api.repos.resolve = resolve;
+    }
+    assert.ok(!stub.requests.some((r) => JSON.stringify(r.messages).includes('// lf')));
+    unchanged(result, 'collecting');
+
+    // 2. While the only part is with the model.
+    const gate = hold('return a * b; // lf');
+    const pending = startReview('src/ux-lf.ts');
+    await until(() => gate.arrived);
+    await vscode.commands.executeCommand('aiReview.cancelReview');
+    gate.release();
+    result = await pending;
+    unchanged(result, 'in flight');
+    assert.strictEqual(await isRunning(), false);
+  });
+
+  test('a review started while another runs: the first one finishing late never replaces it (F20)', async () => {
+    write('src/ux-lf.ts', DIV('lf'));
+    write('src/ux-track.ts', DIV('track'));
+    const gate = hold('return a * b; // lf', true);
+    const first = startReview('src/ux-lf.ts');
+    await until(() => gate.arrived);
+
+    // From the command palette or a keybinding: only the panel's button is guarded.
+    const second = await startReview('src/ux-track.ts');
+    assert.strictEqual(second.ok, true, second.message);
+    assert.deepStrictEqual(titles(), ['tracked bug']);
+
+    // The first review's model call ends after all, with a finding.
+    gate.release();
+    await first;
+    assert.deepStrictEqual(titles(), ['tracked bug']);
+    assert.deepStrictEqual(api.findings.session?.mode, { kind: 'file', path: 'src/ux-track.ts' });
+    assert.strictEqual(api.findings.session?.result.cancelled, false);
+    assert.strictEqual(api.snapshots.get(root, { kind: 'file', path: 'src/ux-lf.ts' }), undefined);
+    assert.strictEqual(await isRunning(), false);
+  });
+
+  test('a superseded review ending first neither writes findings nor clears the running state (F20)', async () => {
+    await reviewOne('src/ux-state.ts', DIV('state'));
+    write('src/ux-lf.ts', DIV('lf'));
+    write('src/ux-track.ts', DIV('track'));
+    const a = hold('return a * b; // lf', true);
+    const b = hold('return a * b; // track');
+    const first = startReview('src/ux-lf.ts');
+    await until(() => a.arrived);
+    const second = startReview('src/ux-track.ts');
+    await until(() => b.arrived);
+
+    a.release();
+    await first;
+    // The second review is still running: the first one's cleanup leaves that alone,
+    // and its findings don't replace the previous ones.
+    assert.strictEqual(await isRunning(), true);
+    assert.deepStrictEqual(titles(), ['state bug']);
+
+    b.release();
+    const result = await second;
+    assert.strictEqual(result.ok, true, result.message);
+    assert.deepStrictEqual(titles(), ['tracked bug']);
+    assert.strictEqual(await isRunning(), false);
+  });
+
+  test('overlapping store updates never mix their findings; the last one started wins (F20)', async () => {
+    await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const session = api.findings.session!;
+    const finding = (id: string, file: string, quote: string): Finding => ({
+      id,
+      file,
+      startLine: 1,
+      endLine: 1,
+      anchor: 'line',
+      severity: 'major',
+      category: 'bug',
+      title: id,
+      body: '',
+      quote,
+      confidence: 1,
+    });
+    const x = [finding('x', 'src/calc.ts', 'return a + b;')];
+    const y = [finding('y', 'README.md', '# demo')];
+    // Each update opens its files' documents first, so the two overlap.
+    await Promise.all([
+      api.findings.set({ ...session, finishedAt: new Date(1) }, x),
+      api.findings.set({ ...session, finishedAt: new Date(2) }, y),
+    ]);
+    assert.deepStrictEqual(
+      api.findings.all().map((f) => f.id),
+      ['y'],
+    );
+    assert.strictEqual(api.findings.session?.finishedAt.getTime(), 2);
+
+    // Clearing while an update is under way wins too.
+    const pending = api.findings.set(session, x);
+    api.findings.clear();
+    await pending;
+    assert.deepStrictEqual(api.findings.all(), []);
+    assert.strictEqual(api.findings.session, undefined);
+  });
+
+  test('accepting a preview never applies a fix that changed while it was shown', async () => {
+    const key = await reviewOne('src/ux-revise.ts', DIV('revise'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-revise.ts'));
+    try {
+      const outcome = await previewFix(api.findings, new FixPreviewProvider(), key, async () => {
+        // While the question is open, a re-review changes the suggestion.
+        await api.snapshots.clear();
+        revise = true;
+        try {
+          await startReview('src/ux-revise.ts');
+        } finally {
+          revise = false;
+        }
+        assert.strictEqual(
+          api.findings.get(key)?.suggestion,
+          'return b === 0 ? 0 : a / b; // revise',
+        );
+        return true;
+      });
+      assert.strictEqual(outcome.ok, false);
+      assert.match(outcome.message ?? '', /changed while the preview was open/);
+      assert.strictEqual(doc.getText(), DIV('revise'));
+      assert.strictEqual(api.findings.get(key)?.status, 'open');
+    } finally {
+      if (doc.isDirty) {
+        await vscode.window.showTextDocument(doc);
+        await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+      }
     }
   });
 });

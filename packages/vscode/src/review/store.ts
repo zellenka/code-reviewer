@@ -48,6 +48,8 @@ export class FindingStore implements vscode.Disposable {
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly subscriptions: vscode.Disposable[] = [];
   private current: ReviewSession | undefined;
+  /** Counts `set` and `clear` calls; only the latest one may write. */
+  private generation = 0;
 
   readonly onDidChange = this.emitter.event;
 
@@ -83,23 +85,35 @@ export class FindingStore implements vscode.Disposable {
   /**
    * Replaces the findings with a new review's. Each one is re-anchored by quote
    * against the working-tree document (which may differ from what was reviewed,
-   * e.g. for staged changes).
+   * e.g. for staged changes). The documents are opened first and the findings
+   * swapped in at once, so overlapping calls never mix: a call that a newer `set`
+   * or `clear` overtook changes nothing and returns undefined.
    */
-  async set(session: ReviewSession, findings: readonly Finding[]): Promise<TrackedFinding[]> {
+  async set(
+    session: ReviewSession,
+    findings: readonly Finding[],
+  ): Promise<TrackedFinding[] | undefined> {
+    const generation = ++this.generation;
+    const byFile = new Map<string, Finding[]>();
+    for (const f of findings) byFile.set(f.file, [...(byFile.get(f.file) ?? []), f]);
+    const docs = new Map<string, vscode.TextDocument | undefined>();
+    for (const file of byFile.keys()) {
+      try {
+        docs.set(file, await vscode.workspace.openTextDocument(fileUri(session.root, file)));
+      } catch {
+        docs.set(file, undefined);
+      }
+    }
+    if (generation !== this.generation) return undefined;
+
     this.cancelPending();
     this.items.clear();
     this.current = session;
-    const byFile = new Map<string, Finding[]>();
-    for (const f of findings) byFile.set(f.file, [...(byFile.get(f.file) ?? []), f]);
-
     for (const [file, list] of byFile) {
-      const uri = vscode.Uri.file(path.join(session.root, ...file.split('/')));
-      let lines: string[] | undefined;
-      try {
-        lines = documentLines(await vscode.workspace.openTextDocument(uri));
-      } catch {
-        lines = undefined;
-      }
+      const uri = fileUri(session.root, file);
+      const doc = docs.get(file);
+      // Read now, not when opened: the document may have been edited meanwhile.
+      const lines = doc ? documentLines(doc) : undefined;
       for (const finding of list) {
         let key = finding.id;
         for (let n = 2; this.items.has(key); n++) key = `${finding.id}#${n}`;
@@ -134,6 +148,7 @@ export class FindingStore implements vscode.Disposable {
   }
 
   clear(): void {
+    this.generation++;
     this.cancelPending();
     this.items.clear();
     this.current = undefined;
@@ -222,6 +237,10 @@ export class FindingStore implements vscode.Disposable {
     vscode.Disposable.from(...this.subscriptions).dispose();
     this.emitter.dispose();
   }
+}
+
+function fileUri(root: string, file: string): vscode.Uri {
+  return vscode.Uri.file(path.join(root, ...file.split('/')));
 }
 
 export function documentLines(doc: vscode.TextDocument): string[] {
