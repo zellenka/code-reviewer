@@ -74,10 +74,31 @@ const KNOWN_BUGS = [
     quote: 'return a * b; // state',
     suggestion: 'return a / b; // state',
   },
+  {
+    file: 'src/ux-shift.ts',
+    title: 'shifted bug',
+    quote: 'return a * b; // shift',
+    suggestion: 'return a / b; // shift',
+  },
+  {
+    file: 'src/ux-revise.ts',
+    title: 'revised bug',
+    quote: 'return a * b; // revise',
+    suggestion: 'return a / b; // revise',
+    revised: {
+      title: 'Division by zero is not handled',
+      body: 'Return 0 when b is 0.',
+      severity: 'critical',
+      suggestion: 'return b === 0 ? 0 : a / b; // revise',
+      confidence: 0.8,
+    },
+  },
 ];
 
 /** When set, the stub words its findings differently (new title, shorter quote, new fingerprint). */
 let reword = false;
+/** When set, the stub reports the `revised` text of a bug under the same quote (same fingerprint). */
+let revise = false;
 
 /** Stub model: reports known bugs found in the diff; answers summary requests with text. */
 function reviewer(req: ChatRequest): MockStep {
@@ -98,6 +119,7 @@ function reviewer(req: ChatRequest): MockStep {
     quote: reword ? b.quote.slice(0, -1) : b.quote,
     suggestion: b.suggestion,
     confidence: 0.95,
+    ...(revise ? b.revised : {}),
   }));
   return {
     events: [{ type: 'tool_call', id: 'c1', name: 'report_findings', input: { findings } }],
@@ -439,6 +461,91 @@ suite('Review', () => {
     );
     assert.strictEqual(outcome.ok, false);
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  });
+
+  test('a thread is updated in place: unchanged findings keep it as is, shifts move it, outdated collapses it', async () => {
+    const key = await reviewOne('src/ux-shift.ts', DIV('shift'));
+    const thread = api.threads.threadOf(key)!;
+    const comments = thread.comments;
+    assert.strictEqual(thread.collapsibleState, vscode.CommentThreadCollapsibleState.Expanded);
+
+    // The same findings again: no new thread and no new comment.
+    await api.findings.set(api.findings.session!, api.findings.all());
+    assert.strictEqual(api.threads.threadOf(key), thread);
+    assert.strictEqual(thread.comments, comments);
+
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-shift.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    await editor.edit((e) => e.insert(new vscode.Position(0, 0), '// a\n// b\n'));
+    await until(() => api.findings.get(key)?.startLine === 6);
+    assert.strictEqual(api.threads.threadOf(key), thread);
+    assert.strictEqual(thread.range?.start.line, 5);
+    assert.match((thread.comments[0]!.body as vscode.MarkdownString).value, /shifted bug/);
+
+    await editor.edit((e) => e.delete(doc.lineAt(5).rangeIncludingLineBreak));
+    await doc.save();
+    await until(() => api.findings.get(key)?.stale === true);
+    assert.strictEqual(api.threads.threadOf(key), thread);
+    assert.match(thread.label ?? '', /outdated/);
+    assert.strictEqual(thread.contextValue, 'open');
+    assert.strictEqual(thread.collapsibleState, vscode.CommentThreadCollapsibleState.Collapsed);
+    assert.match(
+      (thread.comments[0]!.body as vscode.MarkdownString).value,
+      /_Outdated: the code this comment refers to has changed\._/,
+    );
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  });
+
+  test('a re-review that rewords a same-id finding updates its thread, and apply fix uses what it shows', async () => {
+    const key = await reviewOne('src/ux-revise.ts', DIV('revise'));
+    const thread = api.threads.threadOf(key)!;
+    const bodyOf = () => (thread.comments[0]!.body as vscode.MarkdownString).value;
+    assert.match(bodyOf(), /Fix the operator/);
+
+    // Sent again in full (no snapshot), the model words the same finding differently.
+    await api.snapshots.clear();
+    revise = true;
+    try {
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root, path: 'src/ux-revise.ts', silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+    } finally {
+      revise = false;
+    }
+    const finding = api.findings.get(key);
+    assert.strictEqual(finding?.suggestion, 'return b === 0 ? 0 : a / b; // revise');
+
+    // Same key, same thread, new text.
+    assert.strictEqual(api.threads.threadOf(key), thread);
+    const shown = bodyOf();
+    assert.match(shown, /Division by zero is not handled/);
+    assert.match(shown, /Return 0 when b is 0\./);
+    assert.match(shown, /🔴 Critical/);
+    assert.ok(shown.includes(finding.suggestion), shown);
+    assert.doesNotMatch(shown, /Fix the operator|return a \/ b; \/\/ revise/);
+    assert.match(thread.label ?? '', /critical/);
+    assert.match(String(thread.comments[0]!.label), /80% confidence/);
+    // The other views show the new text too.
+    const [diagnostic] = vscode.languages.getDiagnostics(uriOf('src/ux-revise.ts'));
+    assert.match(diagnostic!.message, /Division by zero is not handled/);
+    assert.strictEqual(diagnostic!.severity, vscode.DiagnosticSeverity.Error);
+    const file = api.tree.getChildren().find((n) => n.kind === 'file');
+    const item = api.tree.getTreeItem(api.tree.getChildren(file)[0]!);
+    assert.strictEqual(item.label, 'Division by zero is not handled');
+
+    // Apply fix (from the thread) writes the suggestion the thread shows.
+    const outcome = await vscode.commands.executeCommand<{ ok: boolean }>(
+      'aiReview.applyFix',
+      thread,
+      { silent: true },
+    );
+    assert.strictEqual(outcome.ok, true);
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-revise.ts'));
+    assert.strictEqual(doc.lineAt(3).text, '  return b === 0 ? 0 : a / b; // revise');
+    await vscode.window.showTextDocument(doc);
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
   });
 
   test('an edited finding never jumps to an identical line far away', async () => {

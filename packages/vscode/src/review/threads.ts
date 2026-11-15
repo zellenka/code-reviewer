@@ -64,12 +64,20 @@ export class FindingThreads implements vscode.Disposable {
   private render(finding: TrackedFinding): void {
     const doc = vscode.workspace.textDocuments.find((d) => uriKey(d.uri) === uriKey(finding.uri));
     const range = findingRange(finding, doc);
+    // The text counts too: a re-review can report the same key with new wording or
+    // a new suggestion, and "Apply fix" uses the store's.
     const signature = JSON.stringify([
       finding.startLine,
       finding.endLine,
       finding.stale,
       finding.status,
       range.end.character,
+      finding.severity,
+      finding.category,
+      finding.confidence,
+      finding.title,
+      finding.body,
+      finding.suggestion,
     ]);
     let thread = this.threads.get(finding.key);
     if (thread && this.rendered.get(finding.key) === signature) return;
