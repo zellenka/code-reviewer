@@ -87,6 +87,10 @@ export function renderChunk(chunk: Chunk): string {
 export function chunkFiles(files: FileDiff[], options: ChunkOptions): Chunk[] {
   const count = options.countTokens ?? estimateTokens;
   const maxChunks = options.maxChunks ?? 40;
+  // A NaN budget would make every size check below pass.
+  if (!Number.isFinite(options.maxTokens)) {
+    throw new RangeError(`Invalid chunk token budget: ${options.maxTokens}`);
+  }
   // Room for the <file> wrapper and separators.
   const limit = Math.max(200, options.maxTokens);
 

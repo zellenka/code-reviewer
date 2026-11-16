@@ -171,6 +171,36 @@ describe('chunker + token budget', () => {
     expect(chunkFiles(files, { maxTokens: 5000 })).toHaveLength(1);
   });
 
+  it('rejects a model whose input limit leaves no room for the diff', async () => {
+    const provider = new MockProvider({ fallback: report([]) });
+    await expect(
+      runReview(SAMPLE, {
+        provider,
+        model: { ...MODEL, maxInputTokens: 2_000, maxOutputTokens: 1_000 },
+        config: DEFAULT_CONFIG,
+      }),
+    ).rejects.toThrow(/too small an input limit/);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it.each([
+    ['NaN input limit', { maxInputTokens: Number.NaN }],
+    ['string input limit', { maxInputTokens: '200k' as unknown as number }],
+    ['NaN output limit', { maxOutputTokens: Number.NaN }],
+  ])('rejects a model with a %s instead of sending one unbounded request', async (_l, over) => {
+    const provider = new MockProvider({ fallback: report([]) });
+    await expect(
+      runReview(bigDiff(), { provider, model: { ...MODEL, ...over }, config: DEFAULT_CONFIG }),
+    ).rejects.toThrow(/invalid token limit/);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it('chunkFiles refuses a non-finite token budget', () => {
+    const files = bigDiff().files.slice(-1);
+    expect(() => chunkFiles(files, { maxTokens: Number.NaN })).toThrow(RangeError);
+    expect(() => chunkFiles(files, { maxTokens: Number.POSITIVE_INFINITY })).toThrow(RangeError);
+  });
+
   it('too many parts gives a "narrow the scope" error', async () => {
     const provider = new MockProvider({ fallback: report([]) });
     await expect(

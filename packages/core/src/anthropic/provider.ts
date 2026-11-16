@@ -70,13 +70,19 @@ export class AnthropicProvider implements LLMProvider {
   private client: { key: string; client: AnthropicClientLike } | undefined;
   /** Set when the account rejects the refusal-fallback beta; fallback stays off afterwards. */
   private fallbackRejected = false;
+  /** Override problems already logged; `listModels` runs on every request. */
+  private readonly overrideWarnings = new Set<string>();
 
   constructor(private readonly options: AnthropicProviderOptions = {}) {
     this.logger = options.logger ?? noopLogger;
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return mergeModels(ANTHROPIC_MODELS, this.options.modelOverrides?.() ?? []);
+    return mergeModels(ANTHROPIC_MODELS, this.options.modelOverrides?.() ?? [], (warning) => {
+      if (this.overrideWarnings.has(warning)) return;
+      this.overrideWarnings.add(warning);
+      this.logger.warn(warning);
+    });
   }
 
   /** Local estimate; avoids a network round trip per chunk. */

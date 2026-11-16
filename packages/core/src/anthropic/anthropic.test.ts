@@ -5,6 +5,7 @@ import type {
   BetaRawMessageStreamEvent,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import { describe, expect, it } from 'vitest';
+import { noopLogger } from '../logger';
 import { collectChat } from '../provider/collect';
 import type { ChatRequest } from '../provider/types';
 import { mapAnthropicError, parseRetryAfter } from './errors';
@@ -335,6 +336,140 @@ describe('AnthropicProvider', () => {
     });
     expect(models).toHaveLength(ANTHROPIC_MODELS.length + 1);
     expect(mergeModels(ANTHROPIC_MODELS)).toEqual(ANTHROPIC_MODELS);
+  });
+
+  it('logs each invalid model override once', async () => {
+    const warnings: string[] = [];
+    const p = new AnthropicProvider({
+      modelOverrides: () => [{ id: 'claude-opus-5-5', maxInputTokens: '200k' }],
+      logger: { ...noopLogger, warn: (message) => warnings.push(message) },
+    });
+    const opus = ANTHROPIC_MODELS.find((m) => m.id === 'claude-opus-5-5')!;
+    expect((await p.listModels()).find((m) => m.id === opus.id)).toEqual(opus);
+    await p.listModels();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/claude-opus-5-5.*maxInputTokens/);
+  });
+});
+
+describe('mergeModels', () => {
+  const opus = ANTHROPIC_MODELS.find((m) => m.id === 'claude-opus-5-5')!;
+  const merge = (overrides: unknown[]) => {
+    const warnings: string[] = [];
+    const models = mergeModels(ANTHROPIC_MODELS, overrides, (w) => warnings.push(w));
+    return { models, warnings, find: (id: string) => models.find((m) => m.id === id) };
+  };
+
+  it('drops invalid fields and keeps the valid ones of the same entry', () => {
+    const { find, warnings } = merge([
+      {
+        id: 'claude-opus-5-5',
+        name: 'Opus (team)',
+        maxInputTokens: '200k',
+        maxOutputTokens: Number.NaN,
+        supportsTools: 'yes',
+        pricing: { inputPerMTok: 3, outputPerMTok: -1 },
+      },
+    ]);
+    expect(find('claude-opus-5-5')).toEqual({
+      ...opus,
+      name: 'Opus (team)',
+      pricing: { ...opus.pricing, inputPerMTok: 3 },
+    });
+    expect(warnings).toHaveLength(4);
+    expect(warnings.join('\n')).toMatch(/maxInputTokens/);
+    expect(warnings.join('\n')).toMatch(/maxOutputTokens/);
+    expect(warnings.join('\n')).toMatch(/supportsTools/);
+    expect(warnings.join('\n')).toMatch(/pricing\.outputPerMTok/);
+  });
+
+  it.each([
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['zero', 0],
+    ['negative', -1000],
+    ['fractional', 1000.5],
+    ['string', '200000'],
+  ])('rejects a %s token limit', (_label, value) => {
+    const { find, warnings } = merge([
+      { id: 'claude-opus-5-5', maxInputTokens: value },
+      { id: 'claude-new', maxInputTokens: value, maxOutputTokens: value },
+    ]);
+    expect(find('claude-opus-5-5')!.maxInputTokens).toBe(opus.maxInputTokens);
+    expect(find('claude-new')).toMatchObject({ maxInputTokens: 200_000, maxOutputTokens: 32_000 });
+    expect(warnings).toHaveLength(3);
+  });
+
+  it('ignores unknown keys and entries without an id, with a warning', () => {
+    const { models, find, warnings } = merge([
+      { bad: true },
+      { id: '' },
+      'claude-opus-5-5',
+      { id: 'claude-opus-5-5', maxInputToken: 1000 },
+    ]);
+    expect(models).toHaveLength(ANTHROPIC_MODELS.length);
+    expect(find('claude-opus-5-5')).toEqual(opus);
+    expect(warnings).toHaveLength(4);
+    expect(warnings[3]).toMatch(/maxInputToken/);
+  });
+
+  it('drops a nested object whose required field is invalid, keeping the rest', () => {
+    const { find, warnings } = merge([
+      { id: 'claude-opus-5-5', name: 'Mine', promptCaching: { minTokens: 'x' } },
+      { id: 'new-m', maxInputTokens: 100_000, promptCaching: { minTokens: -1 } },
+    ]);
+    expect(find('claude-opus-5-5')).toEqual({ ...opus, name: 'Mine' });
+    expect(find('new-m')).toMatchObject({ maxInputTokens: 100_000 });
+    expect(find('new-m')?.promptCaching).toBeUndefined();
+    expect(warnings).toEqual([
+      expect.stringMatching(/claude-opus-5-5.*promptCaching\.minTokens/),
+      expect.stringMatching(/new-m.*promptCaching\.minTokens/),
+    ]);
+  });
+
+  it('drops incomplete pricing on a new model', () => {
+    const { find, warnings } = merge([
+      { id: 'claude-a', pricing: { inputPerMTok: 1 } },
+      { id: 'claude-b', pricing: { inputPerMTok: 1, outputPerMTok: 5 } },
+    ]);
+    expect(find('claude-a')?.pricing).toBeUndefined();
+    expect(find('claude-b')?.pricing).toEqual({ inputPerMTok: 1, outputPerMTok: 5 });
+    expect(warnings).toEqual([expect.stringMatching(/claude-a.*outputPerMTok/)]);
+  });
+
+  it('accepts a fully valid override without warnings', () => {
+    const { find, warnings } = merge([
+      {
+        id: 'claude-opus-5-5',
+        maxInputTokens: 200_000,
+        maxOutputTokens: 64_000,
+        supportsTools: false,
+        pricing: { inputPerMTok: 0, outputPerMTok: 0, cacheReadPerMTok: 0, cacheWritePerMTok: 0 },
+        promptCaching: { minTokens: 1024 },
+      },
+    ]);
+    expect(warnings).toEqual([]);
+    expect(find('claude-opus-5-5')).toMatchObject({
+      maxInputTokens: 200_000,
+      maxOutputTokens: 64_000,
+      supportsTools: false,
+      pricing: { inputPerMTok: 0, outputPerMTok: 0 },
+      promptCaching: { minTokens: 1024 },
+    });
+  });
+
+  it('does not modify the override objects', () => {
+    const override = Object.freeze({
+      id: 'claude-opus-5-5',
+      maxInputTokens: 'x',
+      pricing: Object.freeze({ inputPerMTok: -1 }),
+    });
+    merge([override]);
+    expect(override).toEqual({
+      id: 'claude-opus-5-5',
+      maxInputTokens: 'x',
+      pricing: { inputPerMTok: -1 },
+    });
   });
 });
 

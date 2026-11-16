@@ -544,6 +544,12 @@ export function prepareReview(diff: UnifiedDiff, options: PrepareOptions): Prepa
     fixedTokens: sharedPrefixTokens,
     agentic: mode === 'agentic',
   });
+  // NaN would fail every size check in the chunker and send the whole diff at once.
+  if (!Number.isFinite(chunkTokens) || !Number.isFinite(outputTokens)) {
+    throw new Error(
+      `${model.name} has an invalid token limit (input ${model.maxInputTokens}, output ${model.maxOutputTokens}).`,
+    );
+  }
   if (chunkTokens < 500) {
     throw new Error(`${model.name} has too small an input limit for a review.`);
   }
