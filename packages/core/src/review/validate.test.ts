@@ -179,6 +179,66 @@ describe('validateFindings', () => {
     expect(dropped.get('duplicate')).toBe(1);
   });
 
+  it('keeps the more confident of two equally severe duplicates', () => {
+    const { findings } = run([
+      raw({ confidence: 0.7, title: 'low' }),
+      raw({ confidence: 0.95, title: 'high' }),
+    ]);
+    expect(findings.map((f) => f.title)).toEqual(['high']);
+  });
+
+  it('merges the same issue reported with a slightly different range or quote', () => {
+    const { findings, dropped } = run([
+      raw({ title: 'Off-by-one in loop bound' }),
+      // Same issue, reworded, quoting one more line.
+      raw({
+        severity: 'minor',
+        title: 'Off by one in the loop bound',
+        quote: 'for (let i = 0; i <= items.length; i++) {\n    sum += items[i].price;',
+      }),
+      // Same line copied with its diff marker (a different fingerprint), other title.
+      raw({
+        severity: 'minor',
+        title: 'Loop bound',
+        quote: '+  for (let i = 0; i <= items.length; i++) {',
+      }),
+    ]);
+    expect(findings.map((f) => f.title)).toEqual(['Off-by-one in loop bound']);
+    expect(dropped.get('duplicate')).toBe(2);
+  });
+
+  it('a broad finding does not swallow a narrower one of the same category inside it', () => {
+    const { findings, dropped } = run([
+      raw({
+        severity: 'critical',
+        title: 'total() crashes on an empty cart',
+        quote: CONTENT.split('\n').slice(0, 7).join('\n'),
+        startLine: 1,
+        endLine: 7,
+      }),
+      raw({ title: 'Off by one' }),
+    ]);
+    expect(findings.map((f) => f.title)).toEqual([
+      'total() crashes on an empty cart',
+      'Off by one',
+    ]);
+    expect(dropped.get('duplicate')).toBeUndefined();
+  });
+
+  it('keeps different issues on the same or overlapping lines apart', () => {
+    const { findings, dropped } = run([
+      raw({ title: 'Off by one', quote: 'i <= items.length' }),
+      raw({ title: 'Loop counter is never used outside', quote: 'for (let i = 0;' }),
+      raw({
+        severity: 'critical',
+        title: 'Crashes on a missing item',
+        quote: 'for (let i = 0; i <= items.length; i++) {\n    sum += items[i].price;',
+      }),
+    ]);
+    expect(findings).toHaveLength(3);
+    expect(dropped.get('duplicate')).toBeUndefined();
+  });
+
   it('file-level findings anchor at line 1', () => {
     const { findings } = run([raw({ anchor: 'file', quote: '', category: 'test', startLine: 0 })]);
     expect(findings[0]).toMatchObject({ anchor: 'file', startLine: 1, endLine: 1 });

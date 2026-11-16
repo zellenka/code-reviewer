@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { severityRank, type ReviewConfig } from '../config/schema';
 import { normalizeEol, splitLines, toPosixPath } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
-import { locateQuote, normalizeWhitespace } from './anchor';
+import { locateQuote, normalizeWhitespace, similarity } from './anchor';
 import { REDACTED_MARK } from './redact';
 import type { DropReason, Finding, RawFinding } from './types';
 
@@ -129,27 +129,44 @@ export function validateFindings(raw: RawFinding[], options: ValidateOptions): V
   return { findings, dropped };
 }
 
-/** Same file + category + overlapping range (or same id) → keep the more severe / confident one. */
+/** Quote or title similarity at which two findings on the same lines are one issue. */
+const SAME_ISSUE = 0.85;
+
+/**
+ * Removes findings that report the same issue twice and keeps the more severe /
+ * confident one. Duplicates: the same id (fingerprint), or the same file and category
+ * on overlapping lines with a similar quote or a similar title. Overlap alone isn't
+ * enough: a second issue on the same lines, or one inside a broader finding, stays.
+ */
 function dedupe(findings: Finding[], onDrop: () => void): Finding[] {
   const ordered = [...findings].sort(
     (a, b) => severityRank(b.severity) - severityRank(a.severity) || b.confidence - a.confidence,
   );
   const out: Finding[] = [];
   for (const f of ordered) {
-    const dup = out.some(
-      (o) =>
-        o.id === f.id ||
-        (o.file === f.file &&
-          o.category === f.category &&
-          o.anchor === 'line' &&
-          f.anchor === 'line' &&
-          o.startLine <= f.endLine &&
-          f.startLine <= o.endLine),
-    );
-    if (dup) onDrop();
+    if (out.some((o) => sameIssue(o, f))) onDrop();
     else out.push(f);
   }
   return out;
+}
+
+function sameIssue(a: Finding, b: Finding): boolean {
+  if (a.id === b.id) return true;
+  if (a.file !== b.file || a.category !== b.category) return false;
+  if (a.anchor !== 'line' || b.anchor !== 'line') return false;
+  if (a.startLine > b.endLine || b.startLine > a.endLine) return false;
+  return (
+    similarity(normalizeWhitespace(a.quote), normalizeWhitespace(b.quote)) >= SAME_ISSUE ||
+    similarity(normalizeTitle(a.title), normalizeTitle(b.title)) >= SAME_ISSUE
+  );
+}
+
+/** Lower case, punctuation as spaces: "Off-by-one" and "off by one" are the same title. */
+function normalizeTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
 }
 
 function buildContext(file: FileDiff, original?: FileDiff): FileContext {
