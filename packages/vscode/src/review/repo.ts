@@ -1,5 +1,5 @@
 import { DiffSourceError, toPosixPath, type Logger } from '@ai-review/core';
-import { GitCliDiffSource, createGitRunner, findRepoRoot } from '@ai-review/node-host';
+import { GitCliDiffSource, createGitRunner, findRepoRoot, pathKey } from '@ai-review/node-host';
 import { stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -20,6 +20,8 @@ export interface RepoContext {
   /** Absolute OS path of the repo root. */
   root: string;
   source: GitCliDiffSource;
+  /** The Git extension's git binary, when it has one. */
+  gitPath?: string;
 }
 
 /**
@@ -92,9 +94,10 @@ export class RepoLocator {
       ...(gitPath ? { gitPath } : {}),
       defaultBase: () =>
         vscode.workspace.getConfiguration('aiReview').get<string>('baseBranch') || undefined,
+      unsavedText: (absPath) => unsavedDocument(absPath)?.getText(),
       logger: this.logger,
     });
-    return { root, source };
+    return { root, source, ...(gitPath ? { gitPath } : {}) };
   }
 
   private async knownRoots(api: GitApi | undefined): Promise<string[]> {
@@ -138,6 +141,23 @@ export class RepoLocator {
       return undefined;
     }
   }
+}
+
+/** The open file document at `fsPath`, if it has unsaved changes. */
+function unsavedDocument(fsPath: string): vscode.TextDocument | undefined {
+  const key = pathKey(path.resolve(fsPath));
+  return vscode.workspace.textDocuments.find(
+    (d) => d.isDirty && d.uri.scheme === 'file' && pathKey(path.resolve(d.uri.fsPath)) === key,
+  );
+}
+
+/** Repo-relative paths of the files in `root` with unsaved changes in an editor. */
+export function unsavedFiles(root: string): string[] {
+  return vscode.workspace.textDocuments
+    .filter((d) => d.isDirty && d.uri.scheme === 'file')
+    .map((d) => relativeToRepo(root, d.uri.fsPath))
+    .filter((rel): rel is string => !!rel && !/(^|\/)\.git(\/|$)/i.test(rel))
+    .sort();
 }
 
 /** Repo-relative POSIX path of `fsPath`, or undefined if it's outside `root`. */

@@ -1,4 +1,10 @@
-import { MockProvider, type ChatRequest, type MockStep } from '@ai-review/core';
+import {
+  MockProvider,
+  type ChatRequest,
+  type Finding,
+  type LLMProvider,
+  type MockStep,
+} from '@ai-review/core';
 import * as assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
 import {
@@ -15,6 +21,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension';
 import type { ReviewCommandResult } from '../src/review/commands';
+import { FixPreviewProvider, previewFix } from '../src/review/fixes';
 import { FindingStatusStore } from '../src/review/state';
 
 const manifest = JSON.parse(
@@ -74,10 +81,49 @@ const KNOWN_BUGS = [
     quote: 'return a * b; // state',
     suggestion: 'return a / b; // state',
   },
+  {
+    file: 'src/ux-shift.ts',
+    title: 'shifted bug',
+    quote: 'return a * b; // shift',
+    suggestion: 'return a / b; // shift',
+  },
+  {
+    file: 'src/ux-revise.ts',
+    title: 'revised bug',
+    quote: 'return a * b; // revise',
+    suggestion: 'return a / b; // revise',
+    revised: {
+      title: 'Division by zero is not handled',
+      body: 'Return 0 when b is 0.',
+      severity: 'critical',
+      suggestion: 'return b === 0 ? 0 : a / b; // revise',
+      confidence: 0.8,
+    },
+  },
+  {
+    file: 'src/ux-partial.ts',
+    title: 'partial quote',
+    quote: 'count18',
+    suggestion: 'count18 - 1',
+  },
+  {
+    file: 'src/ux-buf.ts',
+    title: 'unsaved bug',
+    quote: 'return a * b; // buf',
+    suggestion: 'return a / b; // buf',
+  },
+  {
+    file: 'src/ux-sel-buf.ts',
+    title: 'unsaved selected bug',
+    quote: 'return a * b; // sel-buf',
+    suggestion: 'return a / b; // sel-buf',
+  },
 ];
 
 /** When set, the stub words its findings differently (new title, shorter quote, new fingerprint). */
 let reword = false;
+/** When set, the stub reports the `revised` text of a bug under the same quote (same fingerprint). */
+let revise = false;
 
 /** Stub model: reports known bugs found in the diff; answers summary requests with text. */
 function reviewer(req: ChatRequest): MockStep {
@@ -98,9 +144,49 @@ function reviewer(req: ChatRequest): MockStep {
     quote: reword ? b.quote.slice(0, -1) : b.quote,
     suggestion: b.suggestion,
     confidence: 0.95,
+    ...(revise ? b.revised : {}),
   }));
   return {
     events: [{ type: 'tool_call', id: 'c1', name: 'report_findings', input: { findings } }],
+  };
+}
+
+/** A held review request: it waits until `release()`, then the stub answers it. */
+interface Gate {
+  arrived: boolean;
+  release: () => void;
+  opened: Promise<void>;
+  /** Answer even if the review was cancelled meanwhile, as a provider may finish a response in flight. */
+  ignoreCancel: boolean;
+}
+
+/** Review requests whose diff contains a key wait at its gate. */
+const gates = new Map<string, Gate>();
+
+function hold(quote: string, ignoreCancel = false): Gate {
+  let release!: () => void;
+  const opened = new Promise<void>((resolve) => (release = resolve));
+  const gate: Gate = { arrived: false, release, opened, ignoreCancel };
+  gates.set(quote, gate);
+  return gate;
+}
+
+/** The stub, with review requests held at their gates (see `hold`). */
+function gated(inner: MockProvider): LLMProvider {
+  return {
+    id: inner.id,
+    listModels: () => inner.listModels(),
+    countTokens: (model, text) => inner.countTokens(model, text),
+    async *chat(req) {
+      const text = JSON.stringify(req.messages);
+      const gate = req.tools ? [...gates].find(([quote]) => text.includes(quote))?.[1] : undefined;
+      if (gate) {
+        gate.arrived = true;
+        await gate.opened;
+        if (gate.ignoreCancel) req = { ...req, signal: new AbortController().signal };
+      }
+      yield* inner.chat(req);
+    },
   };
 }
 
@@ -162,11 +248,17 @@ suite('Review', () => {
       fallback: reviewer,
     });
     disposables.push(
-      api.registry.register('copilot', { label: 'Stub', provider: stub, isAvailable: () => true }),
+      api.registry.register('copilot', {
+        label: 'Stub',
+        provider: gated(stub),
+        isAvailable: () => true,
+      }),
     );
   });
 
   teardown(async () => {
+    for (const gate of gates.values()) gate.release();
+    gates.clear();
     vscode.Disposable.from(...disposables.splice(0)).dispose();
     api.findings.clear();
     // Each test starts without earlier reviews or dismissed findings.
@@ -266,6 +358,34 @@ suite('Review', () => {
     const sent = JSON.stringify(stub.requests[0]!.messages);
     assert.ok(sent.includes('twice'));
     assert.ok(!sent.includes('return a + b;'));
+  });
+
+  test('review file of a secret file sends nothing', async () => {
+    const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+      'aiReview.reviewFile',
+      { root, path: '.env', silent: true },
+    );
+    assert.strictEqual(result.ok, true, result.message);
+    assert.ok(result.result?.skipped.some((s) => s.path === '.env' && s.reason === 'secret'));
+    assert.ok(!JSON.stringify(stub.requests).includes('do-not-send-this'));
+  });
+
+  test('review file or selection of an untitled document asks for a file', async () => {
+    const doc = await vscode.workspace.openTextDocument({ content: 'const x = 1;\n' });
+    const editor = await vscode.window.showTextDocument(doc);
+    editor.selection = new vscode.Selection(0, 0, 0, 5);
+    try {
+      for (const command of ['aiReview.reviewFile', 'aiReview.reviewSelection']) {
+        const result = await vscode.commands.executeCommand<ReviewCommandResult>(command, {
+          silent: true,
+        });
+        assert.strictEqual(result.ok, false, command);
+        assert.strictEqual(result.message, 'Open a file to review it.', command);
+      }
+      assert.strictEqual(stub.requests.length, 0);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
   });
 
   test('.codereview.yml thresholds apply, and invalid config falls back to defaults', async () => {
@@ -441,6 +561,91 @@ suite('Review', () => {
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
   });
 
+  test('a thread is updated in place: unchanged findings keep it as is, shifts move it, outdated collapses it', async () => {
+    const key = await reviewOne('src/ux-shift.ts', DIV('shift'));
+    const thread = api.threads.threadOf(key)!;
+    const comments = thread.comments;
+    assert.strictEqual(thread.collapsibleState, vscode.CommentThreadCollapsibleState.Expanded);
+
+    // The same findings again: no new thread and no new comment.
+    await api.findings.set(api.findings.session!, api.findings.all());
+    assert.strictEqual(api.threads.threadOf(key), thread);
+    assert.strictEqual(thread.comments, comments);
+
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-shift.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    await editor.edit((e) => e.insert(new vscode.Position(0, 0), '// a\n// b\n'));
+    await until(() => api.findings.get(key)?.startLine === 6);
+    assert.strictEqual(api.threads.threadOf(key), thread);
+    assert.strictEqual(thread.range?.start.line, 5);
+    assert.match((thread.comments[0]!.body as vscode.MarkdownString).value, /shifted bug/);
+
+    await editor.edit((e) => e.delete(doc.lineAt(5).rangeIncludingLineBreak));
+    await doc.save();
+    await until(() => api.findings.get(key)?.stale === true);
+    assert.strictEqual(api.threads.threadOf(key), thread);
+    assert.match(thread.label ?? '', /outdated/);
+    assert.strictEqual(thread.contextValue, 'open');
+    assert.strictEqual(thread.collapsibleState, vscode.CommentThreadCollapsibleState.Collapsed);
+    assert.match(
+      (thread.comments[0]!.body as vscode.MarkdownString).value,
+      /_Outdated: the code this comment refers to has changed\._/,
+    );
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  });
+
+  test('a re-review that rewords a same-id finding updates its thread, and apply fix uses what it shows', async () => {
+    const key = await reviewOne('src/ux-revise.ts', DIV('revise'));
+    const thread = api.threads.threadOf(key)!;
+    const bodyOf = () => (thread.comments[0]!.body as vscode.MarkdownString).value;
+    assert.match(bodyOf(), /Fix the operator/);
+
+    // Sent again in full (no snapshot), the model words the same finding differently.
+    await api.snapshots.clear();
+    revise = true;
+    try {
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root, path: 'src/ux-revise.ts', silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+    } finally {
+      revise = false;
+    }
+    const finding = api.findings.get(key);
+    assert.strictEqual(finding?.suggestion, 'return b === 0 ? 0 : a / b; // revise');
+
+    // Same key, same thread, new text.
+    assert.strictEqual(api.threads.threadOf(key), thread);
+    const shown = bodyOf();
+    assert.match(shown, /Division by zero is not handled/);
+    assert.match(shown, /Return 0 when b is 0\./);
+    assert.match(shown, /🔴 Critical/);
+    assert.ok(shown.includes(finding.suggestion), shown);
+    assert.doesNotMatch(shown, /Fix the operator|return a \/ b; \/\/ revise/);
+    assert.match(thread.label ?? '', /critical/);
+    assert.match(String(thread.comments[0]!.label), /80% confidence/);
+    // The other views show the new text too.
+    const [diagnostic] = vscode.languages.getDiagnostics(uriOf('src/ux-revise.ts'));
+    assert.match(diagnostic!.message, /Division by zero is not handled/);
+    assert.strictEqual(diagnostic!.severity, vscode.DiagnosticSeverity.Error);
+    const file = api.tree.getChildren().find((n) => n.kind === 'file');
+    const item = api.tree.getTreeItem(api.tree.getChildren(file)[0]!);
+    assert.strictEqual(item.label, 'Division by zero is not handled');
+
+    // Apply fix (from the thread) writes the suggestion the thread shows.
+    const outcome = await vscode.commands.executeCommand<{ ok: boolean }>(
+      'aiReview.applyFix',
+      thread,
+      { silent: true },
+    );
+    assert.strictEqual(outcome.ok, true);
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-revise.ts'));
+    assert.strictEqual(doc.lineAt(3).text, '  return b === 0 ? 0 : a / b; // revise');
+    await vscode.window.showTextDocument(doc);
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
   test('an edited finding never jumps to an identical line far away', async () => {
     const filler = Array.from({ length: 40 }, (_, i) => `const x${i} = ${i};`);
     const content = DIV('dup') + [...filler, '  return a * b; // dup', ''].join('\n');
@@ -468,6 +673,27 @@ suite('Review', () => {
     assert.strictEqual(outcome.ok, false);
     assert.strictEqual(doc.lineAt(45).text, '  return a * b; // dup');
     await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
+  test('a fix whose quote is also part of a longer name on its line is refused, not misapplied', async () => {
+    const content = '// math\n\nexport function total() {\n  return discount18 + count18;\n}\n';
+    const key = await reviewOne('src/ux-partial.ts', content);
+    assert.strictEqual(api.findings.get(key)?.startLine, 4);
+
+    for (const command of ['aiReview.applyFix', 'aiReview.previewFix']) {
+      const outcome = await vscode.commands.executeCommand<{ ok: boolean; message?: string }>(
+        command,
+        key,
+        { silent: true, accept: true },
+      );
+      assert.strictEqual(outcome.ok, false, command);
+      assert.match(outcome.message ?? '', /more than once on its line, or inside a longer name/);
+    }
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-partial.ts'));
+    assert.strictEqual(doc.getText(), content);
+    // Still open and current: the code is there, it just needs a manual edit.
+    assert.strictEqual(api.findings.get(key)?.status, 'open');
+    assert.ok(!api.findings.get(key)?.stale);
   });
 
   test('tree lists findings by file; clicking one reveals its range; summary is shown', async () => {
@@ -813,6 +1039,379 @@ suite('Review', () => {
       );
     } finally {
       write('src/new.ts', 'export const n = 1;\n');
+    }
+  });
+
+  // ---------- Unsaved editor changes (F19) ----------
+
+  /** What the review requests (not the summary) sent to the model. */
+  const sentForReview = (from = 0) =>
+    JSON.stringify(
+      stub.requests
+        .slice(from)
+        .filter((r) => r.tools)
+        .map((r) => r.messages),
+    );
+  const revertAndClose = async (doc: vscode.TextDocument) => {
+    await vscode.window.showTextDocument(doc);
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  };
+
+  test('review file of a document with unsaved edits reviews the editor text (F19)', async () => {
+    write('src/ux-buf.ts', DIV('clean'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-buf.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    try {
+      // Unsaved: two lines above the function, and a bug only the editor has.
+      await editor.edit((e) => {
+        e.insert(new vscode.Position(0, 0), '// a\n// b\n');
+        e.replace(doc.lineAt(3).range, '  return a * b; // buf');
+      });
+      assert.ok(doc.isDirty);
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root, path: 'src/ux-buf.ts', silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      const sent = sentForReview();
+      assert.ok(sent.includes('     6 +   return a * b; // buf'), sent);
+      assert.ok(!sent.includes('// clean'));
+      // Anchored on the editor's line, as shown.
+      assert.deepStrictEqual(
+        result.findings?.map((f) => [f.title, f.startLine, !!f.stale]),
+        [['unsaved bug', 6, false]],
+      );
+      assert.strictEqual(vscode.languages.getDiagnostics(doc.uri)[0]?.range.start.line, 5);
+      assert.strictEqual(readFileSync(path.join(root, 'src/ux-buf.ts'), 'utf8'), DIV('clean'));
+    } finally {
+      await revertAndClose(doc);
+    }
+
+    // The snapshot holds the editor text: the file on disk is a different hunk, sent again.
+    const mark = stub.requests.length;
+    const again = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+      root,
+      path: 'src/ux-buf.ts',
+      silent: true,
+    });
+    assert.strictEqual(again.ok, true, again.message);
+    assert.ok(sentForReview(mark).includes('     4 +   return a * b; // clean'));
+    assert.deepStrictEqual(again.result?.incremental, {
+      newHunks: 1,
+      reusedHunks: 0,
+      carried: 0,
+    });
+    assert.deepStrictEqual(again.findings, []);
+  });
+
+  test('review selection of a document with unsaved edits sends the selected editor lines (F19)', async () => {
+    write('src/ux-sel-buf.ts', DIV('plain'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-sel-buf.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    try {
+      await editor.edit((e) => {
+        e.insert(new vscode.Position(0, 0), '// a\n// b\n// c\n');
+        e.replace(doc.lineAt(3).range, '  return a * b; // sel-buf');
+      });
+      // Line 7 in the editor (line 4 on disk).
+      editor.selection = new vscode.Selection(6, 0, 7, 0);
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewSelection',
+        { root, silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      assert.deepStrictEqual(api.findings.session?.mode, {
+        kind: 'selection',
+        path: 'src/ux-sel-buf.ts',
+        startLine: 7,
+        endLine: 7,
+      });
+      const sent = sentForReview();
+      assert.ok(sent.includes('     7 +   return a * b; // sel-buf'), sent);
+      assert.ok(!sent.includes('export function div'));
+      assert.ok(!sent.includes('// plain'));
+      assert.deepStrictEqual(
+        result.findings?.map((f) => [f.title, f.startLine]),
+        [['unsaved selected bug', 7]],
+      );
+    } finally {
+      await revertAndClose(doc);
+    }
+  });
+
+  test('unsaved edits get the same secret handling: secret files are refused, keys redacted (F19)', async () => {
+    const env = await vscode.workspace.openTextDocument(uriOf('.env'));
+    write('src/ux-key.ts', DIV('nokey'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-key.ts'));
+    try {
+      const envEditor = await vscode.window.showTextDocument(env);
+      await envEditor.edit((e) =>
+        e.insert(new vscode.Position(0, 0), 'TYPED_TOKEN=typed-but-not-saved\n'),
+      );
+      const editor = await vscode.window.showTextDocument(doc);
+      await editor.edit((e) => {
+        e.insert(new vscode.Position(0, 0), 'const id = "AKIAIOSFODNN7EXAMPLE";\n');
+        e.replace(doc.lineAt(3).range, '  return a * b; // key');
+      });
+      assert.ok(env.isDirty && doc.isDirty);
+
+      const secret = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root, path: '.env', silent: true },
+      );
+      assert.strictEqual(secret.ok, true, secret.message);
+      assert.ok(secret.result?.skipped.some((s) => s.path === '.env' && s.reason === 'secret'));
+
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root, path: 'src/ux-key.ts', silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      const sent = JSON.stringify(stub.requests.map((r) => r.messages));
+      assert.ok(!sent.includes('typed-but-not-saved') && !sent.includes('do-not-send-this'));
+      assert.ok(!sent.includes('AKIAIOSFODNN7EXAMPLE'));
+      // The rest of the editor text is reviewed, with the key redacted.
+      assert.ok(sent.includes('     1 + const id = \\"[REDACTED:aws-access-key]\\";'), sent);
+      assert.ok(sent.includes('     5 +   return a * b; // key'));
+    } finally {
+      await revertAndClose(doc);
+      await revertAndClose(env);
+    }
+  });
+
+  test('unstaged and branch reviews say which unsaved edits they leave out; staged does not (F19)', async () => {
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/calc.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    try {
+      await editor.edit((e) => e.insert(new vscode.Position(0, 0), '// not saved\n'));
+      for (const command of ['aiReview.reviewUnstaged', 'aiReview.reviewBranch']) {
+        const result = await vscode.commands.executeCommand<ReviewCommandResult>(command, {
+          root,
+          base: 'main',
+          silent: true,
+        });
+        assert.strictEqual(result.ok, true, result.message);
+        assert.match(
+          result.message ?? '',
+          /Not included: unsaved changes in src\/calc\.ts \(save to review them\)\.$/,
+          `${command}: ${result.message}`,
+        );
+      }
+      // What git sees is reviewed, not the editor text.
+      assert.ok(!JSON.stringify(stub.requests).includes('// not saved'));
+
+      // Staged reviews the index, which unsaved edits never reach.
+      const staged = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewStaged',
+        { root, silent: true },
+      );
+      assert.strictEqual(staged.ok, true, staged.message);
+      assert.doesNotMatch(staged.message ?? '', /unsaved/);
+    } finally {
+      await revertAndClose(doc);
+    }
+  });
+
+  // ---------- Cancelled and overlapping reviews ----------
+
+  const startReview = (rel: string) =>
+    Promise.resolve(
+      vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+        root,
+        path: rel,
+        silent: true,
+      }),
+    );
+  const titles = () => api.findings.all().map((f) => f.title);
+  const isRunning = async () => (await api.panel.snapshot()).running;
+
+  test('a new review replaces the previous findings', async () => {
+    await reviewOne('src/ux-track.ts', DIV('track'));
+    await reviewOne('src/ux-lf.ts', DIV('lf'));
+    assert.deepStrictEqual(titles(), ['div() multiplies']);
+    assert.deepStrictEqual(api.findings.session?.mode, { kind: 'file', path: 'src/ux-lf.ts' });
+  });
+
+  test('cancelling keeps the findings of finished parts; the running state follows the review', async () => {
+    await reviewOne('src/ux-track.ts', DIV('track'));
+    write('src/ux-lf.ts', DIV('lf'));
+    const gate = hold('return a * b; // lf', true);
+    assert.strictEqual(await isRunning(), false);
+    const pending = startReview('src/ux-lf.ts');
+    await until(() => gate.arrived);
+    assert.strictEqual(await isRunning(), true);
+
+    await vscode.commands.executeCommand('aiReview.cancelReview');
+    gate.release();
+    const result = await pending;
+    assert.strictEqual(result.ok, true, result.message);
+    assert.strictEqual(result.result?.cancelled, true);
+    assert.strictEqual(result.result?.chunks.completed, 1);
+    assert.match(result.message ?? '', /^Cancelled\. 1 finding\(s\) .*\(from finished parts\)$/);
+    // The finished part's findings replace the previous review's.
+    assert.deepStrictEqual(titles(), ['div() multiplies']);
+    assert.strictEqual(api.findings.session?.result.cancelled, true);
+    // Not complete, so the next review of this scope doesn't build on it.
+    assert.strictEqual(api.snapshots.get(root, { kind: 'file', path: 'src/ux-lf.ts' }), undefined);
+    assert.strictEqual(await isRunning(), false);
+  });
+
+  test('cancelling before any part finishes keeps the previous findings (F20)', async () => {
+    await reviewOne('src/ux-track.ts', DIV('track'));
+    const session = api.findings.session;
+    write('src/ux-lf.ts', DIV('lf'));
+    const unchanged = (result: ReviewCommandResult, step: string) => {
+      assert.doesNotMatch(result.message ?? '', /no issues found/, `${step}: ${result.message}`);
+      assert.deepStrictEqual(titles(), ['tracked bug'], step);
+      assert.strictEqual(api.findings.session, session, step);
+    };
+
+    // 1. While the changes are collected ("collecting changes…").
+    const resolve = api.repos.resolve;
+    let entered = false;
+    let proceed!: () => void;
+    const resolving = new Promise<void>((r) => (proceed = r));
+    api.repos.resolve = async (target) => {
+      entered = true;
+      await resolving;
+      return resolve.call(api.repos, target);
+    };
+    let result: ReviewCommandResult;
+    try {
+      const pending = startReview('src/ux-lf.ts');
+      await until(() => entered);
+      await vscode.commands.executeCommand('aiReview.cancelReview');
+      proceed();
+      result = await pending;
+    } finally {
+      api.repos.resolve = resolve;
+    }
+    assert.ok(!stub.requests.some((r) => JSON.stringify(r.messages).includes('// lf')));
+    unchanged(result, 'collecting');
+
+    // 2. While the only part is with the model.
+    const gate = hold('return a * b; // lf');
+    const pending = startReview('src/ux-lf.ts');
+    await until(() => gate.arrived);
+    await vscode.commands.executeCommand('aiReview.cancelReview');
+    gate.release();
+    result = await pending;
+    unchanged(result, 'in flight');
+    assert.strictEqual(await isRunning(), false);
+  });
+
+  test('a review started while another runs: the first one finishing late never replaces it (F20)', async () => {
+    write('src/ux-lf.ts', DIV('lf'));
+    write('src/ux-track.ts', DIV('track'));
+    const gate = hold('return a * b; // lf', true);
+    const first = startReview('src/ux-lf.ts');
+    await until(() => gate.arrived);
+
+    // From the command palette or a keybinding: only the panel's button is guarded.
+    const second = await startReview('src/ux-track.ts');
+    assert.strictEqual(second.ok, true, second.message);
+    assert.deepStrictEqual(titles(), ['tracked bug']);
+
+    // The first review's model call ends after all, with a finding.
+    gate.release();
+    await first;
+    assert.deepStrictEqual(titles(), ['tracked bug']);
+    assert.deepStrictEqual(api.findings.session?.mode, { kind: 'file', path: 'src/ux-track.ts' });
+    assert.strictEqual(api.findings.session?.result.cancelled, false);
+    assert.strictEqual(api.snapshots.get(root, { kind: 'file', path: 'src/ux-lf.ts' }), undefined);
+    assert.strictEqual(await isRunning(), false);
+  });
+
+  test('a superseded review ending first neither writes findings nor clears the running state (F20)', async () => {
+    await reviewOne('src/ux-state.ts', DIV('state'));
+    write('src/ux-lf.ts', DIV('lf'));
+    write('src/ux-track.ts', DIV('track'));
+    const a = hold('return a * b; // lf', true);
+    const b = hold('return a * b; // track');
+    const first = startReview('src/ux-lf.ts');
+    await until(() => a.arrived);
+    const second = startReview('src/ux-track.ts');
+    await until(() => b.arrived);
+
+    a.release();
+    await first;
+    // The second review is still running: the first one's cleanup leaves that alone,
+    // and its findings don't replace the previous ones.
+    assert.strictEqual(await isRunning(), true);
+    assert.deepStrictEqual(titles(), ['state bug']);
+
+    b.release();
+    const result = await second;
+    assert.strictEqual(result.ok, true, result.message);
+    assert.deepStrictEqual(titles(), ['tracked bug']);
+    assert.strictEqual(await isRunning(), false);
+  });
+
+  test('overlapping store updates never mix their findings; the last one started wins (F20)', async () => {
+    await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const session = api.findings.session!;
+    const finding = (id: string, file: string, quote: string): Finding => ({
+      id,
+      file,
+      startLine: 1,
+      endLine: 1,
+      anchor: 'line',
+      severity: 'major',
+      category: 'bug',
+      title: id,
+      body: '',
+      quote,
+      confidence: 1,
+    });
+    const x = [finding('x', 'src/calc.ts', 'return a + b;')];
+    const y = [finding('y', 'README.md', '# demo')];
+    // Each update opens its files' documents first, so the two overlap.
+    await Promise.all([
+      api.findings.set({ ...session, finishedAt: new Date(1) }, x),
+      api.findings.set({ ...session, finishedAt: new Date(2) }, y),
+    ]);
+    assert.deepStrictEqual(
+      api.findings.all().map((f) => f.id),
+      ['y'],
+    );
+    assert.strictEqual(api.findings.session?.finishedAt.getTime(), 2);
+
+    // Clearing while an update is under way wins too.
+    const pending = api.findings.set(session, x);
+    api.findings.clear();
+    await pending;
+    assert.deepStrictEqual(api.findings.all(), []);
+    assert.strictEqual(api.findings.session, undefined);
+  });
+
+  test('accepting a preview never applies a fix that changed while it was shown', async () => {
+    const key = await reviewOne('src/ux-revise.ts', DIV('revise'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-revise.ts'));
+    try {
+      const outcome = await previewFix(api.findings, new FixPreviewProvider(), key, async () => {
+        // While the question is open, a re-review changes the suggestion.
+        await api.snapshots.clear();
+        revise = true;
+        try {
+          await startReview('src/ux-revise.ts');
+        } finally {
+          revise = false;
+        }
+        assert.strictEqual(
+          api.findings.get(key)?.suggestion,
+          'return b === 0 ? 0 : a / b; // revise',
+        );
+        return true;
+      });
+      assert.strictEqual(outcome.ok, false);
+      assert.match(outcome.message ?? '', /changed while the preview was open/);
+      assert.strictEqual(doc.getText(), DIV('revise'));
+      assert.strictEqual(api.findings.get(key)?.status, 'open');
+    } finally {
+      if (doc.isDirty) {
+        await vscode.window.showTextDocument(doc);
+        await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+      }
     }
   });
 });

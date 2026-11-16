@@ -122,28 +122,51 @@ async function plan(store: FindingStore, key: string): Promise<Planned> {
       searchRange,
     });
     if (!stillThere) store.markStale(key);
-    return {
-      ok: false,
-      message: stillThere
-        ? 'The code changed since the review, so the fix can’t be applied automatically.'
-        : 'The code this finding refers to is gone; the fix can’t be applied.',
-    };
+    // An exact match is only refused when the quote is ambiguous within its line.
+    const message = !stillThere
+      ? 'The code this finding refers to is gone; the fix can’t be applied.'
+      : stillThere.method === 'exact'
+        ? 'The quoted code appears more than once on its line, or inside a longer name, so the fix can’t be applied automatically.'
+        : 'The code changed since the review, so the fix can’t be applied automatically.';
+    return { ok: false, message };
   }
   return { ok: true, finding, doc, edit };
 }
 
-/** Applies a finding's suggestion as one undoable edit and marks the finding resolved. */
-export async function applyFix(store: FindingStore, key: string): Promise<FixOutcome> {
+/** What a fix replaces and with what; edits elsewhere in the file may move it. */
+export interface FixContent {
+  oldText: string;
+  newText: string;
+}
+
+function rangeOf(edit: FixEdit): vscode.Range {
+  return new vscode.Range(edit.startLine - 1, edit.startColumn, edit.endLine - 1, edit.endColumn);
+}
+
+/**
+ * Applies a finding's suggestion as one undoable edit and marks the finding resolved.
+ * With `expected` (what a preview showed), a fix that differs from it is refused.
+ */
+export async function applyFix(
+  store: FindingStore,
+  key: string,
+  expected?: FixContent,
+): Promise<FixOutcome> {
   const planned = await plan(store, key);
   if (!planned.ok) return planned;
   const { doc, edit, finding } = planned;
+  const range = rangeOf(edit);
+  // E.g. a re-review changed the suggestion while the preview was open.
+  if (expected && (doc.getText(range) !== expected.oldText || edit.newText !== expected.newText)) {
+    return {
+      ok: false,
+      message:
+        'The fix changed while the preview was open, so it wasn’t applied. Preview it again.',
+    };
+  }
   const eol = doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
   const workspaceEdit = new vscode.WorkspaceEdit();
-  workspaceEdit.replace(
-    doc.uri,
-    new vscode.Range(edit.startLine - 1, edit.startColumn, edit.endLine - 1, edit.endColumn),
-    edit.newText.replace(/\n/g, eol),
-  );
+  workspaceEdit.replace(doc.uri, range, edit.newText.replace(/\n/g, eol));
   // Resolve first: the store only re-anchors open findings, so the edit removing
   // the quote doesn't mark this one outdated.
   store.setStatus(key, 'resolved');
@@ -157,7 +180,8 @@ export async function applyFix(store: FindingStore, key: string): Promise<FixOut
 
 /**
  * Shows the fix as a diff (current file ↔ file with the fix), then asks whether
- * to apply it. `confirm` replaces the question (tests).
+ * to apply it; only the fix that was shown is applied. `confirm` replaces the
+ * question (tests).
  */
 export async function previewFix(
   store: FindingStore,
@@ -174,6 +198,7 @@ export async function previewFix(
     query: `key=${encodeURIComponent(key)}`,
   });
   previews.set(previewUri, applyFixToText(doc.getText(), edit));
+  const shown: FixContent = { oldText: doc.getText(rangeOf(edit)), newText: edit.newText };
   await vscode.commands.executeCommand(
     'vscode.diff',
     doc.uri,
@@ -192,7 +217,7 @@ export async function previewFix(
   await closePreview(previewUri);
   previews.delete(previewUri);
   if (!yes) return { ok: true, applied: false };
-  const result = await applyFix(store, key);
+  const result = await applyFix(store, key, shown);
   if (result.ok) await vscode.window.showTextDocument(doc, { preview: false });
   return { ...result, applied: result.ok };
 }

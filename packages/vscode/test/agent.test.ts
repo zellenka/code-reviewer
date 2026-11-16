@@ -103,7 +103,9 @@ suite('Context & agentic review', () => {
     write('AGENTS.md', '- Never use the `any` type.\n');
     write('.env', 'API_TOKEN=do-not-send-this\n');
     write('big.txt', 'x'.repeat(5_000));
-    git('add', 'src', 'AGENTS.md', 'big.txt');
+    write('.gitignore', 'local/\n');
+    write('local/settings.ts', "export function leak() {\n  return 'IGNORED_TOKEN';\n}\n");
+    git('add', 'src', 'AGENTS.md', 'big.txt', '.gitignore');
     git('commit', '-q', '-m', 'init');
     write('src/client.ts', CLIENT_V2);
   });
@@ -171,6 +173,46 @@ suite('Context & agentic review', () => {
       symbol: 'REQUEST_TIMEOUT',
     });
     assert.match(refs, /src\/client\.ts:\d+:/);
+  });
+
+  test('workspace tools show nothing from files git ignores, also via the language server (F4)', async () => {
+    // A language server can answer with ignored files; this one does.
+    disposables.push(
+      vscode.languages.registerReferenceProvider(
+        { scheme: 'file', language: 'typescript' },
+        {
+          provideReferences: () => [
+            new vscode.Location(
+              vscode.Uri.file(path.join(root, 'local', 'settings.ts')),
+              new vscode.Position(1, 2),
+            ),
+            new vscode.Location(
+              vscode.Uri.file(path.join(root, 'src', 'client.ts')),
+              new vscode.Position(0, 9),
+            ),
+          ],
+        },
+      ),
+    );
+    const ws = new VsCodeWorkspaceTools(root, noopLogger);
+    const tools = new Map(createReviewTools(ws).map((t) => [t.def.name, t]));
+    const run = (name: string, input: unknown) => {
+      const tool = tools.get(name)! as unknown as AgentTool<unknown>;
+      return tool.run(tool.schema.parse(input), new AbortController().signal);
+    };
+    const refs = await run('find_references', {
+      path: 'src/config.ts',
+      line: 2,
+      symbol: 'REQUEST_TIMEOUT',
+    });
+    assert.match(refs, /src\/client\.ts:1:/);
+    assert.doesNotMatch(refs, /local\/|IGNORED_TOKEN/);
+    await assert.rejects(() => run('read_file', { path: 'local/settings.ts' }), /ignored by git/);
+    await assert.rejects(
+      () => run('get_symbol', { path: 'local/settings.ts', line: 2 }),
+      /ignored by git/,
+    );
+    assert.strictEqual(await run('search_code', { pattern: 'IGNORED_TOKEN' }), 'No matches.');
   });
 
   test('a changed method is sent with the whole method and the class header (P4-1)', async () => {

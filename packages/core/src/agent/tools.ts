@@ -56,6 +56,12 @@ export function createReviewTools(
       throw friendly(err, p);
     }
   };
+  /**
+   * The redacted lines of text read from the start of a file. Tools cut their output from
+   * these: a private key body is only known after its BEGIN line, so a part of a file can't
+   * be redacted on its own.
+   */
+  const redactedLines = (text: string) => splitLines(redact(text));
 
   const readFile: AgentTool<{ path: string; startLine?: number; endLine?: number }> = {
     def: {
@@ -78,14 +84,12 @@ export function createReviewTools(
       const start = input.startLine ?? 1;
       const end = Math.min(input.endLine ?? start + maxLines - 1, start + maxLines - 1);
       if (end < start) throw new Error('endLine is before startLine.');
-      const all = splitLines(await read(p));
+      const all = redactedLines(await read(p));
       const slice = all.slice(start - 1, end);
       if (!slice.length) return `${p} has ${all.length} line(s); nothing at ${start}.`;
       const more =
         end < all.length ? `\n… (${all.length} lines in total; ask for startLine ${end + 1}+)` : '';
-      return redact(
-        `${p} lines ${start}-${start + slice.length - 1}:\n${numbered(slice, start)}${more}`,
-      );
+      return `${p} lines ${start}-${start + slice.length - 1}:\n${numbered(slice, start)}${more}`;
     },
   };
 
@@ -110,9 +114,25 @@ export function createReviewTools(
     async run(input) {
       const hits = (await ws.grep(input.pattern, input.glob)).filter((h) => !blocked(h.path));
       if (!hits.length) return 'No matches.';
-      const shown = hits.slice(0, maxMatches).map((h) => `${h.path}:${h.line}: ${h.text.trim()}`);
+      const files = new Map<string, { raw: string[]; redacted: string[] }>();
+      const shown: string[] = [];
+      for (const h of hits.slice(0, maxMatches)) {
+        let file = files.get(h.path);
+        if (!file) {
+          const text = await read(h.path).catch(() => '');
+          file = { raw: splitLines(text), redacted: redactedLines(text) };
+          files.set(h.path, file);
+        }
+        // The hit's text is shown from the redacted file. A line that isn't there (the host
+        // cut a large file, or it changed) can't be checked, so its text is left out.
+        const found = file.raw[h.line - 1]?.includes(h.text.trim());
+        const lineText = found
+          ? file.redacted[h.line - 1]!.trim().slice(0, 500)
+          : '[line not shown: it could not be checked for secrets]';
+        shown.push(`${h.path}:${h.line}: ${lineText}`);
+      }
       if (hits.length > maxMatches) shown.push(`… more matches; narrow the pattern or glob.`);
-      return redact(shown.join('\n'));
+      return shown.join('\n');
     },
   };
 
@@ -145,13 +165,13 @@ export function createReviewTools(
       const shown: string[] = [];
       for (const ref of refs.slice(0, maxMatches)) {
         if (!files.has(ref.path) && files.size < 20) {
-          files.set(ref.path, splitLines(await read(ref.path).catch(() => '')));
+          files.set(ref.path, redactedLines(await read(ref.path).catch(() => '')));
         }
         const lineText = files.get(ref.path)?.[ref.line - 1]?.trim() ?? '';
         shown.push(`${ref.path}:${ref.line}: ${lineText.slice(0, 300)}`);
       }
       if (refs.length > maxMatches) shown.push(`… ${refs.length - maxMatches} more.`);
-      return redact(shown.join('\n'));
+      return shown.join('\n');
     },
   };
 
@@ -180,12 +200,10 @@ export function createReviewTools(
         if (inner) symbol = inner;
       }
       if (!symbol) return `No enclosing function or class found at ${p}:${input.line}.`;
-      const lines = splitLines(content).slice(symbol.startLine - 1, symbol.endLine);
+      const lines = redactedLines(content).slice(symbol.startLine - 1, symbol.endLine);
       const shown = lines.slice(0, maxLines);
       const more = lines.length > maxLines ? `\n… (${lines.length - maxLines} more lines)` : '';
-      return redact(
-        `${symbol.kind} ${symbol.name} (${p} lines ${symbol.startLine}-${symbol.endLine}):\n${numbered(shown, symbol.startLine)}${more}`,
-      );
+      return `${symbol.kind} ${symbol.name} (${p} lines ${symbol.startLine}-${symbol.endLine}):\n${numbered(shown, symbol.startLine)}${more}`;
     },
   };
 

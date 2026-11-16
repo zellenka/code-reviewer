@@ -25,7 +25,7 @@ import * as vscode from 'vscode';
 import { showProviderError } from '../providers/errorUi';
 import type { ProviderRegistry } from '../providers/registry';
 import type { ReviewConfigService } from './config';
-import { relativeToRepo, type RepoLocator } from './repo';
+import { relativeToRepo, unsavedFiles, type RepoLocator } from './repo';
 import type { SnapshotStore } from './snapshots';
 import type { FindingStore } from './store';
 import { formatTokens } from './tree';
@@ -105,6 +105,14 @@ export async function reviewCommand(
           : vscode.window.showInformationMessage;
     void show(`AI Review: ${message}`);
   };
+  /** Cancelled before any part finished: there's nothing new to show, so the last review stays. */
+  const keepPrevious = (
+    outcome: Pick<ReviewCommandResult, 'result' | 'estimate'> = {},
+  ): ReviewCommandResult => {
+    logger.info('review cancelled before any part finished; the previous findings are kept');
+    notify(deps.store.session ? 'Cancelled. The previous findings are kept.' : 'Cancelled.');
+    return { ok: false, message: 'cancelled', ...outcome };
+  };
 
   if (!vscode.workspace.isTrusted) {
     const message =
@@ -160,6 +168,18 @@ export async function reviewCommand(
       (settings.get<boolean>('incrementalReview') ?? true)
         ? deps.snapshots?.get(repo.root, mode)
         : undefined;
+    // File and selection reviews read unsaved editor text; git diffs only see saved files,
+    // so say which edits are left out. Staged reviews the index: unsaved edits aren't in it,
+    // just like saved but unstaged ones, so it doesn't warn.
+    const unsaved =
+      mode.kind === 'unstaged' || mode.kind === 'branch' ? unsavedFiles(repo.root) : [];
+    if (unsaved.length) {
+      logger.warn(`unsaved changes are not included in this review: ${unsaved.join(', ')}`);
+    }
+    const withUnsavedNote = (message: string) =>
+      unsaved.length
+        ? `${message.replace(/\.$/, '')}. Not included: unsaved changes in ${listFiles(unsaved)} (save to review them).`
+        : message;
 
     const outcome = await vscode.window.withProgress(
       {
@@ -173,9 +193,13 @@ export async function reviewCommand(
           token.onCancellationRequested(() => controller.abort()),
           cts.token.onCancellationRequested(() => controller.abort()),
         ];
+        // Cancelled already (e.g. while the repository was looked up).
+        if (token.isCancellationRequested || cts.token.isCancellationRequested) controller.abort();
         try {
           progress.report({ message: 'collecting changes…' });
           const diff = await repo.source.getDiff(mode);
+          // Nothing was reviewed, so nothing changes (not even for an empty diff).
+          if (controller.signal.aborted) return { cancelled: true as const };
           if (!diff.files.length) return { empty: true as const };
 
           const rules = await loadRepoRulesFromDisk(repo.root, config, {
@@ -191,6 +215,8 @@ export async function reviewCommand(
               { logger },
             );
           }
+          // Don't ask about the cost of a review that was cancelled.
+          if (controller.signal.aborted) return { cancelled: true as const };
           const reviewOptions = {
             model,
             config,
@@ -199,7 +225,11 @@ export async function reviewCommand(
             rules,
             context: includeContext,
             ...(symbols ? { symbols } : {}),
-            workspace: new VsCodeWorkspaceTools(repo.root, logger),
+            workspace: new VsCodeWorkspaceTools(
+              repo.root,
+              logger,
+              repo.gitPath ? { gitPath: repo.gitPath } : {},
+            ),
             agentLimits,
             ...(verify !== undefined ? { verify } : {}),
             ...(previous ? { previous } : {}),
@@ -265,9 +295,15 @@ export async function reviewCommand(
       logger.info('review cancelled at the cost confirmation');
       return { ok: false, message: 'cancelled', estimate: outcome.estimate };
     }
+    // A newer review cancelled this one; the findings, snapshot and summary are its now.
+    if (running !== cts) {
+      logger.info('review superseded by a newer one; its results are dropped');
+      return { ok: false, message: 'cancelled' };
+    }
+    if ('cancelled' in outcome) return keepPrevious();
     if (outcome.empty) {
-      const message = `No changes to review (${describeMode(mode)}).`;
-      notify(message);
+      const message = withUnsavedNote(`No changes to review (${describeMode(mode)}).`);
+      notify(message, unsaved.length ? 'warn' : 'info');
       deps.store.clear();
       await deps.snapshots?.set(repo.root, mode, undefined);
       return { ok: true, findings: [], message };
@@ -282,15 +318,25 @@ export async function reviewCommand(
     logger.info(
       `input tokens: estimated ${estimate.inputTokens}, actual ${actualInput}${result.usage.estimated ? ' (counted locally)' : ''}`,
     );
-    // Cancelled or a part failed (no snapshot): keep the last one, it still matches its hunks.
-    if (result.snapshot) await deps.snapshots?.set(repo.root, mode, result.snapshot);
+    // A cancelled review replaces the last one only once a part has finished.
+    if (result.cancelled && !result.chunks.completed) return keepPrevious({ result, estimate });
     const findings = await deps.store.set(
       { root: repo.root, mode, model, result, finishedAt: new Date() },
       result.findings,
     );
-    const message = summarize(result, model);
+    if (!findings) {
+      logger.info('a newer review or Clear Findings replaced this review; its results are dropped');
+      return { ok: false, message: 'cancelled' };
+    }
+    // Cancelled or a part failed (no snapshot): keep the last one, it still matches its hunks.
+    // Superseded meanwhile: the newer review writes it.
+    if (result.snapshot && running === cts) {
+      await deps.snapshots?.set(repo.root, mode, result.snapshot);
+    }
+    const message = withUnsavedNote(summarize(result, model));
     if (!args.silent) {
-      const level = result.errors.length && !result.findings.length ? 'warn' : 'info';
+      const level =
+        (result.errors.length && !result.findings.length) || unsaved.length ? 'warn' : 'info';
       const show =
         level === 'warn' ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
       const actions = [
@@ -387,6 +433,12 @@ function buildMode(
       return { kind, path: rel, startLine, endLine };
     }
   }
+}
+
+/** `a, b, c and 2 more`. */
+function listFiles(paths: string[]): string {
+  const shown = paths.slice(0, 3).join(', ');
+  return paths.length > 3 ? `${shown} and ${paths.length - 3} more` : shown;
 }
 
 function toRepoPath(root: string, target: string): string | undefined {
