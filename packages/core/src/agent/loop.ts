@@ -16,6 +16,7 @@ export interface AgentTool<I = unknown> {
   def: ToolDef;
   /** Validates (and may coerce) the model's input before `run`. */
   schema: z.ZodType<I>;
+  /** Should stop early (e.g. throw the abort reason) once `signal` is aborted. */
   run(input: I, signal: AbortSignal): Promise<string>;
   /** Short, code-free description of a call for the debug log, e.g. the path. */
   describe?(input: I): string;
@@ -93,7 +94,8 @@ export interface AgentLoopResult {
  * Bounded tool-use loop: the model calls read-only tools until it calls `finalTool`.
  * Limits on turns, tool calls and input tokens make it wrap up: the next request
  * asks for the final tool only. Malformed tool input and tool failures are returned to
- * the model as error results; they never throw. Provider errors do throw.
+ * the model as error results; they never throw. Provider errors do throw. A cancelled
+ * signal ends the loop with 'cancelled', also between the tool calls of one turn.
  * The tool list is identical on every request so the prompt cache stays valid.
  */
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
@@ -215,6 +217,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
     const results: ContentPart[] = [];
     for (const call of others) {
+      // Cancelled: the rest of the turn isn't run, and its results never reach the model.
+      if (signal.aborted) return result('cancelled');
       if (toolCalls >= limits.maxToolCalls) {
         results.push({
           type: 'tool_result',
@@ -289,6 +293,8 @@ async function runTool(
     logger.trace(`${label}agent ${call.name} result:\n${text}`);
     return { type: 'tool_result', callId: call.id, content: text || '(empty)' };
   } catch (err) {
+    // A tool stopped by the signal: the loop returns 'cancelled' before this is sent.
+    if (signal.aborted) return { type: 'tool_result', callId: call.id, content: 'Cancelled.' };
     return error(err instanceof Error ? err.message : String(err));
   }
 }

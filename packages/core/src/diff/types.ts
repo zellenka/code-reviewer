@@ -45,14 +45,26 @@ export interface DiffSource {
   getDiff(mode: ReviewMode): Promise<UnifiedDiff>;
 }
 
-/** Read-only, sandboxed to the repo root. Implemented per host. */
+/**
+ * Read-only, sandboxed to the repo root. Implemented per host. A call given a `signal` stops
+ * early (rejects with its abort reason) when the review is cancelled.
+ */
 export interface WorkspaceTools {
-  readFile(path: string, range?: { start: number; end: number }): Promise<string>;
-  grep(pattern: string, glob?: string): Promise<{ path: string; line: number; text: string }[]>;
+  readFile(
+    path: string,
+    range?: { start: number; end: number },
+    signal?: AbortSignal,
+  ): Promise<string>;
+  grep(
+    pattern: string,
+    glob?: string,
+    signal?: AbortSignal,
+  ): Promise<{ path: string; line: number; text: string }[]>;
   findReferences(
     path: string,
     line: number,
     col: number,
+    signal?: AbortSignal,
   ): Promise<{ path: string; line: number }[]>;
   getSymbolAt(
     path: string,

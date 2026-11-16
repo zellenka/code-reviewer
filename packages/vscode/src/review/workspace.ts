@@ -50,11 +50,14 @@ export class VsCodeWorkspaceTools extends FsWorkspaceTools {
     super(root, options);
   }
 
+  /** The language server isn't cancelled (it is bounded by a timeout); the grep fallback is. */
   override async findReferences(
     relPath: string,
     line: number,
     col: number,
+    signal?: AbortSignal,
   ): Promise<{ path: string; line: number }[]> {
+    signal?.throwIfAborted();
     const abs = await this.resolveReadable(relPath);
     try {
       const locations = await withTimeout(
@@ -77,12 +80,16 @@ export class VsCodeWorkspaceTools extends FsWorkspaceTools {
         // A server that only knows the open file (no project loaded) finds just the
         // declaration: add the text matches from other files.
         if (out.some((r) => r.path !== relPath)) return out;
-        if (out.length) return mergeRefs(out, await super.findReferences(relPath, line, col));
+        if (out.length) {
+          return mergeRefs(out, await super.findReferences(relPath, line, col, signal));
+        }
       }
     } catch (err) {
+      // A cancelled fallback grep is not a language server failure.
+      signal?.throwIfAborted();
       this.logger.debug(`reference provider failed for ${relPath}: ${String(err)}`);
     }
-    return super.findReferences(relPath, line, col);
+    return super.findReferences(relPath, line, col, signal);
   }
 
   override async getSymbolAt(

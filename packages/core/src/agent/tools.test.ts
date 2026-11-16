@@ -223,6 +223,48 @@ describe('find_references results', () => {
   });
 });
 
+describe('cancellation (F8)', () => {
+  it("passes the loop's signal to the host and stops between files", async () => {
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const reads: string[] = [];
+    const cancelOn = new Set<string>();
+    const host: WorkspaceTools = {
+      ...ws,
+      readFile: async (p, range, signal) => {
+        seen.push(`readFile ${signal === controller.signal}`);
+        reads.push(p);
+        if (cancelOn.has(p)) controller.abort();
+        return ws.readFile(p, range);
+      },
+      grep: async (pattern, glob, signal) => {
+        seen.push(`grep ${signal === controller.signal}`);
+        return ws.grep(pattern, glob);
+      },
+      findReferences: async (p, line, col, signal) => {
+        seen.push(`findReferences ${signal === controller.signal}`);
+        return ws.findReferences(p, line, col);
+      },
+    };
+    const tools = new Map(createReviewTools(host).map((t) => [t.def.name, t]));
+    const run = (name: string, input: unknown) => {
+      const tool = tools.get(name)! as unknown as AgentTool<unknown>;
+      return tool.run(tool.schema.parse(input), controller.signal);
+    };
+    await run('read_file', { path: 'src/price.ts' });
+    await run('find_references', { path: 'src/price.ts', line: 1, symbol: 'formatPrice' });
+    // Hits in three files: reading the second one cancels, so the third isn't read.
+    reads.length = 0;
+    cancelOn.add('src/cart.ts');
+    await expect(run('search_code', { pattern: 'formatPrice|pem' })).rejects.toThrow();
+    expect(reads).toEqual(['src/price.ts', 'src/cart.ts']);
+    // Every host call got the loop's signal.
+    expect(seen.filter((s) => s.endsWith('false'))).toEqual([]);
+    expect(seen).toContain('grep true');
+    expect(seen).toContain('findReferences true');
+  });
+});
+
 // A key body line only looks like a secret after its BEGIN line, which a part of the file lacks.
 describe('private key blocks in parts of a file', () => {
   it('read_file redacts a range that starts inside a key block', async () => {
