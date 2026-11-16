@@ -51,6 +51,15 @@ export const DEFAULT_CONFIG: ReviewConfig = {
   },
 };
 
+/**
+ * `language` goes into the prompts as is, so it may only be a language name or tag
+ * ("en", "pt-BR", "Simplified Chinese"): letters in any script, single spaces or hyphens
+ * between words, at most 40 characters. Anything else could carry instructions.
+ */
+const LANGUAGE_PATTERN = /^(?=.{1,40}$)[\p{L}\p{M}]+(?:[ -][\p{L}\p{M}]+)*$/u;
+/** `rules` is named in the prompt (`<repo_rules source="…">`): no tags, quotes or line breaks. */
+const RULES_PATH_PATTERN = /^[^\p{Cc}<>"]+$/u;
+
 /** Every field is optional; missing ones fall back to `DEFAULT_CONFIG`. */
 export const configFileSchema = z
   .object({
@@ -59,8 +68,17 @@ export const configFileSchema = z
     confidenceThreshold: z.number().min(0).max(1).optional(),
     onlyChangedLines: z.boolean().optional(),
     ignore: z.array(z.string().min(1)).optional(),
-    rules: z.string().min(1).optional(),
-    language: z.string().min(1).optional(),
+    rules: z
+      .string()
+      .regex(RULES_PATH_PATTERN, 'must be a file path without line breaks, quotes, < or >')
+      .optional(),
+    language: z
+      .string()
+      .regex(
+        LANGUAGE_PATTERN,
+        'must be a language name or tag such as "en" or "pt-BR" (letters, spaces and hyphens, at most 40 characters)',
+      )
+      .optional(),
     review: z
       .object({
         mode: z.enum(REVIEW_MODES).optional(),

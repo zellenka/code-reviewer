@@ -69,7 +69,7 @@ onlyChangedLines: true # drop findings outside changed lines
 ignore: # globs, added to the built-in ignores
   - '**/*.generated.ts'
   - 'docs/'
-language: en # language of the review comments
+language: en # language of the review comments: a name or tag such as en, pt-BR or Simplified Chinese
 rules: .codereview.md # review guidelines (AGENTS.md and .github/copilot-instructions.md are also read)
 review:
   mode: single-pass # or agentic: the model may read other files in the repository
@@ -77,7 +77,7 @@ review:
   verify: false # true: double-check each finding with one extra request per file
 ```
 
-The repository file decides _what_ is reviewed and reported. Your VS Code settings decide _how_ it runs (model, `aiReview.concurrency`, `aiReview.baseBranch`). The `aiReview.severityThreshold` and `aiReview.confidenceThreshold` settings can make the repository's thresholds stricter for you, never looser. An invalid file shows a warning and falls back to defaults for the invalid fields.
+The repository file decides _what_ is reviewed and reported. Your VS Code settings decide _how_ it runs (model, `aiReview.concurrency`, `aiReview.baseBranch`). The `aiReview.severityThreshold` and `aiReview.confidenceThreshold` settings can make the repository's thresholds stricter for you, never looser. An invalid file shows a warning and falls back to defaults for the invalid fields. The file and the rules files are read from your working tree, so a change that edits them also changes its own review: the review result then says so, and you should check those edits yourself.
 
 ## Privacy
 

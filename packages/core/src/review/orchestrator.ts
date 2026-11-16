@@ -20,7 +20,7 @@ import { buildSystemBlocks, buildUserPrompt } from './prompt';
 import { REPORT_FINDINGS_TOOL } from './output';
 import { redactFiles } from './redact';
 import { reviewChunk } from './reviewer';
-import { renderRules, type RepoRules } from './rules';
+import { renderRules, reviewSettingsWarnings, type RepoRules } from './rules';
 import { buildSummarySystemPrompt, summarizeReview } from './summarize';
 import type { SymbolIndex } from './symbols';
 import type { DropReason, RawFinding, ReviewResult, SkippedFile } from './types';
@@ -197,6 +197,9 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
       mode,
     };
     if (options.rules?.sources.length) result.rules = options.rules.sources.map((s) => s.path);
+    // The whole diff, not the incremental part: the warning holds for every re-review.
+    const warnings = reviewSettingsWarnings(diff.files, config);
+    if (warnings.length) result.warnings = warnings;
     if (agent) result.agent = { turns: 0, toolCalls: 0, limitStops: 0 };
     const raw: RawFinding[] = [];
     let invalid = 0;
