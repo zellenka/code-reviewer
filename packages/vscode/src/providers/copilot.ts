@@ -212,6 +212,9 @@ export function toLmOptions(req: ChatRequest): vscode.LanguageModelChatRequestOp
   return options;
 }
 
+/** A Blocked message about quota or rate limits; not "usage" alone ("usage policy"). */
+const BLOCKED_BY_LIMIT = /quota|limit|allowance|exceeded|too many requests/i;
+
 /** Maps vscode.lm failures to ProviderError. Exported for tests. */
 export function mapLmError(err: unknown): ProviderError {
   if (isProviderError(err)) return err;
@@ -225,9 +228,17 @@ export function mapLmError(err: unknown): ProviderError {
           opts,
         );
       case vscode.LanguageModelError.Blocked.name:
+        // Blocked also covers content filters: only a limit stops the whole review.
+        if (BLOCKED_BY_LIMIT.test(err.message)) {
+          return new ProviderError(
+            'quota',
+            'Copilot request was blocked because a usage limit was reached. Try again later.',
+            opts,
+          );
+        }
         return new ProviderError(
-          'quota',
-          'Copilot request was blocked, usually because a usage limit was reached. Try again later.',
+          'blocked',
+          `Copilot declined to review this content${err.message ? ` (${err.message})` : ''}.`,
           opts,
         );
       case vscode.LanguageModelError.NotFound.name:

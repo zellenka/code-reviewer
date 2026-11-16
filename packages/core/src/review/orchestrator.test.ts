@@ -356,6 +356,33 @@ describe('runReview', () => {
     expect(result.errors[0]).toMatch(/too long/);
   });
 
+  it('a blocked part fails alone and keeps the findings of the other parts', async () => {
+    const files = Array.from({ length: 3 }, (_, i) =>
+      addedFileDiff(`f${i}.ts`, 'z\n'.repeat(3000)),
+    );
+    const provider = new MockProvider({
+      script: [
+        mockError('blocked', 'filtered'),
+        report([finding({ file: 'f1.ts', quote: 'z', startLine: 2, endLine: 2 })]),
+      ],
+      fallback: report([]),
+    });
+    const result = await runReview(
+      { files },
+      {
+        provider,
+        model: { ...MODEL, maxInputTokens: 12_000 },
+        config: DEFAULT_CONFIG,
+        concurrency: 1,
+      },
+    );
+    expect(result.chunks.total).toBeGreaterThan(2);
+    expect(result.chunks.failed).toBe(1);
+    expect(result.chunks.completed).toBe(result.chunks.total - 1);
+    expect(result.errors).toEqual(['Part 1: filtered']);
+    expect(result.findings.map((f) => f.file)).toEqual(['f1.ts']);
+  });
+
   it('an empty diff makes no requests', async () => {
     const provider = new MockProvider();
     const result = await runReview(parseUnifiedDiff(''), {
