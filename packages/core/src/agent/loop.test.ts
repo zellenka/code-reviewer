@@ -193,6 +193,63 @@ describe('runAgentLoop', () => {
     expect(result.stop).toBe('cancelled');
   });
 
+  it('runs no more tool calls of a turn once cancelled (F8)', async () => {
+    const controller = new AbortController();
+    const ran: string[] = [];
+    const cancel: AgentTool<Record<string, never>> = {
+      def: { name: 'cancel', description: 'cancels', inputSchema: { type: 'object' } },
+      schema: z.object({}),
+      run: async () => {
+        ran.push('cancel');
+        controller.abort();
+        return 'ignored the signal';
+      },
+    };
+    const counted: AgentTool<{ text: string }> = {
+      ...echo,
+      run: async ({ text }) => {
+        ran.push(text);
+        return text;
+      },
+    };
+    const provider = new MockProvider({
+      script: [
+        {
+          events: [
+            { type: 'tool_call', id: 'a', name: 'echo', input: { text: '1' } },
+            { type: 'tool_call', id: 'b', name: 'cancel', input: {} },
+            { type: 'tool_call', id: 'c', name: 'echo', input: { text: '2' } },
+          ] satisfies ChatEvent[],
+        },
+        done(),
+      ],
+    });
+    const tools = [counted, cancel] as unknown as AgentTool<never>[];
+    const result = await runAgentLoop(options(provider, { tools, signal: controller.signal }));
+    expect(result.stop).toBe('cancelled');
+    expect(ran).toEqual(['1', 'cancel']);
+    expect(provider.requests).toHaveLength(1);
+  });
+
+  it('a tool that stops on cancellation is not an error sent to the model (F8)', async () => {
+    const controller = new AbortController();
+    const aborts: AgentTool<Record<string, never>> = {
+      def: { name: 'slow', description: 'slow', inputSchema: { type: 'object' } },
+      schema: z.object({}),
+      run: async (_input, signal) => {
+        controller.abort();
+        signal.throwIfAborted();
+        return 'not reached';
+      },
+    };
+    const provider = new MockProvider({ script: [mockToolCall('slow', {}), done()] });
+    const tools = [aborts] as unknown as AgentTool<never>[];
+    const result = await runAgentLoop(options(provider, { tools, signal: controller.signal }));
+    expect(result).toMatchObject({ stop: 'cancelled', turns: 1 });
+    expect(provider.requests).toHaveLength(1);
+    expect(JSON.stringify(result.messages)).not.toMatch(/abort/i);
+  });
+
   it('moves one cache hint to the newest message each turn', async () => {
     const provider = new MockProvider({
       script: [mockToolCall('echo', { text: '1' }), mockToolCall('echo', { text: '2' }), done()],

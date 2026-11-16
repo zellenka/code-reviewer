@@ -42,6 +42,12 @@ const DEFAULT_SKIP = [
   'vendor',
 ];
 const MAX_GREP_FILE_BYTES = 1024 * 1024;
+/**
+ * Larger files are refused unread (tools redact the whole file before cutting it). Same as
+ * the size above which the diff modes treat a file as binary (`MAX_FILE_BYTES` in git.ts);
+ * above `MAX_GREP_FILE_BYTES`, so every grep hit can still be checked against its file.
+ */
+const MAX_READ_FILE_BYTES = 2 * 1024 * 1024;
 /** Text sent to the grep worker at once. */
 const GREP_BATCH_CHARS = 1024 * 1024;
 
@@ -94,9 +100,21 @@ export class FsWorkspaceTools implements WorkspaceTools {
     this.gitPath = options.gitPath;
   }
 
-  async readFile(relPath: string, range?: { start: number; end: number }): Promise<string> {
+  /** A file over `MAX_READ_FILE_BYTES` is refused unread, also for a range (read whole). */
+  async readFile(
+    relPath: string,
+    range?: { start: number; end: number },
+    signal?: AbortSignal,
+  ): Promise<string> {
+    signal?.throwIfAborted();
     const abs = await this.resolveReadable(relPath);
-    let text = normalizeEol(await readFile(abs, 'utf8'));
+    const tooLarge = () =>
+      new Error(`${relPath} is too large to read (over ${MAX_READ_FILE_BYTES / 1024 / 1024} MB).`);
+    if ((await stat(abs)).size > MAX_READ_FILE_BYTES) throw tooLarge();
+    const buf = await readFile(abs, { signal });
+    // It may have grown since `stat`.
+    if (buf.length > MAX_READ_FILE_BYTES) throw tooLarge();
+    let text = normalizeEol(buf.toString('utf8'));
     if (range) {
       const lines = splitLines(text);
       const start = Math.max(1, range.start);
@@ -149,10 +167,13 @@ export class FsWorkspaceTools implements WorkspaceTools {
     return this.gitFiles;
   }
 
+  /** Reads every listed file: a `signal` stops the walk and the regex worker. */
   async grep(
     pattern: string,
     glob?: string,
+    signal?: AbortSignal,
   ): Promise<{ path: string; line: number; text: string }[]> {
+    signal?.throwIfAborted();
     const { files: listed, dirs } = await this.listGitFiles();
     let regex: RegExp;
     try {
@@ -172,9 +193,11 @@ export class FsWorkspaceTools implements WorkspaceTools {
       const files = batch;
       batch = [];
       batchChars = 0;
+      signal?.throwIfAborted();
       const hits = await this.matchInWorker(
         worker,
         files.map((f) => f.lines.join('\n')),
+        signal,
       );
       for (const [f, i] of hits) {
         if (results.length >= this.maxGrepResults) break;
@@ -188,6 +211,7 @@ export class FsWorkspaceTools implements WorkspaceTools {
       entries.sort((a, b) => a.name.localeCompare(b.name));
       for (const entry of entries) {
         if (results.length >= this.maxGrepResults) return;
+        signal?.throwIfAborted();
         const abs = path.join(dir, entry.name);
         const rel = toPosixPath(path.relative(this.root, abs));
         if (entry.isDirectory()) {
@@ -201,7 +225,7 @@ export class FsWorkspaceTools implements WorkspaceTools {
         // Never even scanned, so matches can't hint at their content.
         if (isProtectedPath(rel)) continue;
         if ((await stat(abs)).size > MAX_GREP_FILE_BYTES) continue;
-        const buf = await readFile(abs);
+        const buf = await readFile(abs, { signal });
         if (buf.subarray(0, 8000).includes(0)) continue;
         const text = normalizeEol(buf.toString('utf8'));
         batch.push({ rel, lines: splitLines(text) });
@@ -218,12 +242,22 @@ export class FsWorkspaceTools implements WorkspaceTools {
     return results;
   }
 
-  private matchInWorker(worker: Worker, texts: string[]): Promise<[number, number][]> {
+  private matchInWorker(
+    worker: Worker,
+    texts: string[],
+    signal?: AbortSignal,
+  ): Promise<[number, number][]> {
     return new Promise((resolve, reject) => {
       const done = () => {
         clearTimeout(timer);
         worker.off('message', onMessage);
         worker.off('error', onError);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      // The caller terminates the worker, which may be stuck in a slow regex.
+      const onAbort = () => {
+        done();
+        reject(signal!.reason);
       };
       const onMessage = (hits: [number, number][]) => {
         done();
@@ -243,6 +277,7 @@ export class FsWorkspaceTools implements WorkspaceTools {
       }, this.grepTimeoutMs);
       worker.on('message', onMessage);
       worker.on('error', onError);
+      signal?.addEventListener('abort', onAbort, { once: true });
       worker.postMessage(texts);
     });
   }
@@ -252,11 +287,12 @@ export class FsWorkspaceTools implements WorkspaceTools {
     relPath: string,
     line: number,
     col: number,
+    signal?: AbortSignal,
   ): Promise<{ path: string; line: number }[]> {
-    const text = splitLines(await this.readFile(relPath))[line - 1] ?? '';
+    const text = splitLines(await this.readFile(relPath, undefined, signal))[line - 1] ?? '';
     const ident = identifierAt(text, col - 1);
     if (!ident) return [];
-    const hits = await this.grep(`\\b${ident.replace(/\$/g, '\\$')}\\b`);
+    const hits = await this.grep(`\\b${ident.replace(/\$/g, '\\$')}\\b`, undefined, signal);
     return hits.map(({ path: p, line: l }) => ({ path: p, line: l }));
   }
 

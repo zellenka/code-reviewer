@@ -1,9 +1,11 @@
+import type * as childProcess from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import type * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isDiffSourceError } from '@ai-review/core';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { isDiffSourceError, noopLogger } from '@ai-review/core';
 import {
   FsWorkspaceTools,
   GitCliDiffSource,
@@ -11,6 +13,37 @@ import {
   isSafeRef,
   resolveInRepo,
 } from './index';
+
+// `readFile` records what it reads and fails with the error code set for a path (absolute),
+// so tests can lock or deny a file portably. Everything else is the real file system.
+const fsMock = vi.hoisted(() => ({ reads: [] as string[], fail: new Map<string, string>() }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof fsPromises>();
+  const readFile = async (file: unknown, ...rest: unknown[]) => {
+    fsMock.reads.push(String(file));
+    const code = fsMock.fail.get(String(file));
+    if (code) throw Object.assign(new Error(`${code}: mocked read failure`), { code });
+    return (actual.readFile as (...args: unknown[]) => Promise<unknown>)(file, ...rest);
+  };
+  return { ...actual, readFile };
+});
+
+// `execFile` counts the `git show` calls in flight while `track` is on, so tests can see how
+// many git processes run at once. Everything else is the real `node:child_process`.
+const execMock = vi.hoisted(() => ({ track: false, inFlight: 0, peak: 0 }));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof childProcess>();
+  const execFile = (file: string, args: string[], options: object, cb: ExecCallback) => {
+    if (!execMock.track || !args.includes('show')) return actual.execFile(file, args, options, cb);
+    execMock.peak = Math.max(execMock.peak, ++execMock.inFlight);
+    return actual.execFile(file, args, options, (...result: Parameters<ExecCallback>) => {
+      execMock.inFlight--;
+      cb(...result);
+    });
+  };
+  return { ...actual, execFile };
+});
+type ExecCallback = (error: Error | null, stdout: string, stderr: string) => void;
 
 const ENV = {
   ...process.env,
@@ -168,6 +201,66 @@ describe('GitCliDiffSource', () => {
     rmSync(outside, { recursive: true, force: true });
   });
 
+  it('diff modes skip files that cannot be read, with a warning (F6)', async () => {
+    const { root: r5, git: g5 } = makeRepo();
+    writeFileSync(path.join(r5, 'a.txt'), 'a\n');
+    g5('add', '.');
+    g5('commit', '-q', '-m', 'a');
+    writeFileSync(path.join(r5, 'a.txt'), 'b\n');
+    for (const name of ['locked.txt', 'denied.txt', 'perm.txt', 'ok.txt']) {
+      writeFileSync(path.join(r5, name), `${name}\n`);
+    }
+    const warnings: string[] = [];
+    const logger = { ...noopLogger, warn: (m: string) => void warnings.push(m) };
+    const r5Source = new GitCliDiffSource({ root: r5, logger });
+    fsMock.fail.set(path.join(r5, 'locked.txt'), 'EBUSY');
+    fsMock.fail.set(path.join(r5, 'denied.txt'), 'EACCES');
+    fsMock.fail.set(path.join(r5, 'perm.txt'), 'EPERM');
+    fsMock.fail.set(path.join(r5, 'a.txt'), 'EBUSY');
+    try {
+      const { files } = await r5Source.getDiff({ kind: 'unstaged' });
+      // Unreadable untracked files are left out; a tracked one keeps git's hunks, no content.
+      expect(files.map((f) => f.path).sort()).toEqual(['a.txt', 'ok.txt']);
+      const a = files.find((f) => f.path === 'a.txt')!;
+      expect(a.hunks[0]!.lines.find((l) => l.kind === 'add')?.text).toBe('b');
+      expect(a.newContent).toBeUndefined();
+      for (const name of ['locked.txt', 'denied.txt', 'perm.txt', 'a.txt']) {
+        expect(warnings.some((w) => w.includes(name))).toBe(true);
+      }
+
+      // A file the user asked for still fails clearly; so does a non-file error in a diff.
+      await expect(r5Source.getDiff({ kind: 'file', path: 'denied.txt' })).rejects.toMatchObject({
+        code: 'EACCES',
+      });
+      fsMock.fail.set(path.join(r5, 'ok.txt'), 'EMFILE');
+      await expect(r5Source.getDiff({ kind: 'unstaged' })).rejects.toMatchObject({
+        code: 'EMFILE',
+      });
+    } finally {
+      fsMock.fail.clear();
+      rmSync(r5, { recursive: true, force: true });
+    }
+  });
+
+  it('oversized files are binary by their size, without being read (F6)', async () => {
+    const { root: r6 } = makeRepo();
+    const big = path.join(r6, 'big.txt');
+    writeFileSync(big, 'x'.repeat(2 * 1024 * 1024 + 1));
+    const r6Source = new GitCliDiffSource({ root: r6 });
+    fsMock.reads.length = 0;
+    try {
+      const { files } = await r6Source.getDiff({ kind: 'unstaged' });
+      expect(files).toEqual([{ path: 'big.txt', status: 'added', binary: true, hunks: [] }]);
+      const file = await r6Source.getDiff({ kind: 'file', path: 'big.txt' });
+      expect(file.files).toEqual([
+        { path: 'big.txt', status: 'modified', binary: true, hunks: [] },
+      ]);
+      expect(fsMock.reads).not.toContain(big);
+    } finally {
+      rmSync(r6, { recursive: true, force: true });
+    }
+  });
+
   it('rejects option-like or range base refs', async () => {
     for (const base of ['--output=x', 'main..HEAD', 'a b']) {
       await expect(source.getDiff({ kind: 'branch', base })).rejects.toSatisfy(
@@ -185,6 +278,42 @@ describe('GitCliDiffSource', () => {
     const { files } = await new GitCliDiffSource({ root: r3 }).getDiff({ kind: 'staged' });
     expect(files).toMatchObject([{ path: 'first.txt', status: 'added' }]);
     rmSync(r3, { recursive: true, force: true });
+  });
+
+  it('staged: oversized index content is binary (F7)', async () => {
+    const { root: r7, git: g7 } = makeRepo();
+    writeFileSync(path.join(r7, 'big.txt'), 'x\n'.repeat(1024 * 1024 + 1));
+    writeFileSync(path.join(r7, 'edge.txt'), 'x'.repeat(2 * 1024 * 1024));
+    writeFileSync(path.join(r7, 'small.txt'), 'small\n');
+    g7('add', '.');
+    try {
+      const { files } = await new GitCliDiffSource({ root: r7 }).getDiff({ kind: 'staged' });
+      const byPath = Object.fromEntries(files.map((f) => [f.path, f]));
+      expect(byPath['big.txt']).toMatchObject({ status: 'added', binary: true });
+      expect(byPath['big.txt']!.newContent).toBeUndefined();
+      expect(byPath['edge.txt']!.binary).toBeFalsy();
+      expect(byPath['edge.txt']!.newContent).toHaveLength(2 * 1024 * 1024);
+      expect(byPath['small.txt']).toMatchObject({ newContent: 'small\n' });
+    } finally {
+      rmSync(r7, { recursive: true, force: true });
+    }
+  });
+
+  it('staged: reads the index with a bounded number of git processes (F7)', async () => {
+    const { root: r8, git: g8 } = makeRepo();
+    for (let i = 0; i < 40; i++) writeFileSync(path.join(r8, `f${i}.txt`), `file ${i}\n`);
+    g8('add', '.');
+    Object.assign(execMock, { track: true, inFlight: 0, peak: 0 });
+    try {
+      const { files } = await new GitCliDiffSource({ root: r8 }).getDiff({ kind: 'staged' });
+      expect(files).toHaveLength(40);
+      for (const f of files) expect(f.newContent).toBe(`file ${f.path.slice(1, -4)}\n`);
+      expect(execMock.peak).toBeGreaterThan(1);
+      expect(execMock.peak).toBeLessThanOrEqual(16);
+    } finally {
+      execMock.track = false;
+      rmSync(r8, { recursive: true, force: true });
+    }
   });
 
   it('file and selection modes review working-tree content', async () => {

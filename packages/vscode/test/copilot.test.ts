@@ -1,4 +1,4 @@
-import type { ChatRequest } from '@ai-review/core';
+import { ProviderError, type ChatRequest } from '@ai-review/core';
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
 import { mapLmError, toLmMessages, toLmOptions } from '../src/providers/copilot';
@@ -25,6 +25,46 @@ suite('VsCodeLmProvider mapping', () => {
     assert.strictEqual(mapLmError(vscode.LanguageModelError.NotFound('gone')).kind, 'notFound');
     assert.strictEqual(mapLmError(new Error('Rate limit exceeded (429)')).kind, 'rateLimit');
     assert.strictEqual(mapLmError(new Error('Message exceeds token limit')).kind, 'contextTooLong');
+  });
+
+  test('other failures keep their kinds; ProviderErrors pass through', () => {
+    const notFound = mapLmError(vscode.LanguageModelError.NotFound('gone'));
+    assert.match(notFound.message, /no longer available/);
+    assert.strictEqual(mapLmError(new Error('You exceeded your quota')).kind, 'quota');
+    assert.strictEqual(mapLmError(new Error('fetch failed')).kind, 'network');
+    const unknown = mapLmError(new Error('something odd'));
+    assert.strictEqual(unknown.kind, 'unknown');
+    assert.match(unknown.message, /something odd/);
+    const own = new ProviderError('server', 'overloaded', { provider: 'copilot' });
+    assert.strictEqual(mapLmError(own), own);
+  });
+
+  test('a Blocked error about a usage limit stops the review as quota', () => {
+    for (const message of [
+      'Quota exceeded',
+      'You have reached your monthly limit of premium requests',
+      'Rate limit exceeded',
+      'Usage limit reached',
+    ]) {
+      const error = mapLmError(vscode.LanguageModelError.Blocked(message));
+      assert.strictEqual(error.kind, 'quota', message);
+      assert.match(error.message, /limit/);
+    }
+  });
+
+  test('any other Blocked error fails only its part, without blaming a usage limit', () => {
+    for (const message of [
+      'Sorry, your request was filtered by the Responsible AI Service.',
+      'Response contained content that violates the acceptable usage policy',
+      '',
+    ]) {
+      const error = mapLmError(vscode.LanguageModelError.Blocked(message));
+      assert.strictEqual(error.kind, 'blocked', message);
+      assert.doesNotMatch(error.message, /limit/);
+      assert.strictEqual(error.retryable, false);
+    }
+    const filtered = mapLmError(vscode.LanguageModelError.Blocked('filtered by content policy'));
+    assert.match(filtered.message, /filtered by content policy/);
   });
 
   test('forced tool sends only that tool in Required mode', () => {

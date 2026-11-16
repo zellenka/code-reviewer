@@ -49,9 +49,9 @@ export function createReviewTools(
     if (blocked(out)) throw new Error(`${out} can't be read: it may contain secrets.`);
     return out;
   };
-  const read = async (p: string, range?: { start: number; end: number }) => {
+  const read = async (p: string, signal: AbortSignal, range?: { start: number; end: number }) => {
     try {
-      return await ws.readFile(p, range);
+      return await ws.readFile(p, range, signal);
     } catch (err) {
       throw friendly(err, p);
     }
@@ -79,12 +79,12 @@ export function createReviewTools(
     },
     schema: z.object({ path, startLine: line.optional(), endLine: line.optional() }),
     describe: (i) => `${i.path}${i.startLine ? `:${i.startLine}-${i.endLine ?? ''}` : ''}`,
-    async run(input) {
+    async run(input, signal) {
       const p = clean(input.path);
       const start = input.startLine ?? 1;
       const end = Math.min(input.endLine ?? start + maxLines - 1, start + maxLines - 1);
       if (end < start) throw new Error('endLine is before startLine.');
-      const all = redactedLines(await read(p));
+      const all = redactedLines(await read(p, signal));
       const slice = all.slice(start - 1, end);
       if (!slice.length) return `${p} has ${all.length} line(s); nothing at ${start}.`;
       const more =
@@ -111,15 +111,19 @@ export function createReviewTools(
     },
     schema: z.object({ pattern: z.string().min(1).max(500), glob: z.string().min(1).optional() }),
     describe: (i) => (i.glob ? `in ${i.glob}` : ''),
-    async run(input) {
-      const hits = (await ws.grep(input.pattern, input.glob)).filter((h) => !blocked(h.path));
+    async run(input, signal) {
+      const hits = (await ws.grep(input.pattern, input.glob, signal)).filter(
+        (h) => !blocked(h.path),
+      );
       if (!hits.length) return 'No matches.';
       const files = new Map<string, { raw: string[]; redacted: string[] }>();
       const shown: string[] = [];
       for (const h of hits.slice(0, maxMatches)) {
+        // A failed read shows the file's hits as unchecked; a cancelled review stops here.
+        signal.throwIfAborted();
         let file = files.get(h.path);
         if (!file) {
-          const text = await read(h.path).catch(() => '');
+          const text = await read(h.path, signal).catch(() => '');
           file = { raw: splitLines(text), redacted: redactedLines(text) };
           files.set(h.path, file);
         }
@@ -152,20 +156,22 @@ export function createReviewTools(
     },
     schema: z.object({ path, line, symbol: z.string().min(1).max(200) }),
     describe: (i) => `${i.path}:${i.line}`,
-    async run(input) {
+    async run(input, signal) {
       const p = clean(input.path);
-      const text = (await read(p, { start: input.line, end: input.line })).split('\n')[0] ?? '';
+      const range = { start: input.line, end: input.line };
+      const text = (await read(p, signal, range)).split('\n')[0] ?? '';
       const col = wordIndex(text, input.symbol);
       if (col < 0) throw new Error(`"${input.symbol}" is not on line ${input.line} of ${p}.`);
-      const refs = (await ws.findReferences(p, input.line, col + 1)).filter(
+      const refs = (await ws.findReferences(p, input.line, col + 1, signal)).filter(
         (r) => !blocked(r.path),
       );
       if (!refs.length) return 'No references found.';
       const files = new Map<string, string[]>();
       const shown: string[] = [];
       for (const ref of refs.slice(0, maxMatches)) {
+        signal.throwIfAborted();
         if (!files.has(ref.path) && files.size < 20) {
-          files.set(ref.path, redactedLines(await read(ref.path).catch(() => '')));
+          files.set(ref.path, redactedLines(await read(ref.path, signal).catch(() => '')));
         }
         const lineText = files.get(ref.path)?.[ref.line - 1]?.trim() ?? '';
         shown.push(`${ref.path}:${ref.line}: ${lineText.slice(0, 300)}`);
@@ -191,9 +197,9 @@ export function createReviewTools(
     },
     schema: z.object({ path, line }),
     describe: (i) => `${i.path}:${i.line}`,
-    async run(input) {
+    async run(input, signal) {
       const p = clean(input.path);
-      const content = await read(p);
+      const content = await read(p, signal);
       let symbol = await ws.getSymbolAt(p, input.line).catch(() => null);
       if (!symbol) {
         const inner = enclosingSymbols(heuristicSymbols(content), input.line).at(-1);

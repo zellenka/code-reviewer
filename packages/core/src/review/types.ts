@@ -103,6 +103,11 @@ export interface ReviewResult {
   mode: 'single-pass' | 'agentic';
   /** Repo rules files that were applied. */
   rules?: string[];
+  /**
+   * User-facing warnings about the review itself, e.g. the change edits the settings or
+   * rules files this review was run with (it could have turned its own review down).
+   */
+  warnings?: string[];
   /** Incremental re-review (P5-4): hunks sent now vs. reviewed before, findings carried over. */
   incremental?: { newHunks: number; reusedHunks: number; carried: number };
   /** Pass as `previous` to the next review of the same scope. Missing after a cancelled or partly failed review. */

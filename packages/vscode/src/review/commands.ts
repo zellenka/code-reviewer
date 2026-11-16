@@ -335,8 +335,7 @@ export async function reviewCommand(
     }
     const message = withUnsavedNote(summarize(result, model));
     if (!args.silent) {
-      const level =
-        (result.errors.length && !result.findings.length) || unsaved.length ? 'warn' : 'info';
+      const level = needsAttention(result) || unsaved.length ? 'warn' : 'info';
       const show =
         level === 'warn' ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
       const actions = [
@@ -479,7 +478,13 @@ export function summarize(result: ReviewResult, model?: ModelInfo): string {
   let message = parts.join(' · ');
   if (result.cancelled) message = `Cancelled. ${message} (from finished parts)`;
   if (result.errors.length) message += ` · ${result.errors.length} part(s) failed`;
+  if (result.warnings?.length) message += `. ${result.warnings.join(' ')}`;
   return message;
+}
+
+/** Shown as a warning: no part gave findings because they failed, or the review warns about itself. */
+export function needsAttention(result: ReviewResult): boolean {
+  return (!!result.errors.length && !result.findings.length) || !!result.warnings?.length;
 }
 
 export function formatUsd(n: number): string {
@@ -501,6 +506,7 @@ function logResult(result: ReviewResult, logger: Logger): void {
   for (const d of result.dropped)
     logger.info(`dropped ${d.count} finding(s): ${DROP_REASON_LABELS[d.reason]}`);
   for (const e of result.errors) logger.warn(e);
+  for (const w of result.warnings ?? []) logger.warn(w);
   if (result.redactions) logger.info(`${result.redactions} secret(s) redacted before sending`);
   if (result.rules?.length) logger.info(`repo rules applied: ${result.rules.join(', ')}`);
   if (result.incremental) {

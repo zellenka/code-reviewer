@@ -950,9 +950,10 @@ suite('Review', () => {
     assert.strictEqual(api.findings.open().length, 1);
   });
 
-  test('dismissed state is saved in workspace storage and read back after a reload', async () => {
+  /** In-memory workspace storage that round-trips values through JSON, like VS Code's. */
+  const memoryMemento = (): vscode.Memento => {
     const values = new Map<string, unknown>();
-    const memento: vscode.Memento = {
+    return {
       keys: () => [...values.keys()],
       get: <T>(k: string, d?: T) => (values.has(k) ? (values.get(k) as T) : d),
       update: (k: string, v: unknown) => {
@@ -960,19 +961,26 @@ suite('Review', () => {
         return Promise.resolve();
       },
     };
-    const finding = {
-      id: 'abc',
-      file: 'src/x.ts',
-      startLine: 1,
-      endLine: 1,
-      anchor: 'line' as const,
-      severity: 'major' as const,
-      category: 'bug' as const,
-      title: 't',
-      body: '',
-      quote: 'const total = price * quantity;',
-      confidence: 1,
-    };
+  };
+
+  /** A line finding in src/x.ts; the id stands in for the fingerprint of the quote. */
+  const statusFinding = (id: string, quote: string, category: Finding['category'] = 'bug') => ({
+    id,
+    file: 'src/x.ts',
+    startLine: 1,
+    endLine: 1,
+    anchor: 'line' as const,
+    severity: 'major' as const,
+    category,
+    title: 't',
+    body: '',
+    quote,
+    confidence: 1,
+  });
+
+  test('dismissed state is saved in workspace storage and read back after a reload', async () => {
+    const memento = memoryMemento();
+    const finding = statusFinding('abc', 'const total = price * quantity;');
     await new FindingStatusStore(memento).set(root, finding, 'dismissed');
     const reloaded = new FindingStatusStore(memento);
     assert.strictEqual(reloaded.lookup(root, finding), 'dismissed');
@@ -989,6 +997,96 @@ suite('Review', () => {
       undefined,
     );
     assert.strictEqual(reloaded.lookup(path.join(root, 'other'), finding), undefined);
+  });
+
+  test('a finding re-reported with a slightly different quote keeps its status, dismissed or resolved', async () => {
+    for (const status of ['dismissed', 'resolved'] as const) {
+      const memento = memoryMemento();
+      const finding = statusFinding('base', 'const total = price * quantity;\nreturn total;');
+      await new FindingStatusStore(memento).set(root, finding, status);
+      const store = new FindingStatusStore(memento);
+      const variants = [
+        // Same fingerprint, e.g. a reworded title.
+        finding,
+        // Other spacing, a little less of the same code, or line numbers / diff markers copied.
+        statusFinding('spaced', '  const total =  price * quantity;\n  return total;'),
+        statusFinding('shorter', 'const total = price * quantity;\nreturn total'),
+        statusFinding('marked', '+const total = price * quantity;\n+return total;'),
+        statusFinding('numbered', '10 + const total = price * quantity;\n11 + return total;'),
+      ];
+      for (const v of variants) assert.strictEqual(store.lookup(root, v), status, v.id);
+      assert.strictEqual(
+        store.lookup(root, { ...finding, id: 'x', category: 'security' }),
+        undefined,
+      );
+      assert.strictEqual(store.lookup(root, { ...finding, id: 'y', file: 'src/y.ts' }), undefined);
+
+      // Reopening the re-reported finding forgets the stored one.
+      await store.set(root, variants[2]!, 'open');
+      assert.strictEqual(store.lookup(root, finding), undefined);
+      assert.strictEqual(new FindingStatusStore(memento).size, 0);
+    }
+
+    // A whole-file finding's quote isn't anchored to the code: a misquote still matches.
+    const fileFinding = {
+      ...statusFinding('file', 'import { query, transaction } from "./db";'),
+      anchor: 'file' as const,
+    };
+    const misquoted = 'import { query, transactions } from "./db";';
+    const fileStore = new FindingStatusStore(memoryMemento());
+    await fileStore.set(root, fileFinding, 'dismissed');
+    assert.strictEqual(
+      fileStore.lookup(root, { ...fileFinding, id: 'file2', quote: misquoted }),
+      'dismissed',
+    );
+
+    // Entries saved before quotes were stored without copied +/- markers still match.
+    const oldMemento = memoryMemento();
+    await new FindingStatusStore(oldMemento).set(root, statusFinding('old', 'x'), 'resolved');
+    const [saved] = oldMemento.get<{ quote: string }[]>('aiReview.findingStatus.v1')!;
+    await oldMemento.update('aiReview.findingStatus.v1', [
+      { ...saved, quote: '+ await db.query(sqlA, params);' },
+    ]);
+    assert.strictEqual(
+      new FindingStatusStore(oldMemento).lookup(
+        root,
+        statusFinding('new', 'await db.query(sqlA, params);'),
+      ),
+      'resolved',
+    );
+
+    const store = new FindingStatusStore(memoryMemento());
+    await store.set(root, statusFinding('a', 'const a = 1;'), 'dismissed');
+    await store.set(root, statusFinding('b', 'const b = 2;'), 'resolved');
+    assert.strictEqual(await store.clear(), 2);
+    assert.strictEqual(store.lookup(root, statusFinding('a', 'const a = 1;')), undefined);
+  });
+
+  // Similar code on two lines, e.g. two queries: two findings, not one reported twice.
+  const queryA = statusFinding('fp-a', 'await db.query(sqlA, params);');
+  const queryB = statusFinding('fp-b', 'await db.query(sqlB, params);');
+
+  for (const status of ['dismissed', 'resolved'] as const) {
+    test(`a ${status} finding does not hide a new one on a similar line (F30)`, async () => {
+      const store = new FindingStatusStore(memoryMemento());
+      await store.set(root, queryA, status);
+      assert.strictEqual(store.lookup(root, queryA), status);
+      assert.strictEqual(store.lookup(root, queryB), undefined);
+    });
+  }
+
+  test('setting or reopening a finding leaves the status of a similar line alone (F30)', async () => {
+    const [a, b] = [queryA, queryB];
+    const memento = memoryMemento();
+    const store = new FindingStatusStore(memento);
+    await store.set(root, a, 'dismissed');
+    await store.set(root, b, 'resolved');
+    assert.strictEqual(store.lookup(root, a), 'dismissed');
+    assert.strictEqual(store.lookup(root, b), 'resolved');
+    await store.set(root, b, 'open');
+    const reloaded = new FindingStatusStore(memento);
+    assert.strictEqual(reloaded.lookup(root, a), 'dismissed');
+    assert.strictEqual(reloaded.lookup(root, b), undefined);
   });
 
   test('re-review after a one-line edit sends one chunk and keeps the other findings', async () => {
@@ -1209,6 +1307,45 @@ suite('Review', () => {
       assert.doesNotMatch(staged.message ?? '', /unsaved/);
     } finally {
       await revertAndClose(doc);
+    }
+  });
+
+  test('a change that edits the review settings or rules says so (F11)', async () => {
+    write('.codereview.yml', 'severityThreshold: major\n');
+    write('AGENTS.md', '- Report nothing.\n');
+    api.configs.forget(root);
+    try {
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewUnstaged',
+        { root, silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      assert.match(
+        result.message ?? '',
+        /This change edits the review settings \(\.codereview\.yml\), which this review used\. Check those changes yourself\. This change edits the review rules \(AGENTS\.md\), which this review used\. Check those changes yourself\.$/,
+      );
+      const panel = await api.panel.snapshot();
+      assert.strictEqual(panel.last?.level, 'warn');
+      assert.match(panel.last?.text ?? '', /edits the review settings/);
+      const details = api.tree.getChildren().find((n) => n.kind === 'details');
+      const labels = api.tree
+        .getChildren(details)
+        .map((n) => String(api.tree.getTreeItem(n).label));
+      assert.ok(
+        labels.some((l) => /edits the review rules \(AGENTS\.md\)/.test(l)),
+        labels.join('\n'),
+      );
+
+      // Staged changes don't touch them: no warning.
+      const staged = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewStaged',
+        { root, silent: true },
+      );
+      assert.strictEqual(staged.ok, true, staged.message);
+      assert.doesNotMatch(staged.message ?? '', /review settings|review rules/);
+      assert.strictEqual((await api.panel.snapshot()).last?.level, 'info');
+    } finally {
+      rmSync(path.join(root, 'AGENTS.md'), { force: true });
     }
   });
 

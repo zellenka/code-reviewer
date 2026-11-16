@@ -242,7 +242,7 @@ function details(session: ReviewSession, all: TrackedFinding[]): Node[] {
       icon: 'shield',
     });
   }
-  for (const e of result.errors) {
+  for (const e of [...(result.warnings ?? []), ...result.errors]) {
     out.push({ kind: 'detail', label: e, icon: 'warning', tooltip: e });
   }
   if (result.cancelled)

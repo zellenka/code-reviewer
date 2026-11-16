@@ -216,7 +216,7 @@
         "aiReview.anthropic.models": {
           "type": "array",
           "default": [],
-          "markdownDescription": "Overrides or additions to the built-in Anthropic model table (limits and pricing in USD per million tokens). Entries are matched by `id`.",
+          "markdownDescription": "Overrides or additions to the built-in Anthropic model table (limits and pricing in USD per million tokens). Entries are matched by `id`. Invalid values are ignored and reported in **AI Review: Show Log**.",
           "items": {
             "type": "object",
             "required": [
@@ -230,25 +230,31 @@
                 "type": "string"
               },
               "maxInputTokens": {
-                "type": "number"
+                "type": "integer",
+                "minimum": 1
               },
               "maxOutputTokens": {
-                "type": "number"
+                "type": "integer",
+                "minimum": 1
               },
               "pricing": {
                 "type": "object",
                 "properties": {
                   "inputPerMTok": {
-                    "type": "number"
+                    "type": "number",
+                    "minimum": 0
                   },
                   "outputPerMTok": {
-                    "type": "number"
+                    "type": "number",
+                    "minimum": 0
                   },
                   "cacheReadPerMTok": {
-                    "type": "number"
+                    "type": "number",
+                    "minimum": 0
                   },
                   "cacheWritePerMTok": {
-                    "type": "number"
+                    "type": "number",
+                    "minimum": 0
                   }
                 }
               }

@@ -171,6 +171,36 @@ describe('chunker + token budget', () => {
     expect(chunkFiles(files, { maxTokens: 5000 })).toHaveLength(1);
   });
 
+  it('rejects a model whose input limit leaves no room for the diff', async () => {
+    const provider = new MockProvider({ fallback: report([]) });
+    await expect(
+      runReview(SAMPLE, {
+        provider,
+        model: { ...MODEL, maxInputTokens: 2_000, maxOutputTokens: 1_000 },
+        config: DEFAULT_CONFIG,
+      }),
+    ).rejects.toThrow(/too small an input limit/);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it.each([
+    ['NaN input limit', { maxInputTokens: Number.NaN }],
+    ['string input limit', { maxInputTokens: '200k' as unknown as number }],
+    ['NaN output limit', { maxOutputTokens: Number.NaN }],
+  ])('rejects a model with a %s instead of sending one unbounded request', async (_l, over) => {
+    const provider = new MockProvider({ fallback: report([]) });
+    await expect(
+      runReview(bigDiff(), { provider, model: { ...MODEL, ...over }, config: DEFAULT_CONFIG }),
+    ).rejects.toThrow(/invalid token limit/);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it('chunkFiles refuses a non-finite token budget', () => {
+    const files = bigDiff().files.slice(-1);
+    expect(() => chunkFiles(files, { maxTokens: Number.NaN })).toThrow(RangeError);
+    expect(() => chunkFiles(files, { maxTokens: Number.POSITIVE_INFINITY })).toThrow(RangeError);
+  });
+
   it('too many parts gives a "narrow the scope" error', async () => {
     const provider = new MockProvider({ fallback: report([]) });
     await expect(
@@ -354,6 +384,33 @@ describe('runReview', () => {
     expect(result.chunks.failed).toBe(1);
     expect(result.chunks.completed).toBe(result.chunks.total - 1);
     expect(result.errors[0]).toMatch(/too long/);
+  });
+
+  it('a blocked part fails alone and keeps the findings of the other parts', async () => {
+    const files = Array.from({ length: 3 }, (_, i) =>
+      addedFileDiff(`f${i}.ts`, 'z\n'.repeat(3000)),
+    );
+    const provider = new MockProvider({
+      script: [
+        mockError('blocked', 'filtered'),
+        report([finding({ file: 'f1.ts', quote: 'z', startLine: 2, endLine: 2 })]),
+      ],
+      fallback: report([]),
+    });
+    const result = await runReview(
+      { files },
+      {
+        provider,
+        model: { ...MODEL, maxInputTokens: 12_000 },
+        config: DEFAULT_CONFIG,
+        concurrency: 1,
+      },
+    );
+    expect(result.chunks.total).toBeGreaterThan(2);
+    expect(result.chunks.failed).toBe(1);
+    expect(result.chunks.completed).toBe(result.chunks.total - 1);
+    expect(result.errors).toEqual(['Part 1: filtered']);
+    expect(result.findings.map((f) => f.file)).toEqual(['f1.ts']);
   });
 
   it('an empty diff makes no requests', async () => {

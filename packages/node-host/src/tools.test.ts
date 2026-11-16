@@ -1,10 +1,27 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import type * as fsPromises from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createReviewTools, type AgentTool } from '@ai-review/core';
 import { FsWorkspaceTools } from './tools';
+
+// `readFile` records what it reads (absolute paths) and calls `onRead` first, so tests can
+// see which files a tool opened and cancel in the middle. Everything else is the real fs.
+const fsMock = vi.hoisted(() => ({
+  reads: [] as string[],
+  onRead: undefined as ((file: string) => void) | undefined,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof fsPromises>();
+  const readFile = async (file: unknown, ...rest: unknown[]) => {
+    fsMock.reads.push(String(file));
+    fsMock.onRead?.(String(file));
+    return (actual.readFile as (...args: unknown[]) => Promise<unknown>)(file, ...rest);
+  };
+  return { ...actual, readFile };
+});
 
 const ENV = {
   ...process.env,
@@ -225,5 +242,87 @@ describe('files ignored by git are not shown (F4)', () => {
     await expect(broken.readFile('src/app.ts')).rejects.toThrow(/git/);
     // The model is not shown git's output (it can contain absolute paths).
     await expect(broken.readFile('src/app.ts')).rejects.not.toThrow(root);
+  });
+});
+
+describe('tool calls can be cancelled and are bounded (F8)', () => {
+  let root: string;
+  const FILES = ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'];
+  const isAbort = (err: unknown) => (err as Error | undefined)?.name === 'AbortError';
+  const readsUnderRoot = () => fsMock.reads.filter((f) => f.startsWith(root));
+
+  beforeAll(() => {
+    const repo = makeRepo('air-cancel-');
+    root = repo.root;
+    for (const f of FILES) repo.write(`src/${f}`, `export const needle = '${f}';\n`);
+    // Over the read limit, by one byte.
+    repo.write('huge.txt', `HUGE_CONTENT\n${'x'.repeat(2 * 1024 * 1024 - 12)}`);
+    // Catastrophic backtracking for /^(a+)+$/.
+    repo.write('slow.txt', `${'a'.repeat(40)}!\n`);
+    repo.git('add', '.');
+    repo.git('commit', '-q', '-m', 'init');
+  });
+
+  afterAll(() => {
+    fsMock.onRead = undefined;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('grep stops walking when the signal is aborted', async () => {
+    const ws = new FsWorkspaceTools(root);
+    await ws.grep('warm-up'); // lists the git files
+    const controller = new AbortController();
+    fsMock.reads.length = 0;
+    fsMock.onRead = () => controller.abort();
+    try {
+      const err = await ws.grep('needle', undefined, controller.signal).catch((e: unknown) => e);
+      expect(isAbort(err), String(err)).toBe(true);
+    } finally {
+      fsMock.onRead = undefined;
+    }
+    expect(readsUnderRoot()).toHaveLength(1);
+
+    // Aborted before it starts: nothing is read.
+    fsMock.reads.length = 0;
+    await expect(ws.grep('needle', undefined, controller.signal)).rejects.toSatisfy(isAbort);
+    expect(readsUnderRoot()).toEqual([]);
+  });
+
+  it('grep stops a slow regex when the signal is aborted, before its timeout', async () => {
+    const ws = new FsWorkspaceTools(root, { grepTimeoutMs: 60_000 });
+    await ws.grep('warm-up');
+    const controller = new AbortController();
+    const started = Date.now();
+    setTimeout(() => controller.abort(), 200);
+    await expect(ws.grep('^(a+)+$', 'slow.txt', controller.signal)).rejects.toSatisfy(isAbort);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('readFile refuses a file over the size limit without reading it', async () => {
+    const ws = new FsWorkspaceTools(root);
+    fsMock.reads.length = 0;
+    await expect(ws.readFile('huge.txt')).rejects.toThrow(/too large/);
+    await expect(ws.readFile('huge.txt', { start: 1, end: 1 })).rejects.toThrow(/too large/);
+    expect(readsUnderRoot()).toEqual([]);
+    const tools = new Map(createReviewTools(ws).map((t) => [t.def.name, t]));
+    const tool = tools.get('read_file')! as unknown as AgentTool<unknown>;
+    const message = await tool
+      .run(tool.schema.parse({ path: 'huge.txt' }), new AbortController().signal)
+      .then(
+        () => 'no error',
+        (e: unknown) => String((e as Error).message),
+      );
+    expect(message).toMatch(/huge\.txt is too large/);
+    expect(message).not.toContain('HUGE_CONTENT');
+    expect(message).not.toContain(root);
+  });
+
+  it('readFile does not read once the signal is aborted', async () => {
+    const ws = new FsWorkspaceTools(root);
+    const controller = new AbortController();
+    controller.abort();
+    fsMock.reads.length = 0;
+    await expect(ws.readFile('src/a.ts', undefined, controller.signal)).rejects.toSatisfy(isAbort);
+    expect(readsUnderRoot()).toEqual([]);
   });
 });

@@ -7,6 +7,7 @@ import { CONFIG_SECTION, targetFor, type ProviderRegistry } from '../providers/r
 import {
   cancelReview,
   isReviewRunning,
+  needsAttention,
   onDidChangeReviewRunning,
   summarize,
   type ReviewCommandArgs,
@@ -216,7 +217,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
     else if (session) {
       last = {
         text: summarize(session.result, session.model),
-        level: session.result.errors.length && !session.result.findings.length ? 'warn' : 'info',
+        level: needsAttention(session.result) ? 'warn' : 'info',
         hasSummary: !!session.result.summary,
         open: this.deps.store.open().length,
       };
