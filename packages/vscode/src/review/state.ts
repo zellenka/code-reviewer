@@ -11,7 +11,10 @@ interface StoredEntry {
   id: string;
   file: string;
   category: string;
-  /** Whitespace-normalized quote, for the fuzzy fallback. */
+  /**
+   * Quote without copied line numbers or +/- markers, whitespace collapsed, for the
+   * fuzzy fallback. Older entries may still have the markers.
+   */
   quote: string;
   status: StoredStatus;
   /** Last change, ms since epoch; the oldest entries go first when the cap is hit. */
@@ -23,13 +26,14 @@ const STATE_KEY = 'aiReview.findingStatus.v1';
 const MAX_ENTRIES = 2_000;
 /** Longest quote kept for fuzzy matching. */
 const MAX_QUOTE = 1_000;
-/** Quote similarity at which a reworded/re-anchored finding counts as the same one. */
+/** Quote similarity at which the same code quoted a little longer/shorter is the same finding. */
 export const FUZZY_MATCH = 0.85;
 
 /**
  * Remembers which findings the user dismissed or resolved, per workspace (P5-3), so a
  * new review doesn't bring them back. Matched by fingerprint, else by same file +
- * category and a quote similarity ≥ 0.85 (the model may quote slightly differently).
+ * category and a quote of the same code (see `sameCode`: the model may quote slightly
+ * differently, but a similar line with other code is another finding).
  */
 export class FindingStatusStore {
   private entries: StoredEntry[];
@@ -52,8 +56,8 @@ export class FindingStatusStore {
     let best: { entry: StoredEntry; score: number } | undefined;
     for (const e of sameFile) {
       if (e.category !== finding.category) continue;
-      const score = similarity(e.quote, quote);
-      if (score >= FUZZY_MATCH && (!best || score > best.score)) best = { entry: e, score };
+      const score = sameCode(e.quote, finding, quote);
+      if (score !== undefined && (!best || score > best.score)) best = { entry: e, score };
     }
     return best?.entry.status;
   }
@@ -68,7 +72,7 @@ export class FindingStatusStore {
           e.root === r &&
           e.file === finding.file &&
           (e.id === finding.id ||
-            (e.category === finding.category && similarity(e.quote, quote) >= FUZZY_MATCH))
+            (e.category === finding.category && sameCode(e.quote, finding, quote) !== undefined))
         ),
     );
     if (status !== 'open') {
@@ -97,8 +101,40 @@ export class FindingStatusStore {
   }
 }
 
+/**
+ * Drops line numbers or +/- markers the model copied from the prompt (as `locateQuote`
+ * does when anchoring, which keeps them in the quote) and collapses whitespace.
+ */
 function normalizeQuote(quote: string): string {
-  return normalizeWhitespace(quote).slice(0, MAX_QUOTE);
+  let lines = quote.split(/\r\n?|\n/);
+  while (lines.length && !lines[0]!.trim()) lines.shift();
+  while (lines.length && !lines[lines.length - 1]!.trim()) lines.pop();
+  const numbered = /^\s*\d+\s+[+\- ]\s/;
+  if (lines.length && lines.every((l) => numbered.test(l))) {
+    lines = lines.map((l) => l.replace(numbered, ''));
+  } else if (lines.length && lines.every((l) => /^[+\- ]/.test(l))) {
+    lines = lines.map((l) => l.slice(1));
+  }
+  return normalizeWhitespace(lines.join('\n')).slice(0, MAX_QUOTE);
+}
+
+/**
+ * Similarity of a stored quote and a finding's (both normalized) if they quote the same
+ * code, else undefined. Same code: equal apart from whitespace, or one inside the other
+ * (the model quoted a little more or less of the same lines) and still ≥ 0.85 similar.
+ * A line finding's misquote is already replaced with the real lines when anchoring, so
+ * any other difference is other code: `query(sqlA, …)` and `query(sqlB, …)` on two
+ * lines are two findings, and so is a quoted line the user has since edited.
+ * A file finding's quote isn't anchored, so for it similarity alone counts, as before.
+ */
+function sameCode(stored: string, finding: Finding, quote: string): number | undefined {
+  const x = stored.replace(/\s+/g, '');
+  const y = quote.replace(/\s+/g, '');
+  if (finding.anchor !== 'file' && !(x && y && (x.includes(y) || y.includes(x)))) {
+    return undefined;
+  }
+  const score = similarity(x, y);
+  return score >= FUZZY_MATCH ? score : undefined;
 }
 
 function normalizeRoot(root: string): string {
