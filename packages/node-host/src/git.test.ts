@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import type * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isDiffSourceError } from '@ai-review/core';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { isDiffSourceError, noopLogger } from '@ai-review/core';
 import {
   FsWorkspaceTools,
   GitCliDiffSource,
@@ -11,6 +12,20 @@ import {
   isSafeRef,
   resolveInRepo,
 } from './index';
+
+// `readFile` records what it reads and fails with the error code set for a path (absolute),
+// so tests can lock or deny a file portably. Everything else is the real file system.
+const fsMock = vi.hoisted(() => ({ reads: [] as string[], fail: new Map<string, string>() }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof fsPromises>();
+  const readFile = async (file: unknown, ...rest: unknown[]) => {
+    fsMock.reads.push(String(file));
+    const code = fsMock.fail.get(String(file));
+    if (code) throw Object.assign(new Error(`${code}: mocked read failure`), { code });
+    return (actual.readFile as (...args: unknown[]) => Promise<unknown>)(file, ...rest);
+  };
+  return { ...actual, readFile };
+});
 
 const ENV = {
   ...process.env,
@@ -166,6 +181,66 @@ describe('GitCliDiffSource', () => {
     if (linked) expect(JSON.stringify(files)).not.toContain('outside secret');
     rmSync(r4, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('diff modes skip files that cannot be read, with a warning (F6)', async () => {
+    const { root: r5, git: g5 } = makeRepo();
+    writeFileSync(path.join(r5, 'a.txt'), 'a\n');
+    g5('add', '.');
+    g5('commit', '-q', '-m', 'a');
+    writeFileSync(path.join(r5, 'a.txt'), 'b\n');
+    for (const name of ['locked.txt', 'denied.txt', 'perm.txt', 'ok.txt']) {
+      writeFileSync(path.join(r5, name), `${name}\n`);
+    }
+    const warnings: string[] = [];
+    const logger = { ...noopLogger, warn: (m: string) => void warnings.push(m) };
+    const r5Source = new GitCliDiffSource({ root: r5, logger });
+    fsMock.fail.set(path.join(r5, 'locked.txt'), 'EBUSY');
+    fsMock.fail.set(path.join(r5, 'denied.txt'), 'EACCES');
+    fsMock.fail.set(path.join(r5, 'perm.txt'), 'EPERM');
+    fsMock.fail.set(path.join(r5, 'a.txt'), 'EBUSY');
+    try {
+      const { files } = await r5Source.getDiff({ kind: 'unstaged' });
+      // Unreadable untracked files are left out; a tracked one keeps git's hunks, no content.
+      expect(files.map((f) => f.path).sort()).toEqual(['a.txt', 'ok.txt']);
+      const a = files.find((f) => f.path === 'a.txt')!;
+      expect(a.hunks[0]!.lines.find((l) => l.kind === 'add')?.text).toBe('b');
+      expect(a.newContent).toBeUndefined();
+      for (const name of ['locked.txt', 'denied.txt', 'perm.txt', 'a.txt']) {
+        expect(warnings.some((w) => w.includes(name))).toBe(true);
+      }
+
+      // A file the user asked for still fails clearly; so does a non-file error in a diff.
+      await expect(r5Source.getDiff({ kind: 'file', path: 'denied.txt' })).rejects.toMatchObject({
+        code: 'EACCES',
+      });
+      fsMock.fail.set(path.join(r5, 'ok.txt'), 'EMFILE');
+      await expect(r5Source.getDiff({ kind: 'unstaged' })).rejects.toMatchObject({
+        code: 'EMFILE',
+      });
+    } finally {
+      fsMock.fail.clear();
+      rmSync(r5, { recursive: true, force: true });
+    }
+  });
+
+  it('oversized files are binary by their size, without being read (F6)', async () => {
+    const { root: r6 } = makeRepo();
+    const big = path.join(r6, 'big.txt');
+    writeFileSync(big, 'x'.repeat(2 * 1024 * 1024 + 1));
+    const r6Source = new GitCliDiffSource({ root: r6 });
+    fsMock.reads.length = 0;
+    try {
+      const { files } = await r6Source.getDiff({ kind: 'unstaged' });
+      expect(files).toEqual([{ path: 'big.txt', status: 'added', binary: true, hunks: [] }]);
+      const file = await r6Source.getDiff({ kind: 'file', path: 'big.txt' });
+      expect(file.files).toEqual([
+        { path: 'big.txt', status: 'modified', binary: true, hunks: [] },
+      ]);
+      expect(fsMock.reads).not.toContain(big);
+    } finally {
+      rmSync(r6, { recursive: true, force: true });
+    }
   });
 
   it('rejects option-like or range base refs', async () => {

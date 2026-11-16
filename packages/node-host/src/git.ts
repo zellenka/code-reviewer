@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { lstat, readFile } from 'node:fs/promises';
+import { lstat, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   DiffSourceError,
@@ -21,6 +21,8 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 const MAX_BUFFER = 256 * 1024 * 1024;
 /** Untracked/working-tree files larger than this are not read (treated as binary). */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+/** Read errors that mean "this file can't be read" (locked, denied, too large), not a broken host. */
+const UNREADABLE = new Set(['EACCES', 'EPERM', 'EBUSY', 'ERR_FS_FILE_TOO_LARGE']);
 
 const DIFF_FLAGS = [
   '--no-color',
@@ -241,7 +243,11 @@ export class GitCliDiffSource implements DiffSource {
       const abs = await resolveInRepo(this.root, rel);
       const unsaved = options.unsaved ? this.options.unsavedText?.(abs) : undefined;
       if (unsaved !== undefined) this.logger.info(`${rel}: reviewing the unsaved editor text`);
-      if (options.inDiff && (await lstat(abs)).isSymbolicLink()) return undefined;
+      if (unsaved === undefined) {
+        const info = await (options.inDiff ? lstat : stat)(abs);
+        if (info.isSymbolicLink()) return undefined;
+        if (info.size > MAX_FILE_BYTES) return '\0';
+      }
       const buf = unsaved !== undefined ? Buffer.from(unsaved, 'utf8') : await readFile(abs);
       if (buf.length > MAX_FILE_BYTES || buf.subarray(0, 8000).includes(0)) return '\0';
       return normalizeEol(buf.toString('utf8'));
@@ -251,6 +257,10 @@ export class GitCliDiffSource implements DiffSource {
       if ((err as { kind?: string }).kind === 'outsideRepo') {
         if (options.inDiff) return undefined;
         throw err;
+      }
+      if (options.inDiff && code !== undefined && UNREADABLE.has(code)) {
+        this.logger.warn(`${rel}: skipped, the file could not be read (${code})`);
+        return undefined;
       }
       throw err;
     }
