@@ -1,3 +1,4 @@
+import type * as childProcess from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,6 +27,23 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
   return { ...actual, readFile };
 });
+
+// `execFile` counts the `git show` calls in flight while `track` is on, so tests can see how
+// many git processes run at once. Everything else is the real `node:child_process`.
+const execMock = vi.hoisted(() => ({ track: false, inFlight: 0, peak: 0 }));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof childProcess>();
+  const execFile = (file: string, args: string[], options: object, cb: ExecCallback) => {
+    if (!execMock.track || !args.includes('show')) return actual.execFile(file, args, options, cb);
+    execMock.peak = Math.max(execMock.peak, ++execMock.inFlight);
+    return actual.execFile(file, args, options, (...result: Parameters<ExecCallback>) => {
+      execMock.inFlight--;
+      cb(...result);
+    });
+  };
+  return { ...actual, execFile };
+});
+type ExecCallback = (error: Error | null, stdout: string, stderr: string) => void;
 
 const ENV = {
   ...process.env,
@@ -260,6 +278,42 @@ describe('GitCliDiffSource', () => {
     const { files } = await new GitCliDiffSource({ root: r3 }).getDiff({ kind: 'staged' });
     expect(files).toMatchObject([{ path: 'first.txt', status: 'added' }]);
     rmSync(r3, { recursive: true, force: true });
+  });
+
+  it('staged: oversized index content is binary (F7)', async () => {
+    const { root: r7, git: g7 } = makeRepo();
+    writeFileSync(path.join(r7, 'big.txt'), 'x\n'.repeat(1024 * 1024 + 1));
+    writeFileSync(path.join(r7, 'edge.txt'), 'x'.repeat(2 * 1024 * 1024));
+    writeFileSync(path.join(r7, 'small.txt'), 'small\n');
+    g7('add', '.');
+    try {
+      const { files } = await new GitCliDiffSource({ root: r7 }).getDiff({ kind: 'staged' });
+      const byPath = Object.fromEntries(files.map((f) => [f.path, f]));
+      expect(byPath['big.txt']).toMatchObject({ status: 'added', binary: true });
+      expect(byPath['big.txt']!.newContent).toBeUndefined();
+      expect(byPath['edge.txt']!.binary).toBeFalsy();
+      expect(byPath['edge.txt']!.newContent).toHaveLength(2 * 1024 * 1024);
+      expect(byPath['small.txt']).toMatchObject({ newContent: 'small\n' });
+    } finally {
+      rmSync(r7, { recursive: true, force: true });
+    }
+  });
+
+  it('staged: reads the index with a bounded number of git processes (F7)', async () => {
+    const { root: r8, git: g8 } = makeRepo();
+    for (let i = 0; i < 40; i++) writeFileSync(path.join(r8, `f${i}.txt`), `file ${i}\n`);
+    g8('add', '.');
+    Object.assign(execMock, { track: true, inFlight: 0, peak: 0 });
+    try {
+      const { files } = await new GitCliDiffSource({ root: r8 }).getDiff({ kind: 'staged' });
+      expect(files).toHaveLength(40);
+      for (const f of files) expect(f.newContent).toBe(`file ${f.path.slice(1, -4)}\n`);
+      expect(execMock.peak).toBeGreaterThan(1);
+      expect(execMock.peak).toBeLessThanOrEqual(16);
+    } finally {
+      execMock.track = false;
+      rmSync(r8, { recursive: true, force: true });
+    }
   });
 
   it('file and selection modes review working-tree content', async () => {
