@@ -1,9 +1,11 @@
 import {
   MockProvider,
+  fingerprint,
   type ChatRequest,
   type Finding,
   type LLMProvider,
   type MockStep,
+  type ReviewSnapshot,
 } from '@ai-review/core';
 import * as assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
@@ -22,6 +24,7 @@ import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension';
 import type { ReviewCommandResult } from '../src/review/commands';
 import { FixPreviewProvider, previewFix } from '../src/review/fixes';
+import { SnapshotStore } from '../src/review/snapshots';
 import { FindingStatusStore } from '../src/review/state';
 
 const manifest = JSON.parse(
@@ -118,7 +121,17 @@ const KNOWN_BUGS = [
     quote: 'return a * b; // sel-buf',
     suggestion: 'return a / b; // sel-buf',
   },
+  {
+    // The model only sees the key redacted, so that is what it quotes.
+    file: 'src/ux-secret.ts',
+    title: 'hard-coded key',
+    quote: "const key = '[REDACTED:aws-access-key]'; // secret",
+    suggestion: 'const key = process.env.KEY; // secret',
+  },
 ];
+
+/** An AWS example key: redacted before anything is sent or stored. */
+const SECRET = 'AKIAIOSFODNN7EXAMPLE';
 
 /** When set, the stub words its findings differently (new title, shorter quote, new fingerprint). */
 let reword = false;
@@ -1087,6 +1100,128 @@ suite('Review', () => {
     const reloaded = new FindingStatusStore(memento);
     assert.strictEqual(reloaded.lookup(root, a), 'dismissed');
     assert.strictEqual(reloaded.lookup(root, b), undefined);
+  });
+
+  // ---------- Secrets in stored findings (F33) ----------
+
+  const REAL_KEY = `const key = '${SECRET}';`;
+  const REDACTED_KEY = "const key = '[REDACTED:aws-access-key]';";
+  /** A finding on a line with a secret as a review reports it: real code, redacted copy, id of that. */
+  const secretFinding = (real = REAL_KEY, redacted = REDACTED_KEY) =>
+    ({
+      ...statusFinding(fingerprint('src/x.ts', 'security', redacted), real, 'security'),
+      redactedQuote: redacted,
+    }) as Finding;
+  const storedJson = (memento: vscode.Memento, key: string) => JSON.stringify(memento.get(key));
+
+  test('a dismissed finding on a secret is stored redacted and stays dismissed (F33)', async () => {
+    const memento = memoryMemento();
+    const finding = secretFinding();
+    await new FindingStatusStore(memento).set(root, finding, 'dismissed');
+    const saved = storedJson(memento, 'aiReview.findingStatus.v1');
+    assert.ok(!saved.includes(SECRET), saved);
+    assert.ok(saved.includes('[REDACTED:aws-access-key]'), saved);
+
+    const reloaded = new FindingStatusStore(memento);
+    assert.strictEqual(reloaded.lookup(root, finding), 'dismissed');
+    // Quoted with other spacing (another id): matched fuzzily, on the redacted code.
+    const spaced = secretFinding(
+      `  const key =  '${SECRET}';`,
+      "  const key =  '[REDACTED:aws-access-key]';",
+    );
+    assert.strictEqual(reloaded.lookup(root, { ...spaced, id: 'other' }), 'dismissed');
+    // Other code on a similar line is another finding.
+    const other = secretFinding(
+      `const keys = '${SECRET}';`,
+      "const keys = '[REDACTED:aws-access-key]';",
+    );
+    assert.strictEqual(reloaded.lookup(root, other), undefined);
+  });
+
+  test('statuses saved with a secret by an older version are rewritten redacted and still match (F33)', async () => {
+    const memento = memoryMemento();
+    // What an older version stored: the real code, and an id hashed from it.
+    const oldId = fingerprint('src/x.ts', 'security', REAL_KEY);
+    await new FindingStatusStore(memento).set(
+      root,
+      statusFinding(oldId, REAL_KEY, 'security'),
+      'dismissed',
+    );
+    assert.ok(storedJson(memento, 'aiReview.findingStatus.v1').includes(SECRET));
+
+    const store = new FindingStatusStore(memento);
+    const saved = storedJson(memento, 'aiReview.findingStatus.v1');
+    assert.ok(!saved.includes(SECRET), saved);
+    assert.ok(!saved.includes(oldId), saved);
+    assert.strictEqual(store.lookup(root, secretFinding()), 'dismissed');
+    assert.strictEqual(store.size, 1);
+  });
+
+  test('snapshots saved with a secret by an older version are dropped (F33)', async () => {
+    const memento = memoryMemento();
+    const snapshot = (quote: string): ReviewSnapshot => ({
+      version: 1,
+      key: 'k',
+      hunks: {},
+      findings: [statusFinding('id', quote)],
+      findingHunks: [null],
+    });
+    const old = new SnapshotStore(memento);
+    await old.set(root, { kind: 'unstaged' }, snapshot(REAL_KEY));
+    await old.set(root, { kind: 'staged' }, snapshot('const a = 1;'));
+    await old.set(
+      root,
+      { kind: 'branch', base: 'main' },
+      {
+        ...snapshot(REDACTED_KEY),
+        findings: [secretFinding(REDACTED_KEY)],
+      },
+    );
+
+    const reloaded = new SnapshotStore(memento);
+    assert.strictEqual(reloaded.get(root, { kind: 'unstaged' }), undefined);
+    assert.ok(reloaded.get(root, { kind: 'staged' }));
+    assert.ok(reloaded.get(root, { kind: 'branch', base: 'main' }));
+    const saved = storedJson(memento, 'aiReview.reviewSnapshots.v1');
+    assert.ok(!saved.includes(SECRET), saved);
+  });
+
+  test('a dismissed finding on a secret stays dismissed through incremental and full re-reviews (F33)', async () => {
+    const rel = 'src/ux-secret.ts';
+    try {
+      const key = await reviewOne(rel, `// keys\n\nconst key = '${SECRET}'; // secret\n`);
+      // In memory the finding has the real code: it is placed and fixed by it.
+      assert.ok(api.findings.get(key)!.quote.includes(SECRET));
+      await vscode.commands.executeCommand('aiReview.dismissFinding', key);
+      const stored = api.snapshots.get(root, { kind: 'file', path: rel });
+      assert.ok(stored);
+      assert.ok(!JSON.stringify(stored).includes(SECRET), JSON.stringify(stored));
+
+      const review = () =>
+        vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+          root,
+          path: rel,
+          silent: true,
+        });
+      // Nothing changed: carried over from the snapshot, with the real code again.
+      const before = stub.requests.length;
+      let result = await review();
+      assert.strictEqual(result.result?.incremental?.carried, 1);
+      assert.strictEqual(stub.requests.slice(before).filter((r) => r.tools).length, 0);
+      assert.ok(result.findings?.[0]?.quote.includes(SECRET));
+      assert.strictEqual(api.findings.all()[0]!.status, 'dismissed');
+      assert.strictEqual(api.findings.open().length, 0);
+
+      // Clear Findings starts over: reviewed again, still dismissed.
+      await vscode.commands.executeCommand('aiReview.clearFindings');
+      result = await review();
+      assert.strictEqual(result.result?.incremental, undefined);
+      assert.strictEqual(result.findings?.length, 1);
+      assert.strictEqual(api.findings.all()[0]!.status, 'dismissed');
+      assert.strictEqual(api.findings.open().length, 0);
+    } finally {
+      rmSync(path.join(root, rel), { force: true });
+    }
   });
 
   test('re-review after a one-line edit sends one chunk and keeps the other findings', async () => {

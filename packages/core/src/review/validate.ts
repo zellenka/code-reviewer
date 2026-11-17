@@ -6,7 +6,10 @@ import { locateQuote, normalizeWhitespace, similarity } from './anchor';
 import { REDACTED_MARK } from './redact';
 import type { DropReason, Finding, RawFinding } from './types';
 
-/** sha1(file + "\n" + category + "\n" + normalize(quote)). Title is not part of it. */
+/**
+ * sha1(file + "\n" + category + "\n" + normalize(quote)). Title is not part of it.
+ * A quote with secrets in it is hashed in its redacted form (`Finding.redactedQuote`).
+ */
 export function fingerprint(file: string, category: string, quote: string): string {
   return createHash('sha1')
     .update(`${file}\n${category}\n${normalizeWhitespace(quote)}`)
@@ -99,14 +102,17 @@ export function validateFindings(raw: RawFinding[], options: ValidateOptions): V
     }
 
     // Quotes with redaction marks would never match the real file: use the real lines.
+    // The redacted lines are kept beside them for what is stored, and the id hashes those.
     let suggestion = r.suggestion;
+    let redactedQuote: string | undefined;
     if (quote.includes(REDACTED_MARK) && ctx.originalLines && anchor === 'line') {
+      redactedQuote = linesText(ctx.lines, startLine, endLine);
       quote = linesText(ctx.originalLines, startLine, endLine);
     }
     if (suggestion?.includes(REDACTED_MARK)) suggestion = undefined;
 
     const finding: Finding = {
-      id: fingerprint(path, r.category, quote),
+      id: fingerprint(path, r.category, redactedQuote ?? quote),
       file: path,
       startLine,
       endLine,
@@ -119,6 +125,7 @@ export function validateFindings(raw: RawFinding[], options: ValidateOptions): V
       confidence: r.confidence,
     };
     if (suggestion !== undefined && anchor === 'line') finding.suggestion = suggestion;
+    if (redactedQuote !== undefined) finding.redactedQuote = redactedQuote;
     kept.push(finding);
   }
 
@@ -151,7 +158,8 @@ function dedupe(findings: Finding[], onDrop: () => void): Finding[] {
 }
 
 function sameIssue(a: Finding, b: Finding): boolean {
-  if (a.id === b.id) return true;
+  // The same id with other code: two secrets whose lines look the same once redacted.
+  if (a.id === b.id && normalizeWhitespace(a.quote) === normalizeWhitespace(b.quote)) return true;
   if (a.file !== b.file || a.category !== b.category) return false;
   if (a.anchor !== 'line' || b.anchor !== 'line') return false;
   if (a.startLine > b.endLine || b.startLine > a.endLine) return false;

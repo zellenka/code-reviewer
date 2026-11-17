@@ -2,13 +2,16 @@ import { createHash } from 'node:crypto';
 import type { ReviewConfig } from '../config/schema';
 import type { FileDiff, Hunk, UnifiedDiff } from '../diff/types';
 import { locateQuote } from './anchor';
+import { redactFiles, type RedactOptions } from './redact';
 import type { RepoRules } from './rules';
 import type { Finding } from './types';
 import { newSideLines } from './validate';
 
 /**
  * What a finished review remembers for the next one over the same scope (P5-4):
- * which hunks were reviewed and what was found. Kept by the host.
+ * which hunks were reviewed and what was found. Kept by the host, so it holds no
+ * secrets: hunks are hashed as redacted (as sent to the model), and a finding with a
+ * `redactedQuote` has that as its `quote` too (the real lines come back when carried).
  */
 export interface ReviewSnapshot {
   version: 1;
@@ -34,7 +37,10 @@ export interface IncrementalPlan {
   newHunks: number;
 }
 
-/** A hunk's identity: its path and lines, without line numbers (edits above it don't change it). */
+/**
+ * A hunk's identity: its path and lines, without line numbers (edits above it don't change
+ * it). Pass the redacted hunk: the hash of a line with a short secret could be guessed back.
+ */
 export function hunkHash(path: string, hunk: Hunk): string {
   const h = createHash('sha1').update(path);
   for (const line of hunk.lines) h.update(`\n${line.kind[0]}${line.text}`);
@@ -76,7 +82,10 @@ function hunkRange(h: Hunk): { start: number; end: number } {
   return { start: h.newStart, end: h.newStart + Math.max(h.newLines, 1) - 1 };
 }
 
-/** What the next review of the same scope builds on. `files` = the whole reviewed diff. */
+/**
+ * What the next review of the same scope builds on. `files` = the whole reviewed diff,
+ * redacted (as sent to the model).
+ */
 export function createSnapshot(
   key: string,
   files: readonly FileDiff[],
@@ -97,7 +106,10 @@ export function createSnapshot(
     version: 1,
     key,
     hunks: diffHunkHashes(files),
-    findings: [...findings],
+    // Only the redacted lines are stored; `planIncremental` restores the real ones.
+    findings: findings.map((f) =>
+      f.redactedQuote === undefined ? { ...f } : { ...f, quote: f.redactedQuote },
+    ),
     findingHunks,
     ...(summary ? { summary } : {}),
   };
@@ -107,9 +119,15 @@ export function createSnapshot(
  * Splits a diff into what still needs a review and what was reviewed before.
  * A previous finding is carried over only with its own hunk: when that hunk is
  * unchanged and the quote is found in it (exactly or up to whitespace). Whole-file
- * findings are carried when nothing in the file changed.
+ * findings are carried when nothing in the file changed. Hunks are compared redacted
+ * with `redact` (as `createSnapshot` stored them); a finding stored with its redacted
+ * quote gets the real lines back.
  */
-export function planIncremental(diff: UnifiedDiff, previous: ReviewSnapshot): IncrementalPlan {
+export function planIncremental(
+  diff: UnifiedDiff,
+  previous: ReviewSnapshot,
+  redact: RedactOptions = {},
+): IncrementalPlan {
   const files: FileDiff[] = [];
   const carried: Finding[] = [];
   let reusedHunks = 0;
@@ -121,12 +139,14 @@ export function planIncremental(diff: UnifiedDiff, previous: ReviewSnapshot): In
     byFile.set(finding.file, list);
   });
 
-  for (const file of diff.files) {
+  const redacted = redactFiles(diff.files, redact).files;
+  for (const [fileIndex, file] of diff.files.entries()) {
+    const safe = redacted[fileIndex]!;
     const known = new Set(previous.hunks[file.path] ?? []);
     const reused: { hunk: Hunk; hash: string }[] = [];
     const fresh: Hunk[] = [];
-    for (const hunk of file.hunks) {
-      const hash = hunkHash(file.path, hunk);
+    for (const [i, hunk] of file.hunks.entries()) {
+      const hash = hunkHash(file.path, safe.hunks[i]!);
       if (known.has(hash)) reused.push({ hunk, hash });
       else fresh.push(hunk);
     }
@@ -138,6 +158,7 @@ export function planIncremental(diff: UnifiedDiff, previous: ReviewSnapshot): In
     const findings = byFile.get(file.path);
     if (!findings?.length || !reused.length) continue;
     const lines = newSideLines(file);
+    const safeLines = newSideLines(safe);
     for (const { finding: f, hunk } of findings) {
       if (f.anchor === 'file') {
         if (!fresh.length) carried.push({ ...f });
@@ -151,13 +172,26 @@ export function planIncremental(diff: UnifiedDiff, previous: ReviewSnapshot): In
             Math.abs(a.hunk.newStart - f.startLine) - Math.abs(b.hunk.newStart - f.startLine),
         )[0];
       if (!own) continue;
-      const match = locateQuote(lines, f.quote, {
-        nearLine: f.startLine,
-        searchRange: hunkRange(own.hunk),
-        fuzzyRanges: [],
-      });
+      const match = locateQuote(
+        f.redactedQuote === undefined ? lines : safeLines,
+        f.redactedQuote ?? f.quote,
+        {
+          nearLine: f.startLine,
+          searchRange: hunkRange(own.hunk),
+          fuzzyRanges: [],
+        },
+      );
       if (!match || match.method === 'fuzzy') continue;
-      carried.push({ ...f, startLine: match.startLine, endLine: match.endLine });
+      const { startLine, endLine } = match;
+      if (f.redactedQuote === undefined) carried.push({ ...f, startLine, endLine });
+      else {
+        // Stored redacted: the real code of the same lines (as `validateFindings` does).
+        const quote = lines
+          .slice(startLine - 1, endLine)
+          .map((l) => l ?? '')
+          .join('\n');
+        carried.push({ ...f, startLine, endLine, quote });
+      }
     }
   }
   return { diff: { files }, carried, reusedHunks, newHunks };

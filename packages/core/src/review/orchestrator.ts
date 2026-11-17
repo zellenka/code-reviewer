@@ -13,6 +13,7 @@ import type {
   Usage,
 } from '../provider/types';
 import { addUsage, emptyUsage, estimateCostUsd, estimateTokens } from '../provider/usage';
+import { normalizeWhitespace } from './anchor';
 import { chunkFiles, renderChunk, type Chunk } from './chunker';
 import { buildFileContext, changedSymbols, renderChangedSymbols } from './context';
 import { compileGlobs, filterFiles } from './filter';
@@ -23,7 +24,7 @@ import { reviewChunk } from './reviewer';
 import { renderRules, reviewSettingsWarnings, type RepoRules } from './rules';
 import { buildSummarySystemPrompt, summarizeReview } from './summarize';
 import type { SymbolIndex } from './symbols';
-import type { DropReason, RawFinding, ReviewResult, SkippedFile } from './types';
+import type { DropReason, Finding, RawFinding, ReviewResult, SkippedFile } from './types';
 import {
   createSnapshot,
   planIncremental,
@@ -155,6 +156,10 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
     const { files, redacted, chunks, outputTokens, mode } = prepared;
     // Incremental: report on the whole diff, even the files that needed no new requests.
     const all = plan ? filterFiles(diff.files, config.ignore) : undefined;
+    // The whole diff as sent to the model (for the summary and the snapshot).
+    const allRedacted = all
+      ? redactFiles(all.files, { highEntropy: options.redactHighEntropy ?? false }).files
+      : redacted.files;
     const skipped = all?.skipped ?? prepared.skipped;
     if (plan) {
       logger.info(
@@ -344,9 +349,11 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
       );
     }
     if (plan) {
-      // A new finding with the same fingerprint replaces the carried one.
-      const ids = new Set(result.findings.map((f) => f.id));
-      const carried = plan.carried.filter((f) => !ids.has(f.id));
+      // A new finding with the same fingerprint replaces the carried one, unless its real
+      // code differs (two secrets that look the same once redacted).
+      const sameKey = (f: Finding) => `${f.id}\n${normalizeWhitespace(f.quote)}`;
+      const ids = new Set(result.findings.map(sameKey));
+      const carried = plan.carried.filter((f) => !ids.has(sameKey(f)));
       result.findings = [...result.findings, ...carried].sort(
         (a, b) =>
           a.file.localeCompare(b.file) || a.startLine - b.startLine || a.endLine - b.endLine,
@@ -383,9 +390,7 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
           model,
           config,
           // Incremental: summarize the whole change, not just the new hunks.
-          files: all
-            ? redactFiles(all.files, { highEntropy: options.redactHighEntropy ?? false }).files
-            : redacted.files,
+          files: allRedacted,
           skipped,
           findings: result.findings,
           signal: controller.signal,
@@ -403,7 +408,7 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
     }
     // Only a complete review may be built on: otherwise the next one starts over.
     if (!result.cancelled && result.chunks.failed === 0) {
-      result.snapshot = createSnapshot(key, all?.files ?? files, result.findings, result.summary);
+      result.snapshot = createSnapshot(key, allRedacted, result.findings, result.summary);
     }
     return result;
   } finally {
@@ -501,7 +506,12 @@ function planReview(
   }
   // Ignored files are never reviewed, so they are never "new" either.
   const reviewable = { files: filterFiles(diff.files, options.config.ignore).files };
-  return { key, plan: planIncremental(reviewable, options.previous) };
+  return {
+    key,
+    plan: planIncremental(reviewable, options.previous, {
+      highEntropy: options.redactHighEntropy ?? false,
+    }),
+  };
 }
 
 /**

@@ -3,7 +3,10 @@ import type { Usage } from '../provider/types';
 import type { ReviewSnapshot } from './incremental';
 
 export interface Finding {
-  /** Fingerprint: sha1(file + "\n" + category + "\n" + normalize(quote)). */
+  /**
+   * Fingerprint: sha1(file + "\n" + category + "\n" + normalize(quote)), of
+   * `redactedQuote` when there is one (a hash of a secret could be guessed back).
+   */
   id: string;
   file: string;
   /** 1-based, inclusive, new side. */
@@ -18,6 +21,12 @@ export interface Finding {
   body: string;
   /** Exact new-side code the finding refers to; may be multi-line. */
   quote: string;
+  /**
+   * The same lines with secrets redacted, as the model saw them; set when the model
+   * quoted redacted code and `quote` holds the real lines. This, never `quote`, is what
+   * gets stored (snapshots, statuses).
+   */
+  redactedQuote?: string;
   /** Replacement code for `quote`. */
   suggestion?: string;
   /** 0..1 */

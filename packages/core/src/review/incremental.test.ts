@@ -3,9 +3,10 @@ import { DEFAULT_CONFIG } from '../config/schema';
 import { parseUnifiedDiff } from '../diff/parse';
 import { MockProvider, mockToolCall, type MockStep } from '../provider/mock';
 import type { ChatRequest, ModelInfo } from '../provider/types';
-import { hunkHash, planIncremental } from './incremental';
+import { hunkHash, planIncremental, type ReviewSnapshot } from './incremental';
 import { REPORT_TOOL_NAME } from './output';
 import { estimateReview, runReview } from './orchestrator';
+import { fingerprint } from './validate';
 
 const MODEL: ModelInfo = {
   id: 'm',
@@ -289,5 +290,83 @@ describe('incremental re-review', () => {
     const r = await runReview(first, { provider, model: MODEL, config: DEFAULT_CONFIG });
     expect(r.chunks.failed).toBe(1);
     expect(r.snapshot).toBeUndefined();
+  });
+});
+
+describe('incremental re-review of findings on redacted secrets (F33)', () => {
+  const KEY = 'AKIAIOSFODNN7EXAMPLE';
+  const withKey = (key: string, other = 'bad a1') =>
+    diffOf({
+      'src/k.ts': [
+        [1, 'old k', `bad key = "${key}"`],
+        [20, 'old a', other],
+      ],
+    });
+  /** A snapshot as the host keeps it: written to storage as JSON and read back. */
+  const stored = (snapshot: unknown) => JSON.parse(JSON.stringify(snapshot)) as ReviewSnapshot;
+
+  it('keeps the secret and hashes of it out of the snapshot', async () => {
+    const diff = withKey(KEY);
+    const r1 = await runReview(diff, {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+    });
+    const secret = r1.findings.find((f) => f.startLine === 2)!;
+    expect(secret.quote).toBe(`bad key = "${KEY}"`);
+    const json = JSON.stringify(r1.snapshot);
+    expect(json).not.toContain(KEY);
+    expect(json).not.toContain(fingerprint('src/k.ts', 'bug', secret.quote));
+    expect(json).not.toContain(hunkHash('src/k.ts', diff.files[0]!.hunks[0]!));
+    // The other hunk has no secret: same hash as before, so older snapshots still match.
+    expect(r1.snapshot!.hunks['src/k.ts']).toContain(
+      hunkHash('src/k.ts', diff.files[0]!.hunks[1]!),
+    );
+  });
+
+  it('carries the finding over with its real code, from a stored snapshot', async () => {
+    const r1 = await runReview(withKey(KEY), {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+    });
+    const p2 = new MockProvider({ fallback: oracle });
+    const r2 = await runReview(withKey(KEY), {
+      provider: p2,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      previous: stored(r1.snapshot),
+    });
+    expect(p2.requests).toHaveLength(0);
+    expect(r2.incremental).toEqual({ newHunks: 0, reusedHunks: 2, carried: 2 });
+    expect(r2.findings).toEqual(r1.findings);
+    expect(JSON.stringify(r2.snapshot)).not.toContain(KEY);
+
+    // Only the other hunk changed: the secret finding is still carried, the new one sent.
+    const p3 = new MockProvider({ fallback: oracle });
+    const r3 = await runReview(withKey(KEY, 'bad a1 edited'), {
+      provider: p3,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      previous: stored(r2.snapshot),
+    });
+    expect(sentText(p3)).not.toContain('bad key');
+    expect(r3.findings.map((f) => f.quote)).toEqual([`bad key = "${KEY}"`, 'bad a1 edited']);
+  });
+
+  it('a new finding with the same redacted code on another line does not replace a carried one', async () => {
+    const r1 = await runReview(withKey(KEY), {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+    });
+    const other = 'AKIAI44QH8DHBEXAMPLE';
+    const r2 = await runReview(withKey(KEY, `bad key = "${other}"`), {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      previous: stored(r1.snapshot),
+    });
+    expect(r2.findings.map((f) => f.quote)).toEqual([`bad key = "${KEY}"`, `bad key = "${other}"`]);
   });
 });
