@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkspaceTools } from '../diff/types';
-import type { AgentTool } from './loop';
+import { MockProvider, mockToolCall } from '../provider/mock';
+import { runAgentLoop, type AgentTool } from './loop';
 import { createReviewTools, type ReviewToolsOptions } from './tools';
 
 const FILES: Record<string, string> = {
@@ -346,5 +347,157 @@ describe('private key blocks in parts of a file', () => {
     expect(out.split('\n')[0]).toBe(`wide.ts:1: ${wide.slice(0, 500)}`);
     expect(out.split('\n')).toHaveLength(6);
     expect(reads.sort()).toEqual(['src/cart.ts', 'src/keys.ts', 'src/price.ts', 'wide.ts']);
+  });
+});
+
+// Error text goes back to the model: it must not show where the repo lives on disk.
+describe('tool errors (F5)', () => {
+  const ROOT = 'C:\\Users\\Jane Doe\\work\\repo';
+  const FILE = `${ROOT}\\src\\x.ts`;
+  const fsError = (code: string, syscall: string, abs: string) =>
+    Object.assign(new Error(`${code}: some reason, ${syscall} '${abs}'`), { code, syscall });
+  /** Every tool's error message, for a host whose calls throw `err`. */
+  const errorsOf = async (host: WorkspaceTools) => {
+    const run = toolsOn(host);
+    const settle = (p: Promise<string>) =>
+      p.then(
+        (ok) => `resolved: ${ok}`,
+        (err: unknown) => (err instanceof Error ? err.message : String(err)),
+      );
+    return {
+      read_file: await settle(run('read_file', { path: 'src/x.ts' })),
+      get_symbol: await settle(run('get_symbol', { path: 'src/x.ts', line: 1 })),
+      find_references: await settle(
+        run('find_references', { path: 'src/price.ts', line: 1, symbol: 'formatPrice' }),
+      ),
+      search_code: await settle(run('search_code', { pattern: 'formatPrice' })),
+    };
+  };
+  const throwing = (err: () => unknown, root?: string): WorkspaceTools => ({
+    ...ws,
+    ...(root ? { root } : {}),
+    readFile: async (p, range) => {
+      if (p === 'src/price.ts') return ws.readFile(p, range);
+      throw err();
+    },
+    grep: async () => {
+      throw err();
+    },
+    findReferences: async () => {
+      throw err();
+    },
+  });
+
+  it('names the repo-relative path and the code of any fs error', async () => {
+    for (const code of ['EBUSY', 'EACCES', 'EPERM', 'EMFILE']) {
+      const errors = await errorsOf(throwing(() => fsError(code, 'open', FILE), ROOT));
+      for (const message of Object.values(errors)) {
+        expect(message).not.toMatch(/Users|Jane|C:/);
+        expect(message).toContain(`(${code})`);
+      }
+      expect(errors.read_file).toBe(`src/x.ts can't be read (${code}).`);
+      expect(errors.get_symbol).toBe(`src/x.ts can't be read (${code}).`);
+      expect(errors.find_references).toContain('src/price.ts');
+    }
+  });
+
+  it('hides fs paths also when the host does not say where the repo is', async () => {
+    const errors = await errorsOf(
+      throwing(() => fsError('EACCES', 'scandir', '/home/jane/work/repo/private')),
+    );
+    for (const message of Object.values(errors)) {
+      expect(message).not.toMatch(/home|jane/);
+      expect(message).toContain('(EACCES)');
+    }
+  });
+
+  it('removes the repo root, in any spelling, from other errors', async () => {
+    const spellings = [
+      FILE,
+      `${ROOT.replace(/\\/g, '/')}/src/x.ts`,
+      `${ROOT.toLowerCase()}\\src\\x.ts`,
+      'C:/Users/Jane Doe/work/repo\\src/x.ts',
+    ];
+    for (const abs of spellings) {
+      const errors = await errorsOf(throwing(() => new Error(`Something failed for ${abs}`), ROOT));
+      for (const message of Object.values(errors)) {
+        expect(message).not.toMatch(/Users|Jane|work|C:/i);
+        expect(message).toMatch(/^Something failed for src[\\/]x\.ts$/);
+      }
+    }
+    const posix = await errorsOf(
+      throwing(
+        () => new Error('git failed in /home/jane/repo: see /home/jane/repo/src/x.ts'),
+        '/home/jane/repo',
+      ),
+    );
+    for (const message of Object.values(posix)) {
+      expect(message).toBe('git failed in .: see src/x.ts');
+    }
+  });
+
+  it('hides other absolute paths in errors', async () => {
+    const paths = [
+      "'C:\\Users\\Jane Doe\\AppData\\Local\\tool.exe'",
+      'C:\\Users\\jane\\AppData\\x.json',
+      '\\\\server\\share\\jane\\x',
+      '/home/jane/.cache/x',
+      'file:///c%3A/Users/jane/x.ts',
+      '"/Users/jane/My Projects/x"',
+    ];
+    for (const abs of paths) {
+      const errors = await errorsOf(throwing(() => new Error(`spawn failed: ${abs} (x)`), ROOT));
+      for (const message of Object.values(errors)) {
+        expect(message).not.toMatch(/Users|jane|home|server|cache|AppData|Projects/i);
+        expect(message).toMatch(/^spawn failed: .*\(x\)$/);
+      }
+    }
+  });
+
+  it('keeps messages without paths as they are', async () => {
+    const message = 'The search pattern is too slow (it backtracks a lot).';
+    const errors = await errorsOf(throwing(() => new Error(message), ROOT));
+    expect(Object.values(errors)).toEqual([message, message, message, message]);
+    await expect(
+      toolsOn(throwing(() => fsError('EISDIR', 'read', FILE)))('read_file', {
+        path: 'src/x.ts',
+      }),
+    ).rejects.toThrow(/^src\/x\.ts is a directory\.$/);
+    await expect(call('read_file', { path: 'src/../../x.ts' })).rejects.toThrow(
+      'Path is outside the repository: src/../../x.ts',
+    );
+  });
+
+  it('sends the scrubbed text to the model', async () => {
+    const provider = new MockProvider({
+      script: [
+        mockToolCall('read_file', { path: 'src/x.ts' }, { id: 'c1' }),
+        mockToolCall('done', {}),
+      ],
+    });
+    await runAgentLoop({
+      provider,
+      model: {
+        id: 'm',
+        name: 'M',
+        vendor: 'mock',
+        maxInputTokens: 100_000,
+        maxOutputTokens: 4_000,
+        supportsTools: true,
+      },
+      system: [{ text: 'sys' }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      tools: createReviewTools(throwing(() => fsError('EBUSY', 'open', FILE), ROOT)),
+      finalTool: { name: 'done', description: 'finish', inputSchema: { type: 'object' } },
+      checkFinal: () => ({ ok: true }),
+      maxOutputTokens: 1000,
+      signal: new AbortController().signal,
+    });
+    const result = provider.requests[1]!.messages.at(-1)!.content[0];
+    expect(result).toMatchObject({
+      type: 'tool_result',
+      isError: true,
+      content: "Error: src/x.ts can't be read (EBUSY).",
+    });
   });
 });

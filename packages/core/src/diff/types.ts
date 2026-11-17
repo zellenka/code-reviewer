@@ -50,6 +50,11 @@ export interface DiffSource {
  * early (rejects with its abort reason) when the review is cancelled.
  */
 export interface WorkspaceTools {
+  /**
+   * Absolute path of the repo root, if the host has one. Agent tools remove it (in any
+   * spelling) from error messages before the model sees them.
+   */
+  readonly root?: string;
   readFile(
     path: string,
     range?: { start: number; end: number },
