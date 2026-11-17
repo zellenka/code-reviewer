@@ -237,10 +237,10 @@ function resolveFile(
   reported: string,
   contexts: Map<string, FileContext>,
 ): FileContext | undefined {
-  const path = toPosixPath(reported.trim())
-    .replace(/^(?:a|b)\//, '')
-    .replace(/^\/+/, '');
-  const direct = contexts.get(path) ?? contexts.get(reported);
+  const exact = toPosixPath(reported.trim()).replace(/^\/+/, '');
+  // `a/x.ts` may be a real path, so a git `a/`/`b/` prefix is only stripped if it isn't.
+  const path = exact.replace(/^(?:a|b)\//, '').replace(/^\/+/, '');
+  const direct = contexts.get(exact) ?? contexts.get(path) ?? contexts.get(reported);
   if (direct) return direct;
   const lower = path.toLowerCase();
   const matches = [...contexts.values()].filter((c) => {
