@@ -48,9 +48,12 @@ export interface ReviewCommandArgs {
   startLine?: number;
   endLine?: number;
   base?: string;
-  /** No notifications (tests). */
+  /** No notifications. Tests only: dropped outside `ExtensionMode.Test` (see `trustedReviewArgs`). */
   silent?: boolean;
-  /** Skip the cost confirmation (tests). Silent runs otherwise stop where it would be asked. */
+  /**
+   * Skip the cost confirmation. Tests only, like `silent`. Silent runs otherwise stop where
+   * it would be asked.
+   */
   confirmCost?: boolean;
 }
 

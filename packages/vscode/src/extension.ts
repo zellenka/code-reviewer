@@ -6,6 +6,7 @@ import { AnthropicKeyStore, clearApiKeyCommand, setApiKeyCommand } from './provi
 import { VsCodeLmProvider } from './providers/copilot';
 import { ModelStatusBar, selectModelCommand } from './providers/picker';
 import { CONFIG_SECTION, ProviderRegistry, type Selection } from './providers/registry';
+import { trustedReviewArgs } from './review/args';
 import {
   cancelReview,
   reviewCommand,
@@ -137,6 +138,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     ...registerFindingCommands({ store, threads, previews }),
   );
   const deps = { registry, repos, configs, store, logger, snapshots };
+  // Every review starts here (menus, keybindings, the panel's Run Review), so test-only
+  // options are dropped here outside tests.
+  const testMode = context.extensionMode === vscode.ExtensionMode.Test;
   const reviewCommands: [string, ReviewKind][] = [
     ['aiReview.reviewStaged', 'staged'],
     ['aiReview.reviewUnstaged', 'unstaged'],
@@ -151,7 +155,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         reviewCommand(
           kind,
           deps,
-          isArgs(arg) ? arg : scmRoot(arg) ? { root: scmRoot(arg)! } : {},
+          isArgs(arg)
+            ? trustedReviewArgs(arg, testMode)
+            : scmRoot(arg)
+              ? { root: scmRoot(arg)! }
+              : {},
           arg instanceof vscode.Uri ? arg : undefined,
         ),
       ),
