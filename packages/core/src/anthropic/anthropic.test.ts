@@ -64,6 +64,17 @@ describe('mapAnthropicError', () => {
     ).toBe(6000);
   });
 
+  it('keeps odd retry-after values sane', () => {
+    const parse = (value: string) => parseRetryAfter(new Headers({ 'retry-after': value }), 4_000);
+    expect(parse('-5')).toBe(0);
+    expect(parse('0')).toBe(0);
+    expect(parse(new Date(1_000).toUTCString())).toBe(0);
+    expect(parse('soon')).toBeUndefined();
+    expect(parse('NaN')).toBeUndefined();
+    expect(parse('Infinity')).toBeUndefined();
+    expect(parseRetryAfter(new Headers({ 'retry-after-ms': '0', 'retry-after': '2' }))).toBe(2000);
+  });
+
   it('maps mid-stream errors (no status) by type', () => {
     const err = new APIError(
       undefined,
