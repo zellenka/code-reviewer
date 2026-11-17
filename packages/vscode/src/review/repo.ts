@@ -1,5 +1,11 @@
 import { DiffSourceError, toPosixPath, type Logger } from '@ai-review/core';
-import { GitCliDiffSource, createGitRunner, findRepoRoot, pathKey } from '@ai-review/node-host';
+import {
+  GitCliDiffSource,
+  createGitRunner,
+  findRepoRoot,
+  isInside,
+  pathKey,
+} from '@ai-review/node-host';
 import { stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -164,12 +170,6 @@ export function unsavedFiles(root: string): string[] {
 export function relativeToRepo(root: string, fsPath: string): string | undefined {
   if (!isInside(root, fsPath)) return undefined;
   return toPosixPath(path.relative(root, fsPath));
-}
-
-function isInside(root: string, target: string): boolean {
-  const ci = process.platform === 'win32' || process.platform === 'darwin';
-  const rel = path.relative(ci ? root.toLowerCase() : root, ci ? target.toLowerCase() : target);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
 async function isDirectory(p: string): Promise<boolean> {
