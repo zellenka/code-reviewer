@@ -491,6 +491,71 @@ describe('redaction patterns (characterization)', () => {
     }
   });
 
+  it('quoted secret: keeps any name around the keyword, several on one line', () => {
+    const quoted: [string, string, number][] = [
+      ['myapp.db-password.v2 = "hunter2hunter2"', 'myapp.db-password.v2 = "[REDACTED:secret]"', 1],
+      ['x="y" password="hunter2hunter2"', 'x="y" password="[REDACTED:secret]"', 1],
+      [
+        'a.password="hunter2hunter2", b.token="abcdefgh12345"',
+        'a.password="[REDACTED:secret]", b.token="[REDACTED:secret]"',
+        2,
+      ],
+      ['{"API_KEY" : "abcdefgh12345"}', '{"API_KEY" : "[REDACTED:secret]"}', 1],
+      ['user.tokenValue.x=`abcdefgh12345`', 'user.tokenValue.x=`[REDACTED:secret]`', 1],
+    ];
+    for (const [input, expected, n] of quoted) {
+      expect(redactText(input)).toEqual({ text: expected, count: n });
+    }
+  });
+
+  it('connection-string password: schemes, prefixes and passwords with : and /', () => {
+    const urls: [string, string, number][] = [
+      [
+        'jdbc:postgresql://admin:s3cretPass@db/x',
+        'jdbc:postgresql://admin:[REDACTED:connection-string-password]@db/x',
+        1,
+      ],
+      [
+        'mongodb+srv://user:p%40ss:w/rd@cluster0.example.net',
+        'mongodb+srv://user:[REDACTED:connection-string-password]@cluster0.example.net',
+        1,
+      ],
+      [
+        'POSTGRES://admin:s3cretPass@db',
+        'POSTGRES://admin:[REDACTED:connection-string-password]@db',
+        1,
+      ],
+      [
+        '{"url":"redis.v2://u:s3cretPass@h"}',
+        '{"url":"redis.v2://u:[REDACTED:connection-string-password]@h"}',
+        1,
+      ],
+      [
+        'a=redis://u:pass1@h1 b=amqp://v:pass2@h2',
+        'a=redis://u:[REDACTED:connection-string-password]@h1 b=amqp://v:[REDACTED:connection-string-password]@h2',
+        2,
+      ],
+      [
+        'x://a/b y=amqp://v:pass2@h2',
+        'x://a/b y=amqp://v:[REDACTED:connection-string-password]@h2',
+        1,
+      ],
+    ];
+    for (const [input, expected, n] of urls) {
+      expect(redactText(input)).toEqual({ text: expected, count: n });
+    }
+    const notUrls = [
+      'https://user@example.com/x',
+      'file:///etc/hosts',
+      'git@github.com:org/repo.git',
+      'see https://example.com/a:b@c',
+      'postgres://admin:ab@db',
+      'postgres://admin:s3cretPass db@x',
+      '1postgres://admin:s3cretPass@db',
+    ];
+    for (const line of notUrls) expect(redactText(line)).toEqual({ text: line, count: 0 });
+  });
+
   it('quoted secret: a whole quoted URL is replaced even after its password was (counted twice)', () => {
     // Existing behaviour, recorded as it is: nothing of the URL leaks, the count is 2.
     expect(redactText('password="postgres://admin:s3cretPass@db:5432/x"')).toEqual({
@@ -623,5 +688,29 @@ describe('redaction of hostile lines', () => {
     expect(count).toBe(expectedCount);
     if (expectedCount === 0) expect(text).toBe(line);
     expect(ms).toBeLessThan(1000);
+  });
+
+  // 90 KB lines (a minified or generated file). Each pattern must be linear on them: a
+  // pattern that rescans the rest of the line from every start takes seconds here.
+  const long: [string, string, number][] = [
+    ['"token." x15000', 'token.'.repeat(15000), 0],
+    ['"token" x18000', 'token'.repeat(18000), 0],
+    ['"apikey" x15000 + !', 'apikey'.repeat(15000) + '!', 0],
+    ['"password_1" x9000 + "', 'password_1'.repeat(9000) + '"', 0],
+    ['"a.b-" x22500 + token', 'a.b-'.repeat(22500) + 'token', 0],
+    ['"a+" x45000 + @', 'a+'.repeat(45000) + '@', 0],
+    ['"x://" x22500', 'x://'.repeat(22500), 0],
+    ['"a://b:" x15000 + "', 'a://b:'.repeat(15000) + '"', 0],
+    ['"a://b:c" x13000', 'a://b:c'.repeat(13000), 0],
+    ['"a://b:cc" x11000 + @', 'a://b:cc'.repeat(11000) + '@', 1],
+    ['"token." x15000 + quoted value', 'token.'.repeat(15000) + '="abcdefgh12345"', 1],
+  ];
+  it.each(long)('long line: %s', (_label, line, expectedCount) => {
+    const start = performance.now();
+    const { text, count } = redactText(line);
+    const ms = performance.now() - start;
+    expect(count).toBe(expectedCount);
+    if (expectedCount === 0) expect(text).toBe(line);
+    expect(ms).toBeLessThan(250);
   });
 });
