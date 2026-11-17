@@ -452,6 +452,30 @@ describe('runReview', () => {
     expect(result.findings.map((f) => f.file)).toEqual(['f1.ts']);
   });
 
+  it('counts the usage of a part that failed after its first request (F15)', async () => {
+    const files = Array.from({ length: 3 }, (_, i) =>
+      addedFileDiff(`f${i}.ts`, 'z\n'.repeat(3000)),
+    );
+    // Part 1 answers without the tool, then its repair request fails.
+    const provider = new MockProvider({
+      script: [mockText('no tool'), mockError('server', 'overloaded')],
+      fallback: report([]),
+    });
+    const result = await runReview(
+      { files },
+      {
+        provider,
+        model: { ...MODEL, maxInputTokens: 12_000 },
+        config: DEFAULT_CONFIG,
+        concurrency: 1,
+      },
+    );
+    expect(result.chunks.failed).toBe(1);
+    expect(result.errors).toEqual(['Part 1: overloaded']);
+    // Every request but the failed one was answered (and billed).
+    expect(result.usage.requests).toBe(provider.requests.length - 1);
+  });
+
   it('an empty diff makes no requests', async () => {
     const provider = new MockProvider();
     const result = await runReview(parseUnifiedDiff(''), {

@@ -22,7 +22,8 @@ export interface ReviewSnapshot {
   findings: Finding[];
   /**
    * Per finding (same order): hash of the hunk it is in; `null` for whole-file findings
-   * and findings outside a single hunk. A finding is only carried with its own hunk.
+   * and findings outside a single hunk. A finding is only carried with its own hunk; a
+   * `null` one only when nothing in its file changed.
    */
   findingHunks: (string | null)[];
   summary?: string;
@@ -47,6 +48,13 @@ export function hunkHash(path: string, hunk: Hunk): string {
   return h.digest('hex');
 }
 
+/**
+ * Version of the review pipeline in snapshot keys. Bump it when a change besides the
+ * prompts (parsing, validation, chunking) changes what a review reports, so findings
+ * of an older version are not carried over as if this one had found them.
+ */
+export const SNAPSHOT_PIPELINE_VERSION = 2;
+
 /** Hashes the inputs besides the diff that change a review's outcome. */
 export function snapshotKey(parts: {
   modelId: string;
@@ -55,17 +63,22 @@ export function snapshotKey(parts: {
   context: boolean;
   rules?: RepoRules;
   verify?: boolean;
+  redactHighEntropy?: boolean;
+  /** System prompts as sent (review, verify): an update that changes them starts over. */
+  prompts: string[];
 }): string {
   return createHash('sha1')
     .update(
       JSON.stringify({
-        v: 1,
+        v: SNAPSHOT_PIPELINE_VERSION,
         model: parts.modelId,
         config: parts.config,
         mode: parts.mode,
         context: parts.context,
         verify: parts.verify ?? parts.config.review.verify,
         rules: parts.rules?.sources.map((s) => [s.path, s.text]) ?? [],
+        redactHighEntropy: parts.redactHighEntropy ?? false,
+        prompts: parts.prompts,
       }),
     )
     .digest('hex');
@@ -119,9 +132,10 @@ export function createSnapshot(
  * Splits a diff into what still needs a review and what was reviewed before.
  * A previous finding is carried over only with its own hunk: when that hunk is
  * unchanged and the quote is found in it (exactly or up to whitespace). Whole-file
- * findings are carried when nothing in the file changed. Hunks are compared redacted
- * with `redact` (as `createSnapshot` stored them); a finding stored with its redacted
- * quote gets the real lines back.
+ * findings are carried when nothing in the file changed, and so are findings outside
+ * a single hunk (outside every hunk or across several) whose quote is still found.
+ * Hunks are compared redacted with `redact` (as `createSnapshot` stored them); a
+ * finding stored with its redacted quote gets the real lines back.
  */
 export function planIncremental(
   diff: UnifiedDiff,
@@ -164,20 +178,28 @@ export function planIncremental(
         if (!fresh.length) carried.push({ ...f });
         continue;
       }
-      // Its own hunk, unchanged (identical hunks: the one nearest its old place).
-      const own = reused
-        .filter((r) => r.hash === hunk)
-        .sort(
-          (a, b) =>
-            Math.abs(a.hunk.newStart - f.startLine) - Math.abs(b.hunk.newStart - f.startLine),
-        )[0];
-      if (!own) continue;
+      let searchRange: { start: number; end: number } | undefined;
+      if (hunk === null) {
+        // Outside every hunk or across several: like a whole-file finding, carried only
+        // when nothing in the file changed (and its quote is still there).
+        if (fresh.length) continue;
+      } else {
+        // Its own hunk, unchanged (identical hunks: the one nearest its old place).
+        const own = reused
+          .filter((r) => r.hash === hunk)
+          .sort(
+            (a, b) =>
+              Math.abs(a.hunk.newStart - f.startLine) - Math.abs(b.hunk.newStart - f.startLine),
+          )[0];
+        if (!own) continue;
+        searchRange = hunkRange(own.hunk);
+      }
       const match = locateQuote(
         f.redactedQuote === undefined ? lines : safeLines,
         f.redactedQuote ?? f.quote,
         {
           nearLine: f.startLine,
-          searchRange: hunkRange(own.hunk),
+          ...(searchRange ? { searchRange } : {}),
           fuzzyRanges: [],
         },
       );

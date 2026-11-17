@@ -1186,6 +1186,29 @@ suite('Review', () => {
     assert.ok(!saved.includes(SECRET), saved);
   });
 
+  test('stored snapshots with damaged hunks are ignored (F34)', async () => {
+    const memento = memoryMemento();
+    const snapshot = (hunks: unknown) =>
+      ({
+        version: 1,
+        key: 'k',
+        hunks,
+        findings: [statusFinding('id', 'const a = 1;')],
+        findingHunks: [null],
+      }) as ReviewSnapshot;
+    const store = new SnapshotStore(memento);
+    await store.set(root, { kind: 'unstaged' }, snapshot({ 'src/x.ts': ['h1'] }));
+    await store.set(root, { kind: 'staged' }, snapshot(undefined));
+    await store.set(root, { kind: 'branch', base: 'main' }, snapshot({ 'src/x.ts': 5 }));
+    await store.set(root, { kind: 'file', path: 'src/x.ts' }, snapshot({ 'src/x.ts': [1] }));
+
+    const reloaded = new SnapshotStore(memento);
+    assert.ok(reloaded.get(root, { kind: 'unstaged' }));
+    assert.strictEqual(reloaded.get(root, { kind: 'staged' }), undefined);
+    assert.strictEqual(reloaded.get(root, { kind: 'branch', base: 'main' }), undefined);
+    assert.strictEqual(reloaded.get(root, { kind: 'file', path: 'src/x.ts' }), undefined);
+  });
+
   test('a dismissed finding on a secret stays dismissed through incremental and full re-reviews (F33)', async () => {
     const rel = 'src/ux-secret.ts';
     try {

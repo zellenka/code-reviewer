@@ -350,7 +350,7 @@ export async function reviewCommand(
       logger.info('a newer review or Clear Findings replaced this review; its results are dropped');
       return { ok: false, message: 'cancelled' };
     }
-    // Cancelled or a part failed (no snapshot): keep the last one, it still matches its hunks.
+    // Cancelled or incomplete (no snapshot): keep the last one, it still matches its hunks.
     // Superseded meanwhile: the newer review writes it.
     if (result.snapshot && running === cts) {
       await deps.snapshots?.set(repo.root, mode, result.snapshot);

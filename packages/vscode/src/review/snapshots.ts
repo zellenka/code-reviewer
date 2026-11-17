@@ -29,6 +29,7 @@ export class SnapshotStore {
             e.snapshot?.version === 1 &&
             Array.isArray(e.snapshot.findings) &&
             Array.isArray(e.snapshot.findingHunks) &&
+            isHunks(e.snapshot.hunks) &&
             typeof e.at === 'number',
         )
       : [];
@@ -60,6 +61,16 @@ export class SnapshotStore {
     this.entries = [];
     await this.memento.update(STATE_KEY, undefined);
   }
+}
+
+/** Hunk hashes per file, as `planIncremental` reads them (a damaged entry is dropped). */
+function isHunks(value: unknown): value is ReviewSnapshot['hunks'] {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.values(value).every((h) => Array.isArray(h) && h.every((x) => typeof x === 'string'))
+  );
 }
 
 /** A finding stored with real code that has a secret in it (saved by an older version). */

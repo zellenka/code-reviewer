@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG, type ReviewConfig } from '../config/schema';
 import { addedFileDiff } from '../diff/parse';
 import type { UnifiedDiff, WorkspaceTools } from '../diff/types';
-import { MockProvider, mockToolCall, type MockStep } from '../provider/mock';
+import { MockProvider, mockError, mockToolCall, type MockStep } from '../provider/mock';
 import type { ChatEvent, ModelInfo } from '../provider/types';
 import { REPORT_TOOL_NAME } from './output';
 import { estimateReview, runReview } from './orchestrator';
@@ -70,6 +70,7 @@ describe('agentic review', () => {
     expect(result.mode).toBe('agentic');
     expect(result.findings).toHaveLength(1);
     expect(result.agent).toEqual({ turns: 2, toolCalls: 1, limitStops: 0 });
+    expect(result.usage.requests).toBe(2);
     expect(result.chunks.outcomes).toEqual(['valid']);
     const second = JSON.stringify(provider.requests[1]!.messages);
     expect(second).toContain('Request timeout in seconds');
@@ -118,6 +119,35 @@ describe('agentic review', () => {
     expect(result.agent).toMatchObject({ limitStops: 1 });
     expect(result.findings).toHaveLength(1);
     expect(provider.requests[1]!.toolChoice).toEqual({ name: REPORT_TOOL_NAME });
+  });
+
+  it('counts the usage of the turns before a part failed (F15)', async () => {
+    const files = Array.from({ length: 3 }, (_, i) =>
+      addedFileDiff(`f${i}.ts`, 'z\n'.repeat(3000)),
+    );
+    // Part 1 reads a file, then its next turn fails.
+    const provider = new MockProvider({
+      script: [
+        mockToolCall('read_file', { path: 'src/config.ts' }),
+        mockError('server', 'overloaded'),
+      ],
+      fallback: mockToolCall(REPORT_TOOL_NAME, { findings: [] }),
+    });
+    const result = await runReview(
+      { files },
+      {
+        provider,
+        model: { ...MODEL, maxInputTokens: 24_000 },
+        config: AGENTIC,
+        workspace: ws,
+        concurrency: 1,
+      },
+    );
+    expect(result.chunks.total).toBeGreaterThan(1);
+    expect(result.chunks.failed).toBe(1);
+    expect(result.errors).toEqual(['Part 1: overloaded']);
+    // Every request but the failed one was answered (and billed).
+    expect(result.usage.requests).toBe(provider.requests.length - 1);
   });
 
   it('falls back to single-pass without repo access', async () => {

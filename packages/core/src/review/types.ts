@@ -119,9 +119,15 @@ export interface ReviewResult {
   warnings?: string[];
   /** Incremental re-review (P5-4): hunks sent now vs. reviewed before, findings carried over. */
   incremental?: { newHunks: number; reusedHunks: number; carried: number };
-  /** Pass as `previous` to the next review of the same scope. Missing after a cancelled or partly failed review. */
+  /**
+   * Pass as `previous` to the next review of the same scope. Missing after a cancelled or
+   * partly failed review, a part with only some valid findings, or a failed verify request.
+   */
   snapshot?: ReviewSnapshot;
-  /** Verify pass (P5-2): findings checked, rejected, and requests that failed (findings kept). */
+  /**
+   * Verify pass (P5-2): findings that got a verdict, findings rejected, and requests that
+   * failed or were not sent after an auth or quota error (their findings are kept).
+   */
   verify?: { checked: number; rejected: number; failed: number };
   /** Agentic reviews: totals over all parts. `limitStops` = parts stopped by a limit. */
   agent?: { turns: number; toolCalls: number; limitStops: number };
