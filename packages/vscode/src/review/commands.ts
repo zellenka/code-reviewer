@@ -10,7 +10,6 @@ import {
   isProviderError,
   runReview,
   type Finding,
-  type AgentLimits,
   type Logger,
   type ModelInfo,
   type ReviewConfig,
@@ -24,6 +23,13 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { showProviderError } from '../providers/errorUi';
 import type { ProviderRegistry } from '../providers/registry';
+import {
+  USER_ONLY_SETTINGS,
+  agentLimitSettings,
+  costThreshold,
+  setInWorkspace,
+  workspaceChoiceNote,
+} from '../settings';
 import type { ReviewConfigService } from './config';
 import { relativeToRepo, unsavedFiles, type RepoLocator } from './repo';
 import type { SnapshotStore } from './snapshots';
@@ -159,6 +165,14 @@ export async function reviewCommand(
     const includeContext =
       (settings.get<boolean>('includeContext') ?? true) && mode.kind !== 'selection';
     const agentLimits = agentLimitSettings(settings);
+    // VS Code already ignores these in workspace settings (scope "application"); say so in the log.
+    const ignored = setInWorkspace(settings, USER_ONLY_SETTINGS);
+    if (ignored.length) {
+      logger.warn(
+        `ignored in workspace settings, only user settings apply: ${ignored.map((k) => `aiReview.${k}`).join(', ')}`,
+      );
+    }
+    const chosenByWorkspace = setInWorkspace(settings, ['provider', 'model']);
     const concurrency = settings.get<number>('concurrency') || undefined;
     const summary = settings.get<boolean>('summary') ?? true;
     const redactHighEntropy = settings.get<boolean>('redactHighEntropyStrings') ?? false;
@@ -236,7 +250,7 @@ export async function reviewCommand(
           };
           const estimate = estimateReview(diff, reviewOptions);
           logger.info(describeEstimate(estimate, model));
-          const threshold = settings.get<number>('costConfirmationThreshold') ?? 0.5;
+          const threshold = costThreshold(settings);
           if (estimate.costUsd && estimate.costUsd.high > threshold && !args.confirmCost) {
             if (args.silent) return { needsConfirmation: true as const, estimate };
             const choice = await vscode.window.showWarningMessage(
@@ -245,7 +259,12 @@ export async function reviewCommand(
                 : `AI Review: this review sends about ${formatTokens(estimate.inputTokens)} tokens in ${estimate.requests} request(s) to ${model.name}. Estimated cost: ${formatUsd(estimate.costUsd.low)}–${formatUsd(estimate.costUsd.high)}.`,
               {
                 modal: true,
-                detail: `That's above your confirmation threshold of ${formatUsd(threshold)} (setting aiReview.costConfirmationThreshold). Narrow the scope to make it cheaper.`,
+                detail: [
+                  `That's above your confirmation threshold of ${formatUsd(threshold)} (setting aiReview.costConfirmationThreshold). Narrow the scope to make it cheaper.`,
+                  workspaceChoiceNote(chosenByWorkspace, model.name),
+                ]
+                  .filter(Boolean)
+                  .join(' '),
               },
               'Run Review',
             );
@@ -378,21 +397,6 @@ function withModeSetting(
   const mode = settings.get<string>('reviewMode');
   if (mode !== 'single-pass' && mode !== 'agentic') return config;
   return { ...config, review: { ...config.review, mode } };
-}
-
-function agentLimitSettings(settings: vscode.WorkspaceConfiguration): Partial<AgentLimits> {
-  const limits: Partial<AgentLimits> = {};
-  const read = (key: string) => {
-    const value = settings.get<number>(key);
-    return typeof value === 'number' && value > 0 ? value : undefined;
-  };
-  const maxTurns = read('agent.maxTurns');
-  const maxToolCalls = read('agent.maxToolCalls');
-  const tokenBudget = read('agent.tokenBudget');
-  if (maxTurns) limits.maxTurns = maxTurns;
-  if (maxToolCalls) limits.maxToolCalls = maxToolCalls;
-  if (tokenBudget) limits.tokenBudget = tokenBudget;
-  return limits;
 }
 
 function isTooLarge(err: unknown): boolean {

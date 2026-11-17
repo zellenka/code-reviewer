@@ -22,6 +22,7 @@ import { FindingStatusStore } from './review/state';
 import { FindingStore } from './review/store';
 import { FindingThreads } from './review/threads';
 import { FindingsTree, SUMMARY_SCHEME, SummaryProvider } from './review/tree';
+import { userSetting } from './settings';
 import { ReviewPanel } from './ui/panel';
 
 /** Returned from `activate`; used by extension tests. Not a stable public API. */
@@ -61,9 +62,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       label: 'Anthropic',
       provider: new AnthropicProvider({
         apiKey: () => keyStore.get(),
+        // Prices feed the cost confirmation, so only the user's own settings count (F23).
         modelOverrides: () =>
-          vscode.workspace.getConfiguration(CONFIG_SECTION).get<unknown[]>('anthropic.models') ??
-          [],
+          userSetting<unknown[]>(
+            vscode.workspace.getConfiguration(CONFIG_SECTION),
+            'anthropic.models',
+          ) ?? [],
         refusalFallback: () =>
           vscode.workspace
             .getConfiguration(CONFIG_SECTION)

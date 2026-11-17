@@ -106,7 +106,8 @@ Diff content is marked as untrusted data in the prompt, so instructions hidden i
 - The summary is one extra request per review; turn it off with `aiReview.summary`.
 - Re-reviewing the same scope only sends what changed since the last review, so a review after a small fix is cheap.
 - The verify pass (off by default) adds up to one request per file with findings; the cost estimate includes it in the upper bound.
-- Agentic reviews cost more: each part can use several requests, up to `aiReview.agent.tokenBudget` input tokens (default 200k). The cost estimate shows the range. Prompt caching makes the repeated parts of those requests much cheaper on Anthropic.
+- Agentic reviews cost more: each part can use several requests, up to `aiReview.agent.tokenBudget` input tokens (default 200k, at most 2M). The cost estimate shows the range. Prompt caching makes the repeated parts of those requests much cheaper on Anthropic.
+- The settings that limit spending (`aiReview.costConfirmationThreshold`, the prices in `aiReview.anthropic.models`, and `aiReview.agent.*`) are read from your user settings only, so a repository's `.vscode/settings.json` can't change them. A repository may still pick the provider and model; if a review with that model needs your confirmation, the question says the workspace chose it.
 - Narrow the scope (staged changes, one file, a selection) to keep reviews cheap and fast.
 
 ## Contributing

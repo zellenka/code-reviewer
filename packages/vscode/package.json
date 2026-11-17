@@ -216,7 +216,8 @@
         "aiReview.anthropic.models": {
           "type": "array",
           "default": [],
-          "markdownDescription": "Overrides or additions to the built-in Anthropic model table (limits and pricing in USD per million tokens). Entries are matched by `id`. Invalid values are ignored and reported in **AI Review: Show Log**.",
+          "scope": "application",
+          "markdownDescription": "Overrides or additions to the built-in Anthropic model table (limits and pricing in USD per million tokens). Entries are matched by `id`. Invalid values are ignored and reported in **AI Review: Show Log**. User settings only: prices decide when you are asked about the cost, so a repository's settings can't change them.",
           "items": {
             "type": "object",
             "required": [
@@ -338,7 +339,8 @@
           "type": "number",
           "default": 0.5,
           "minimum": 0,
-          "markdownDescription": "Ask before running a review whose estimated cost (upper bound, USD) is above this amount. Applies to providers with known prices (Anthropic). `0` = always ask."
+          "scope": "application",
+          "markdownDescription": "Ask before running a review whose estimated cost (upper bound, USD) is above this amount. Applies to providers with known prices (Anthropic). `0` = always ask. User settings only, so a repository's settings can't turn the question off."
         },
         "aiReview.reviewMode": {
           "type": "string",
@@ -365,20 +367,24 @@
           "default": 8,
           "minimum": 1,
           "maximum": 30,
-          "markdownDescription": "Agentic reviews: model requests per part of the diff spent exploring, before it must report."
+          "scope": "application",
+          "markdownDescription": "Agentic reviews: model requests per part of the diff spent exploring, before it must report. User settings only."
         },
         "aiReview.agent.maxToolCalls": {
           "type": "number",
           "default": 20,
           "minimum": 1,
           "maximum": 100,
-          "markdownDescription": "Agentic reviews: tool calls (read file, search, references) per part of the diff."
+          "scope": "application",
+          "markdownDescription": "Agentic reviews: tool calls (read file, search, references) per part of the diff. User settings only."
         },
         "aiReview.agent.tokenBudget": {
           "type": "number",
           "default": 200000,
           "minimum": 20000,
-          "markdownDescription": "Agentic reviews: input tokens per part of the diff, summed over its requests (cached tokens included). The model is asked to report when it's used up."
+          "maximum": 2000000,
+          "scope": "application",
+          "markdownDescription": "Agentic reviews: input tokens per part of the diff, summed over its requests (cached tokens included). The model is asked to report when it's used up. User settings only."
         }
       }
     },
