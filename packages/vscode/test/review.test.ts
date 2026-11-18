@@ -91,6 +91,12 @@ const KNOWN_BUGS = [
     suggestion: 'return a / b; // shift',
   },
   {
+    file: 'src/ux-edge.ts',
+    title: 'edge bug',
+    quote: 'return a * b; // edge',
+    suggestion: 'return a / b; // edge',
+  },
+  {
     file: 'src/ux-revise.ts',
     title: 'revised bug',
     quote: 'return a * b; // revise',
@@ -572,6 +578,61 @@ suite('Review', () => {
     );
     assert.strictEqual(outcome.ok, false);
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  });
+
+  test('whole lines deleted or inserted right at the start of a finding shift it (F21)', async () => {
+    const filler = Array.from({ length: 25 }, (_, i) => `  const x${i} = ${i};`);
+    const lines = DIV('edge').split('\n');
+    const content = [...lines.slice(0, 3), ...filler, ...lines.slice(3)].join('\n');
+    const key = await reviewOne('src/ux-edge.ts', content);
+    assert.strictEqual(api.findings.get(key)?.startLine, 29);
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-edge.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    /** Where the finding is when the store first reports a change (before any re-anchoring). */
+    const nextPlacement = () =>
+      new Promise<number[]>((resolve) => {
+        const sub = api.findings.onDidChange(() => {
+          sub.dispose();
+          const f = api.findings.get(key);
+          resolve([f?.startLine ?? -1, f?.endLine ?? -1]);
+        });
+      });
+
+    try {
+      // The 25 lines right above it: the range ends at column 0 of the finding's line.
+      let placed = nextPlacement();
+      await editor.edit((e) => e.delete(new vscode.Range(3, 0, 28, 0)));
+      assert.deepStrictEqual(await placed, [4, 4]);
+
+      // Lines typed or pasted at column 0 of its first line push it down.
+      placed = nextPlacement();
+      await editor.edit((e) => e.insert(new vscode.Position(3, 0), filler.join('\n') + '\n'));
+      assert.deepStrictEqual(await placed, [29, 29]);
+
+      // Pasting over the lines above (ending at column 0 of its line) shifts it by the difference.
+      placed = nextPlacement();
+      await editor.edit((e) => e.replace(new vscode.Range(3, 0, 28, 0), '  // a\n  // b\n'));
+      assert.deepStrictEqual(await placed, [6, 6]);
+
+      // Lines inserted at column 0 of the line below it leave it alone.
+      await editor.edit((e) => e.insert(new vscode.Position(6, 0), '  // below\n'));
+      assert.deepStrictEqual(
+        [api.findings.get(key)?.startLine, api.findings.get(key)?.endLine],
+        [6, 6],
+      );
+
+      await doc.save();
+      // Past the re-anchoring delay: the quote is still found where the finding is.
+      await new Promise((r) => setTimeout(r, 600));
+      const f = api.findings.get(key);
+      assert.deepStrictEqual([f?.startLine, f?.endLine, !!f?.stale], [6, 6, false]);
+      assert.strictEqual(doc.lineAt(5).text, '  return a * b; // edge');
+      assert.strictEqual(api.threads.threadOf(key)?.range?.start.line, 5);
+      assert.strictEqual(vscode.languages.getDiagnostics(doc.uri)[0]?.range.start.line, 5);
+    } finally {
+      await vscode.window.showTextDocument(doc);
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
   });
 
   test('a thread is updated in place: unchanged findings keep it as is, shifts move it, outdated collapses it', async () => {

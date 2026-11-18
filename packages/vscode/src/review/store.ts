@@ -190,8 +190,11 @@ export class FindingStore implements vscode.Disposable {
       const from = change.range.start.line + 1;
       const to = change.range.end.line + 1;
       const delta = countNewlines(change.text) - (to - from);
+      // A range ending at column 0 of a line leaves that line's text alone (whole lines
+      // deleted or inserted right above it), so it counts as above that line.
+      const end = change.range.end.character === 0 ? to - 1 : to;
       for (const f of findings) {
-        if (to < f.startLine) {
+        if (end < f.startLine) {
           if (delta) {
             f.startLine += delta;
             f.endLine += delta;
