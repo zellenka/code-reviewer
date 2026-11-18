@@ -192,6 +192,150 @@ new mode 100755
   });
 });
 
+// Real `git diff` output (the extension's flags) during a merge with conflicts. Git lists the
+// unmerged paths first, as combined diffs (`diff --cc`) or "* Unmerged path" lines.
+const summary = (text: string) =>
+  parseUnifiedDiff(text).files.map((f) => ({
+    path: f.path,
+    unmerged: f.unmerged ?? false,
+    binary: f.binary,
+    hunks: f.hunks.length,
+  }));
+
+const CONFLICT_CC = `diff --cc conflict.txt
+index e3dbf38,fb81947..0000000
+--- a/conflict.txt
++++ b/conflict.txt
+@@@ -1,3 -1,3 +1,7 @@@
+  line1
+++<<<<<<< HEAD
+ +main
+++=======
++ feature
+++>>>>>>> feature
+  line3
+`;
+
+describe('parseUnifiedDiff: merge conflicts (F26)', () => {
+  it('marks a combined-diff file as unmerged and parses the ordinary files after it', () => {
+    expect(
+      summary(`${CONFLICT_CC}diff --git a/a.bin b/a.bin
+index daa8f61..10f50c4 100644
+Binary files a/a.bin and b/a.bin differ
+diff --git a/other.txt b/other.txt
+index 2fa992c..fe5841d 100644
+--- a/other.txt
++++ b/other.txt
+@@ -1 +1,2 @@
+ keep
++more
+`),
+    ).toEqual([
+      { path: 'conflict.txt', unmerged: true, binary: false, hunks: 0 },
+      { path: 'a.bin', unmerged: false, binary: true, hunks: 0 },
+      { path: 'other.txt', unmerged: false, binary: false, hunks: 1 },
+    ]);
+  });
+
+  it('keeps each conflicted file, including a binary one with no hunks', () => {
+    expect(
+      summary(`diff --cc a.bin
+index 30112f7,8cf1f07..0000000
+Binary files differ
+diff --cc b.txt
+index e3dbf38,fb81947..0000000
+--- a/b.txt
++++ b/b.txt
+@@@ -1,3 -1,3 +1,7 @@@
+  line1
+++<<<<<<< HEAD
+ +main
+++=======
++ feature
+++>>>>>>> feature
+  line3
+diff --cc d.txt
+index e3dbf38,fb81947..0000000
+--- a/d.txt
++++ b/d.txt
+@@@ -1,3 -1,3 +1,7 @@@
+  line1
+++<<<<<<< HEAD
+ +main
+++=======
++ feature
+++>>>>>>> feature
+  line3
+diff --git a/c.bin b/c.bin
+index 65b7b65..efa1a4e 100644
+Binary files a/c.bin and b/c.bin differ
+`),
+    ).toEqual([
+      { path: 'a.bin', unmerged: true, binary: false, hunks: 0 },
+      { path: 'b.txt', unmerged: true, binary: false, hunks: 0 },
+      { path: 'd.txt', unmerged: true, binary: false, hunks: 0 },
+      { path: 'c.bin', unmerged: false, binary: true, hunks: 0 },
+    ]);
+  });
+
+  it('handles quoted combined-diff paths and "* Unmerged path" lines', () => {
+    expect(
+      summary(`diff --cc "my file \\320\\266.txt"
+index ffc6e18,48685c5..0000000
+--- "a/my file \\320\\266.txt"
++++ "b/my file \\320\\266.txt"
+@@@ -1,3 -1,3 +1,7 @@@
+  l1
+++<<<<<<< HEAD
+ +M
+++=======
++ F
+++>>>>>>> feature
+  l3
+* Unmerged path del.txt
+`),
+    ).toEqual([
+      { path: 'my file ж.txt', unmerged: true, binary: false, hunks: 0 },
+      { path: 'del.txt', unmerged: true, binary: false, hunks: 0 },
+    ]);
+    // `git diff --cached` (staged mode) only names the unmerged paths.
+    expect(
+      summary(`diff --git a/a.bin b/a.bin
+new file mode 100644
+index 0000000..daa8f61
+Binary files /dev/null and b/a.bin differ
+* Unmerged path conflict.txt
+diff --git a/mode.sh b/mode.sh
+old mode 100644
+new mode 100755
+`),
+    ).toEqual([
+      { path: 'a.bin', unmerged: false, binary: true, hunks: 0 },
+      { path: 'conflict.txt', unmerged: true, binary: false, hunks: 0 },
+      { path: 'mode.sh', unmerged: false, binary: false, hunks: 0 },
+    ]);
+  });
+
+  it('a file without hunks before a combined diff keeps its own path', () => {
+    // A body line that looks like a "+++" header must not rename anything either.
+    const body = CONFLICT_CC.replace('+ feature', '+++ b/evil.txt');
+    expect(
+      summary(`diff --git a/run.sh b/run.sh
+old mode 100644
+new mode 100755
+${body}diff --git a/img.png b/img.png
+index 1111111..2222222 100644
+Binary files a/img.png and b/img.png differ
+${CONFLICT_CC.replaceAll('conflict.txt', 'second.txt')}`),
+    ).toEqual([
+      { path: 'run.sh', unmerged: false, binary: false, hunks: 0 },
+      { path: 'conflict.txt', unmerged: true, binary: false, hunks: 0 },
+      { path: 'img.png', unmerged: false, binary: true, hunks: 0 },
+      { path: 'second.txt', unmerged: true, binary: false, hunks: 0 },
+    ]);
+  });
+});
+
 describe('helpers', () => {
   it('unquote handles C escapes', () => {
     expect(unquote('"a\\tb\\"c\\\\"')).toBe('a\tb"c\\');

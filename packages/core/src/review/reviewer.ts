@@ -243,12 +243,26 @@ function interpret(response: CollectedResponse, jsonOnly: boolean): Attempt {
         'Your answer was cut off at the output limit. Report fewer findings with shorter bodies.',
     };
   }
+  // Some providers (vscode.lm) can't report the output limit; unfinished JSON is the only sign.
+  if (looksCutOff(response.text)) {
+    return {
+      kind: 'none',
+      reason:
+        'Your answer looks cut off, possibly at the output limit. Report fewer findings with shorter bodies.',
+    };
+  }
   return {
     kind: 'none',
     reason: jsonOnly
       ? 'Reply with only the JSON object {"findings": [...]} in a ```json code block.'
       : `You must call the ${REPORT_TOOL_NAME} tool (with an empty list if there are no issues).`,
   };
+}
+
+/** Text that opens a code fence, object or array it never closes. */
+function looksCutOff(text: string): boolean {
+  const count = (token: string) => text.split(token).length - 1;
+  return count('```') % 2 === 1 || count('{') > count('}') || count('[') > count(']');
 }
 
 function appendRepair(

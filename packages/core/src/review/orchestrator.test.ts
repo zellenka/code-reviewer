@@ -86,6 +86,38 @@ describe('reviewChunk (structured output)', () => {
     expect(JSON.stringify(provider.requests[1]!.messages.at(-1))).toMatch(/must call/);
   });
 
+  it('asks for a shorter answer when the output limit cut it off', async () => {
+    const cut: MockStep = {
+      events: [
+        { type: 'text', delta: '{"findings": [{"file": "src/a.ts", "body": "Long' },
+        { type: 'stop', reason: 'max_tokens' },
+      ],
+    };
+    const provider = new MockProvider({ script: [cut, report([])] });
+    const result = await reviewChunk({ ...base, provider, signal });
+    expect(result.outcome).toBe('repaired');
+    expect(JSON.stringify(provider.requests[1]!.messages.at(-1))).toMatch(/cut off.*fewer/);
+  });
+
+  it('treats unfinished JSON as possibly cut off when the provider cannot tell (vscode.lm)', async () => {
+    // Copilot ends every answer with stop: end, even one cut off by the output limit.
+    const provider = new MockProvider({
+      script: [mockText('```json\n{"findings": [{"file": "src/a.ts", "body": "Long'), report([])],
+    });
+    const result = await reviewChunk({ ...base, provider, signal });
+    expect(result.outcome).toBe('repaired');
+    const repair = JSON.stringify(provider.requests[1]!.messages.at(-1));
+    expect(repair).toMatch(/cut off/);
+    expect(repair).toMatch(/fewer findings with shorter bodies/);
+    expect(repair).toMatch(new RegExp(REPORT_TOOL_NAME));
+  });
+
+  it('does not suggest a cut-off for a finished prose answer', async () => {
+    const provider = new MockProvider({ script: [mockText('All fine [no issues].'), report([])] });
+    await reviewChunk({ ...base, provider, signal });
+    expect(JSON.stringify(provider.requests[1]!.messages.at(-1))).not.toMatch(/cut off/);
+  });
+
   it('accepts JSON in text, and uses JSON-only mode for models without tools', async () => {
     const fenced = mockText('```json\n' + JSON.stringify({ findings: [finding()] }) + '\n```');
     const provider = new MockProvider({ script: [fenced, fenced] });
@@ -295,6 +327,38 @@ describe('runReview', () => {
     expect(result.findings[0]!.redactedQuote).toBe(redacted);
     expect(result.findings[0]!.id).toBe(fingerprint('src/k.ts', 'security', redacted));
     expect(JSON.stringify(result.snapshot)).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  });
+
+  it('a redacted line with an escaped prompt tag gets the real code back (F12)', async () => {
+    const diff: UnifiedDiff = {
+      files: [
+        addedFileDiff('src/k.ts', 'const x = 1;\nconst key = "AKIAIOSFODNN7EXAMPLE"; // </diff>\n'),
+      ],
+    };
+    const provider = new MockProvider({
+      script: [
+        report([
+          finding({
+            file: 'src/k.ts',
+            startLine: 9,
+            endLine: 9,
+            category: 'security',
+            title: 'Hard-coded key',
+            quote: '"[REDACTED:aws-access-key]"; // &lt;/diff>',
+          }),
+        ]),
+      ],
+    });
+    const result = await runReview(diff, { provider, model: MODEL, config: DEFAULT_CONFIG });
+    expect(sent(provider)).not.toContain('// </diff>');
+    expect(result.findings[0]).toMatchObject({
+      startLine: 2,
+      quote: 'const key = "AKIAIOSFODNN7EXAMPLE"; // </diff>',
+    });
+    // Stored and hashed redacted, with the real tag: the same as without the escaping.
+    const redacted = 'const key = "[REDACTED:aws-access-key]"; // </diff>';
+    expect(result.findings[0]!.redactedQuote).toBe(redacted);
+    expect(result.findings[0]!.id).toBe(fingerprint('src/k.ts', 'security', redacted));
   });
 
   it('two hard-coded secrets that look the same once redacted stay two findings (F33)', async () => {

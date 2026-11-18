@@ -23,6 +23,8 @@ export interface FileDiff {
   oldPath?: string;
   status: 'added' | 'modified' | 'deleted' | 'renamed';
   binary: boolean;
+  /** Has unresolved merge conflicts (git showed a combined diff or "Unmerged path"); no hunks. */
+  unmerged?: boolean;
   hunks: Hunk[];
   /** Full new-side content (for context and re-anchoring). */
   newContent?: string;

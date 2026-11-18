@@ -4,6 +4,10 @@ import * as vscode from 'vscode';
 export const CONFIG_SECTION = 'aiReview';
 
 export interface ProviderEntry {
+  /**
+   * The built-in providers retry their own transient failures (`withRetry`) and pass
+   * `PROVIDER_CONFORMANCE`. Not wrapped here: Anthropic also runs outside VS Code.
+   */
   provider: LLMProvider;
   label: string;
   /** False when the provider can't be used yet (e.g. no API key). */

@@ -15,7 +15,7 @@ const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 /**
  * Parses `git diff` output (or a plain unified diff) into `UnifiedDiff`.
  * Handles added/deleted/renamed/binary files, mode-only changes, quoted paths,
- * CRLF and "\ No newline at end of file".
+ * CRLF and "\ No newline at end of file". Files with merge conflicts are marked `unmerged`.
  */
 export function parseUnifiedDiff(text: string): UnifiedDiff {
   const lines = normalizeEol(text).split('\n');
@@ -79,6 +79,17 @@ export function parseUnifiedDiff(text: string): UnifiedDiff {
       if (paths && paths.oldPath !== paths.newPath) file!.oldPath = paths.oldPath;
       continue;
     }
+
+    // A merge conflict: git shows a combined diff (`diff --cc`) or only "* Unmerged path x".
+    // Neither can be reviewed, so the file is kept as unmerged and the combined diff's body
+    // (its `---`/`+++` and `@@@` lines too) is skipped up to the next file.
+    const combined = /^diff --(?:cc|combined) (.*)$/.exec(line);
+    if (combined || line.startsWith('* Unmerged path ')) {
+      startFile(combined ? unquote(combined[1]!) : line.slice('* Unmerged path '.length));
+      file!.unmerged = true;
+      continue;
+    }
+    if (file?.unmerged) continue;
 
     const m = HUNK_RE.exec(line);
     if (m) {

@@ -1,6 +1,7 @@
 import { splitLines } from '../diff/parse';
 import type { FileDiff, Hunk } from '../diff/types';
 import { estimateTokens } from '../provider/usage';
+import { neutralizeTags } from './prompt';
 import { enclosingSymbols, heuristicSymbols, type CodeSymbol, type SymbolIndex } from './symbols';
 
 /** Unchanged new-side lines shown next to a file's hunks. */
@@ -46,13 +47,28 @@ export function buildFileContext(
   const changed = new Set<number>();
   for (const h of hunks) {
     let sawAdd = false;
+    // Pure deletions: the new-side line just before each removal (after it, at the top).
+    const removedAt = new Set<number>();
+    let before: number | undefined;
+    let waiting = false;
     for (const l of h.lines) {
       if (l.kind === 'add' && l.newLine !== undefined) {
         changed.add(l.newLine);
         sawAdd = true;
       }
+      if (l.kind === 'del') {
+        if (before !== undefined) removedAt.add(before);
+        else waiting = true;
+      } else if (l.newLine !== undefined) {
+        before = l.newLine;
+        if (waiting) removedAt.add(before);
+        waiting = false;
+      }
     }
-    if (!sawAdd) changed.add(Math.max(1, h.newStart));
+    if (sawAdd) continue;
+    // Without new-side lines (`git diff -U0`) git's start line is the one before the removal.
+    if (!removedAt.size) changed.add(Math.max(1, h.newStart));
+    for (const l of removedAt) changed.add(l);
   }
 
   const tree = symbols ?? heuristicSymbols(file.newContent);
@@ -144,7 +160,9 @@ export function renderContext(path: string, ranges: readonly ContextRange[]): st
   const out = [`<context path="${escapeAttr(path)}">`];
   ranges.forEach((r, i) => {
     if (i > 0) out.push('   ...');
-    r.lines.forEach((text, j) => out.push(`${String(r.startLine + j).padStart(6)}   ${text}`));
+    r.lines.forEach((text, j) =>
+      out.push(`${String(r.startLine + j).padStart(6)}   ${neutralizeTags(text)}`),
+    );
   });
   out.push('</context>');
   return out.join('\n');
@@ -203,9 +221,10 @@ export function renderChangedSymbols(
   const max = options.maxEntries ?? 60;
   const lines = list
     .slice(0, max)
-    .map(
-      (s) =>
+    .map((s) =>
+      neutralizeTags(
         `- ${s.path}:${s.startLine}-${s.endLine} ${s.kind} ${s.names.join('.')}: \`${s.signature.replace(/`/g, "'")}\``,
+      ),
     );
   if (list.length > max) lines.push(`- … and ${list.length - max} more`);
   return `<changed_symbols>

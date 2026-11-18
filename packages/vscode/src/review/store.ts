@@ -30,6 +30,8 @@ export interface ReviewSession {
 export interface StoreChange {
   /** Documents whose findings changed; undefined = everything. */
   uris?: vscode.Uri[];
+  /** A new review's findings replaced the old ones, or they were cleared. */
+  newSession?: boolean;
 }
 
 /** Lines kept around a finding when looking for its moved quote. */
@@ -122,7 +124,7 @@ export class FindingStore implements vscode.Disposable {
         this.items.set(key, { ...reanchor(finding, lines), key, uri, status });
       }
     }
-    this.emitter.fire({});
+    this.emitter.fire({ newSession: true });
     return this.all();
   }
 
@@ -152,7 +154,7 @@ export class FindingStore implements vscode.Disposable {
     this.cancelPending();
     this.items.clear();
     this.current = undefined;
-    this.emitter.fire({});
+    this.emitter.fire({ newSession: true });
   }
 
   /**
@@ -190,8 +192,11 @@ export class FindingStore implements vscode.Disposable {
       const from = change.range.start.line + 1;
       const to = change.range.end.line + 1;
       const delta = countNewlines(change.text) - (to - from);
+      // A range ending at column 0 of a line leaves that line's text alone (whole lines
+      // deleted or inserted right above it), so it counts as above that line.
+      const end = change.range.end.character === 0 ? to - 1 : to;
       for (const f of findings) {
-        if (to < f.startLine) {
+        if (end < f.startLine) {
           if (delta) {
             f.startLine += delta;
             f.endLine += delta;

@@ -91,6 +91,12 @@ const KNOWN_BUGS = [
     suggestion: 'return a / b; // shift',
   },
   {
+    file: 'src/ux-edge.ts',
+    title: 'edge bug',
+    quote: 'return a * b; // edge',
+    suggestion: 'return a / b; // edge',
+  },
+  {
     file: 'src/ux-revise.ts',
     title: 'revised bug',
     quote: 'return a * b; // revise',
@@ -574,6 +580,61 @@ suite('Review', () => {
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
   });
 
+  test('whole lines deleted or inserted right at the start of a finding shift it (F21)', async () => {
+    const filler = Array.from({ length: 25 }, (_, i) => `  const x${i} = ${i};`);
+    const lines = DIV('edge').split('\n');
+    const content = [...lines.slice(0, 3), ...filler, ...lines.slice(3)].join('\n');
+    const key = await reviewOne('src/ux-edge.ts', content);
+    assert.strictEqual(api.findings.get(key)?.startLine, 29);
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-edge.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    /** Where the finding is when the store first reports a change (before any re-anchoring). */
+    const nextPlacement = () =>
+      new Promise<number[]>((resolve) => {
+        const sub = api.findings.onDidChange(() => {
+          sub.dispose();
+          const f = api.findings.get(key);
+          resolve([f?.startLine ?? -1, f?.endLine ?? -1]);
+        });
+      });
+
+    try {
+      // The 25 lines right above it: the range ends at column 0 of the finding's line.
+      let placed = nextPlacement();
+      await editor.edit((e) => e.delete(new vscode.Range(3, 0, 28, 0)));
+      assert.deepStrictEqual(await placed, [4, 4]);
+
+      // Lines typed or pasted at column 0 of its first line push it down.
+      placed = nextPlacement();
+      await editor.edit((e) => e.insert(new vscode.Position(3, 0), filler.join('\n') + '\n'));
+      assert.deepStrictEqual(await placed, [29, 29]);
+
+      // Pasting over the lines above (ending at column 0 of its line) shifts it by the difference.
+      placed = nextPlacement();
+      await editor.edit((e) => e.replace(new vscode.Range(3, 0, 28, 0), '  // a\n  // b\n'));
+      assert.deepStrictEqual(await placed, [6, 6]);
+
+      // Lines inserted at column 0 of the line below it leave it alone.
+      await editor.edit((e) => e.insert(new vscode.Position(6, 0), '  // below\n'));
+      assert.deepStrictEqual(
+        [api.findings.get(key)?.startLine, api.findings.get(key)?.endLine],
+        [6, 6],
+      );
+
+      await doc.save();
+      // Past the re-anchoring delay: the quote is still found where the finding is.
+      await new Promise((r) => setTimeout(r, 600));
+      const f = api.findings.get(key);
+      assert.deepStrictEqual([f?.startLine, f?.endLine, !!f?.stale], [6, 6, false]);
+      assert.strictEqual(doc.lineAt(5).text, '  return a * b; // edge');
+      assert.strictEqual(api.threads.threadOf(key)?.range?.start.line, 5);
+      assert.strictEqual(vscode.languages.getDiagnostics(doc.uri)[0]?.range.start.line, 5);
+    } finally {
+      await vscode.window.showTextDocument(doc);
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
+  });
+
   test('a thread is updated in place: unchanged findings keep it as is, shifts move it, outdated collapses it', async () => {
     const key = await reviewOne('src/ux-shift.ts', DIV('shift'));
     const thread = api.threads.threadOf(key)!;
@@ -883,6 +944,83 @@ suite('Review', () => {
     assert.strictEqual(state.running, false);
     assert.ok(Array.isArray(state.branches));
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
+  test('the panel keeps its last error while findings move or change status (F22)', async () => {
+    const key = await reviewOne('src/ux-track.ts', DIV('track'));
+    const failInPanel = async () => {
+      await api.panel.update({ scope: 'branch', base: 'no-such-branch' });
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.runReview',
+        { root, silent: true },
+      );
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual((await api.panel.snapshot()).last?.level, 'warn');
+    };
+    const last = async () => (await api.panel.snapshot()).last;
+
+    await failInPanel();
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-track.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    try {
+      await editor.edit((e) => e.insert(new vscode.Position(0, 0), '// a\n// b\n'));
+      await until(() => api.findings.get(key)?.startLine === 6);
+      assert.match((await last())?.text ?? '', /no-such-branch/, 'after a line shift');
+      api.findings.setStatus(key, 'dismissed');
+      assert.match((await last())?.text ?? '', /no-such-branch/, 'after dismissing');
+    } finally {
+      await vscode.window.showTextDocument(doc);
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
+
+    // Clear Findings removes it.
+    await vscode.commands.executeCommand('aiReview.clearFindings');
+    assert.strictEqual(await last(), undefined);
+
+    // So does a review started from any command, as soon as it starts.
+    await failInPanel();
+    write('src/ux-lf.ts', DIV('lf'));
+    const gate = hold('return a * b; // lf');
+    const pending = vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+      root,
+      path: 'src/ux-lf.ts',
+      silent: true,
+    });
+    await until(() => gate.arrived);
+    const running = await api.panel.snapshot();
+    gate.release();
+    const result = await pending;
+    assert.strictEqual(running.running, true);
+    assert.strictEqual(running.last, undefined);
+    assert.strictEqual(result.ok, true, result.message);
+    assert.strictEqual((await last())?.level, 'info');
+  });
+
+  test('the panel lists a branch created after it first listed them, a few seconds later (F22)', async () => {
+    // The test repo is outside the workspace: make it the panel's only repository.
+    const roots = api.repos.roots;
+    api.repos.roots = async () => [root];
+    // Move the clock instead of waiting; past the panel's cache times (5 s) to start fresh.
+    const now = Date.now;
+    let ahead = 6_000;
+    Date.now = () => now() + ahead;
+    try {
+      assert.ok((await api.panel.snapshot()).branches.includes('feature'));
+      git('branch', 'f22-new');
+      // Cached for a moment: the panel refreshes on every selection change.
+      assert.ok(!(await api.panel.snapshot()).branches.includes('f22-new'));
+      ahead += 6_000;
+      assert.ok((await api.panel.snapshot()).branches.includes('f22-new'));
+    } finally {
+      git('branch', '-D', 'f22-new');
+      // Leave caches that match the repository again for the tests that follow.
+      ahead += 6_000;
+      await api.panel.snapshot();
+      api.repos.roots = roots;
+      ahead += 6_000;
+      await api.panel.snapshot();
+      Date.now = now;
+    }
   });
 
   test('the panel shows double-checking as on when the repo config turns it on', async () => {

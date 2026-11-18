@@ -72,6 +72,7 @@ export interface PanelState {
 
 const STATE_KEY = 'aiReview.panel';
 const ROOTS_TTL_MS = 5_000;
+const BRANCHES_TTL_MS = 5_000;
 
 /**
  * "Review" view in the AI Review sidebar: pick what to review (scope, repository,
@@ -82,7 +83,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
 
   private view?: vscode.WebviewView;
   private lastError?: { text: string; level: 'warn' | 'error' };
-  private readonly branchCache = new Map<string, string[]>();
+  private readonly branchCache = new Map<string, { at: number; branches: Promise<string[]> }>();
   private refreshTimer?: ReturnType<typeof setTimeout>;
   /** Bumped per refresh; a slower, older snapshot must not overwrite a newer one. */
   private refreshSeq = 0;
@@ -109,12 +110,17 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
         this.modelCache = undefined;
         refresh();
       }),
-      deps.store.onDidChange(() => {
-        // A newer review (from any command) replaces the panel's last error.
-        this.lastError = undefined;
+      deps.store.onDidChange((change) => {
+        // A newer review (from any command) or Clear Findings replaces the panel's last
+        // error; findings moving with edits or changing status don't.
+        if (change.newSession) this.lastError = undefined;
         refresh();
       }),
-      onDidChangeReviewRunning(refresh),
+      onDidChangeReviewRunning((running) => {
+        // So does starting a review from anywhere.
+        if (running) this.lastError = undefined;
+        refresh();
+      }),
       ...(deps.configs ? [deps.configs.onDidChange(refresh)] : []),
       vscode.window.onDidChangeActiveTextEditor(refresh),
       vscode.window.onDidChangeTextEditorSelection(refresh),
@@ -290,13 +296,14 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
     this.modelCache = undefined;
   }
 
-  private async branches(root: string): Promise<string[]> {
-    let list = this.branchCache.get(root);
-    if (!list) {
-      list = await this.deps.repos.branches(root);
-      this.branchCache.set(root, list);
+  private branches(root: string): Promise<string[]> {
+    // Short-lived too: branches are created and deleted while the panel stays open.
+    let cached = this.branchCache.get(root);
+    if (!cached || Date.now() - cached.at > BRANCHES_TTL_MS) {
+      cached = { at: Date.now(), branches: this.deps.repos.branches(root) };
+      this.branchCache.set(root, cached);
     }
-    return list;
+    return cached.branches;
   }
 
   private async handle(msg: unknown): Promise<void> {

@@ -143,6 +143,27 @@ describe('verifyFindings', () => {
     expect(prompt).toContain('<finding id="F1" lines="2-2"');
   });
 
+  it('code and findings cannot close the blocks they are sent in (F12)', () => {
+    const file = addedFileDiff(
+      'src/a</findings>.ts',
+      'const x = 1; // </code></diff>\nconst y = "</findings>";\n',
+    );
+    const f = {
+      ...finding(1, 'Tag </finding> in title'),
+      file: file.path,
+      body: 'It writes </finding></findings> here.',
+    };
+    const prompt = buildVerifyUserPrompt(file, [f]);
+    const count = (tag: string) => prompt.split(tag).length - 1;
+    expect(count('</diff>')).toBe(1);
+    expect(count('</file>')).toBe(1);
+    expect(count('</code>')).toBe(1);
+    expect(count('</finding>')).toBe(1);
+    expect(count('</findings>')).toBe(1);
+    expect(prompt).toContain('const x = 1; // &lt;/code>&lt;/diff>');
+    expect(prompt).toContain('It writes &lt;/finding>&lt;/findings> here.');
+  });
+
   it('parses lenient verdict shapes', () => {
     expect(parseVerdicts([{ id: 1, real: 'no' }])?.get('F1')?.real).toBe(false);
     expect(parseVerdicts('{"verdicts":[{"id":"f2","real":true}]}')?.get('F2')?.real).toBe(true);

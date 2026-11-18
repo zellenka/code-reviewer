@@ -631,7 +631,7 @@ export interface ReviewEstimate {
   skipped: number;
   /** Model requests, without repair retries. Agentic: one per part (more turns may follow). */
   requests: number;
-  /** Estimated input tokens (chars / 3.5), without repair retries. Cached tokens included. */
+  /** Estimated input tokens (`estimateTokens`), without repair retries. Cached tokens included. */
   inputTokens: number;
   /** Agentic only: input tokens if every part uses its whole agent token budget. */
   inputTokensHigh?: number;

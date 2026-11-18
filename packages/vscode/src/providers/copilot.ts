@@ -1,6 +1,7 @@
 import {
   ProviderError,
   isProviderError,
+  withRetry,
   type ChatEvent,
   type ChatRequest,
   type ContentPart,
@@ -8,6 +9,7 @@ import {
   type Logger,
   type Message,
   type ModelInfo,
+  type RetryOptions,
 } from '@ai-review/core';
 import * as vscode from 'vscode';
 
@@ -15,21 +17,34 @@ const PROVIDER = 'copilot';
 /** vscode.lm doesn't expose output limits; this is a conservative assumption. */
 const ASSUMED_MAX_OUTPUT = 4096;
 
+export interface VsCodeLmProviderOptions {
+  retry?: Omit<RetryOptions, 'signal' | 'logger'>;
+  /** For tests: replaces `vscode.lm.selectChatModels`. */
+  selectModels?: (
+    selector: vscode.LanguageModelChatSelector,
+  ) => Thenable<vscode.LanguageModelChat[]>;
+}
+
 /**
  * GitHub Copilot models via the VS Code Language Model API.
  * Notes on the API (engines.vscode 1.95):
  * - no system role → system text is sent as the first user message
  * - no usage reporting → tokens are counted with `model.countTokens` (marked `estimated`)
  * - "Required" tool mode can't name a tool → only the forced tool is sent
+ * - no stop reason → an answer cut off by the output limit still ends with `end`
+ *   (the reviewer treats unfinished JSON as possibly cut off)
  * - the first `sendRequest` shows a consent dialog, so call `chat` only from a user action
  */
 export class VsCodeLmProvider implements LLMProvider {
   readonly id = PROVIDER;
 
-  constructor(private readonly logger: Logger) {}
+  constructor(
+    private readonly logger: Logger,
+    private readonly options: VsCodeLmProviderOptions = {},
+  ) {}
 
   async listModels(): Promise<ModelInfo[]> {
-    const models = await vscode.lm.selectChatModels({ vendor: PROVIDER });
+    const models = await this.selectModels({ vendor: PROVIDER });
     return models.map(toModelInfo);
   }
 
@@ -37,7 +52,16 @@ export class VsCodeLmProvider implements LLMProvider {
     return (await this.getModel(model)).countTokens(text);
   }
 
-  async *chat(req: ChatRequest): AsyncIterable<ChatEvent> {
+  /** Retried like the Anthropic provider: only retryable kinds, and only before any output. */
+  chat(req: ChatRequest): AsyncIterable<ChatEvent> {
+    return withRetry(() => this.chatOnce(req), {
+      ...this.options.retry,
+      signal: req.signal,
+      logger: this.logger,
+    });
+  }
+
+  private async *chatOnce(req: ChatRequest): AsyncIterable<ChatEvent> {
     if (req.signal.aborted) {
       yield { type: 'stop', reason: 'cancelled' };
       return;
@@ -86,12 +110,15 @@ export class VsCodeLmProvider implements LLMProvider {
     }
 
     yield { type: 'message', content };
-    yield { type: 'usage', usage: await this.estimateUsage(model, messages, text, content) };
+    yield {
+      type: 'usage',
+      usage: await this.estimateUsage(model, messages, options.tools, text, content),
+    };
     yield { type: 'stop', reason: toolUse ? 'tool_use' : 'end' };
   }
 
   private async getModel(id: string): Promise<vscode.LanguageModelChat> {
-    const [model] = await vscode.lm.selectChatModels({ vendor: PROVIDER, id });
+    const [model] = await this.selectModels({ vendor: PROVIDER, id });
     if (!model) {
       throw new ProviderError(
         'notFound',
@@ -104,14 +131,27 @@ export class VsCodeLmProvider implements LLMProvider {
     return model;
   }
 
+  private selectModels(
+    selector: vscode.LanguageModelChatSelector,
+  ): Thenable<vscode.LanguageModelChat[]> {
+    return this.options.selectModels
+      ? this.options.selectModels(selector)
+      : vscode.lm.selectChatModels(selector);
+  }
+
   private async estimateUsage(
     model: vscode.LanguageModelChat,
     messages: vscode.LanguageModelChatMessage[],
+    tools: readonly vscode.LanguageModelChatTool[] | undefined,
     text: string,
     content: ContentPart[],
   ) {
     try {
-      const counts = await Promise.all(messages.map((m) => model.countTokens(m)));
+      // Tool definitions are sent with every request, so they count as input too.
+      const counts = await Promise.all([
+        ...messages.map((m) => model.countTokens(m)),
+        ...(tools?.length ? [model.countTokens(JSON.stringify(tools))] : []),
+      ]);
       const toolText = content
         .filter((p) => p.type === 'tool_call')
         .map((p) => JSON.stringify(p))

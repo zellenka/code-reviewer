@@ -135,6 +135,7 @@ function skipReason(
   // Secrets first, so a deleted .env isn't even listed as "deleted".
   if (isSecretPath(file.path) || (file.oldPath && isSecretPath(file.oldPath))) return 'secret';
   if (file.status === 'deleted') return 'deleted';
+  if (file.unmerged) return 'unmerged';
   if (file.binary) return 'binary';
   for (const { reason, match } of builtInMatchers.slice(1)) {
     if (match(file.path)) return reason;

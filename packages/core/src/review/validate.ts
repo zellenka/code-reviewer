@@ -3,6 +3,7 @@ import { severityRank, type ReviewConfig } from '../config/schema';
 import { normalizeEol, splitLines, toPosixPath } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
 import { locateQuote, normalizeWhitespace, similarity } from './anchor';
+import { neutralizeTags, restoreTags } from './prompt';
 import { REDACTED_MARK } from './redact';
 import type { DropReason, Finding, RawFinding } from './types';
 
@@ -20,6 +21,8 @@ interface FileContext {
   file: FileDiff;
   /** Index 0 = line 1. `undefined` where the content isn't known (no newContent). */
   lines: (string | undefined)[];
+  /** `lines` as the model saw them, with prompt tags escaped (`neutralizeTags`). */
+  sentLines: (string | undefined)[];
   /** Unredacted lines, for restoring quotes that contain redaction marks. */
   originalLines?: (string | undefined)[];
   changed: Set<number>;
@@ -78,12 +81,14 @@ export function validateFindings(raw: RawFinding[], options: ValidateOptions): V
     let endLine: number;
     let anchor: Finding['anchor'] = 'line';
     let quote = r.quote;
+    let suggestion = r.suggestion;
 
     if (r.anchor === 'file') {
       anchor = 'file';
       startLine = endLine = 1;
     } else {
-      const match = locateQuote(ctx.lines, r.quote, {
+      // Matched against the lines as sent, so a quote with tags escaped or not both match.
+      const match = locateQuote(ctx.sentLines, neutralizeTags(r.quote), {
         nearLine: r.startLine,
         fuzzyRanges: ctx.hunkRanges,
         prefer: (start, end) => intersects(ctx.changed, start, end),
@@ -94,7 +99,16 @@ export function validateFindings(raw: RawFinding[], options: ValidateOptions): V
       }
       startLine = match.startLine;
       endLine = match.endLine;
-      if (match.method === 'fuzzy') quote = linesText(ctx.lines, startLine, endLine);
+      // Lines sent with escaped tags: a quote that isn't the real code gets its tags back,
+      // so a fix replaces only what was quoted; failing that it becomes the real lines.
+      const real = linesText(ctx.lines, startLine, endLine);
+      const escaped = linesText(ctx.sentLines, startLine, endLine) !== real;
+      if (match.method === 'fuzzy') quote = real;
+      else if (escaped && !real.includes(quote)) {
+        const restored = restoreTags(quote);
+        quote = real.includes(restored) ? restored : real;
+      }
+      if (escaped && suggestion !== undefined) suggestion = restoreTags(suggestion);
       if (config.onlyChangedLines && !intersects(ctx.changed, startLine, endLine)) {
         drop('outsideChangedLines');
         continue;
@@ -103,7 +117,6 @@ export function validateFindings(raw: RawFinding[], options: ValidateOptions): V
 
     // Quotes with redaction marks would never match the real file: use the real lines.
     // The redacted lines are kept beside them for what is stored, and the id hashes those.
-    let suggestion = r.suggestion;
     let redactedQuote: string | undefined;
     if (quote.includes(REDACTED_MARK) && ctx.originalLines && anchor === 'line') {
       redactedQuote = linesText(ctx.lines, startLine, endLine);
@@ -196,7 +209,9 @@ function buildContext(file: FileDiff, original?: FileDiff): FileContext {
       }
     });
   }
-  const ctx: FileContext = { file, lines: newSideLines(file), changed, hunkRanges };
+  const lines = newSideLines(file);
+  const sentLines = lines.map((l) => (l === undefined ? l : neutralizeTags(l)));
+  const ctx: FileContext = { file, lines, sentLines, changed, hunkRanges };
   if (original) ctx.originalLines = newSideLines(original);
   return ctx;
 }

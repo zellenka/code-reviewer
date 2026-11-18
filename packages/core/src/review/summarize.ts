@@ -5,6 +5,7 @@ import { collectChat } from '../provider/collect';
 import type { LLMProvider, ModelInfo, Usage } from '../provider/types';
 import { estimateTokens } from '../provider/usage';
 import { renderFile } from './chunker';
+import { neutralizeTags } from './prompt';
 import type { Finding, SkippedFile } from './types';
 
 export interface FileStat {
@@ -97,13 +98,14 @@ export function buildSummaryUserPrompt(options: {
   const omitted = options.omitted
     ? `\n(${options.omitted} file(s) left out of the diff below to save space; see the stats.)`
     : '';
+  // Paths and finding titles come from the repository and the review model.
   return `Summarize this change.
 
 Files:
-${stats}
-${skipped}
+${neutralizeTags(stats)}
+${neutralizeTags(skipped)}
 <findings>
-${findings}
+${neutralizeTags(findings)}
 </findings>
 ${omitted}
 <diff>

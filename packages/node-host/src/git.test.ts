@@ -290,6 +290,37 @@ describe('GitCliDiffSource', () => {
     rmSync(r3, { recursive: true, force: true });
   });
 
+  it('a merge conflict is reported as unmerged in the unstaged and staged modes (F26)', async () => {
+    const { root: rm, git: gm } = makeRepo();
+    const put = (rel: string, content: string) => writeFileSync(path.join(rm, rel), content);
+    put('conflict.txt', 'line1\nline2\nline3\n');
+    put('other.txt', 'keep\n');
+    gm('add', '.');
+    gm('commit', '-q', '-m', 'base');
+    gm('checkout', '-q', '-b', 'feature');
+    put('conflict.txt', 'line1\nfeature\nline3\n');
+    gm('commit', '-q', '-am', 'feature');
+    gm('checkout', '-q', 'main');
+    put('conflict.txt', 'line1\nmain\nline3\n');
+    gm('commit', '-q', '-am', 'main');
+    expect(() => gm('merge', '-q', 'feature')).toThrow(); // stops with the conflict
+    put('other.txt', 'keep\nmore\n');
+    const merging = new GitCliDiffSource({ root: rm });
+
+    const unstaged = (await merging.getDiff({ kind: 'unstaged' })).files;
+    expect(unstaged.map((f) => [f.path, f.unmerged ?? false, f.hunks.length])).toEqual([
+      ['conflict.txt', true, 0],
+      ['other.txt', false, 1],
+    ]);
+    const staged = (await merging.getDiff({ kind: 'staged' })).files;
+    expect(staged.map((f) => [f.path, f.unmerged ?? false])).toEqual([['conflict.txt', true]]);
+    // Against the merge-base git shows the working file, conflict markers and all.
+    const branch = (await merging.getDiff({ kind: 'branch' })).files;
+    expect(branch.find((f) => f.path === 'conflict.txt')).toMatchObject({ hunks: [{}] });
+    expect(branch.find((f) => f.path === 'conflict.txt')!.unmerged).toBeUndefined();
+    rmSync(rm, { recursive: true, force: true });
+  });
+
   it('staged: oversized index content is binary (F7)', async () => {
     const { root: r7, git: g7 } = makeRepo();
     writeFileSync(path.join(r7, 'big.txt'), 'x\n'.repeat(1024 * 1024 + 1));

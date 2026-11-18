@@ -4,6 +4,7 @@ import { addedFileDiff } from '../diff/parse';
 import type { UnifiedDiff, WorkspaceTools } from '../diff/types';
 import { MockProvider, mockError, mockToolCall, type MockStep } from '../provider/mock';
 import type { ChatEvent, ModelInfo } from '../provider/types';
+import { estimateTokens } from '../provider/usage';
 import { REPORT_TOOL_NAME } from './output';
 import { estimateReview, runReview } from './orchestrator';
 import { loadRepoRules, renderRules, ruleFilePaths } from './rules';
@@ -195,6 +196,17 @@ describe('repo rules', () => {
     expect(rules.sources.map((s) => [s.path, !!s.truncated])).toEqual([['docs/rules.md', true]]);
     const all = await loadRepoRules(async (p) => files[p], {});
     expect(all.sources).toEqual([{ path: 'AGENTS.md', text: '- Never use the `any` type.' }]);
+  });
+
+  it('truncates a rules file in CJK to the token budget', async () => {
+    const files: Record<string, string> = { '.codereview.md': '禁止使用任何类型。'.repeat(1_000) };
+    const rules = await loadRepoRules(async (p) => files[p], {}, { maxTokens: 1_000 });
+    const [source] = rules.sources;
+    expect(source?.truncated).toBe(true);
+    // About a token per character: 1000 tokens is 1000 characters, not 3500.
+    expect(source!.text.length).toBeLessThanOrEqual(1_000);
+    expect(source!.text.length).toBeGreaterThan(900);
+    expect(estimateTokens(source!.text)).toBeLessThanOrEqual(1_000);
   });
 
   it('wraps rules as untrusted guidance that cannot close its own tag', () => {
