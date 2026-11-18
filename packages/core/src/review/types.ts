@@ -75,6 +75,7 @@ export const DROP_REASON_LABELS: Record<DropReason, string> = {
 
 export type SkipReason =
   | 'deleted'
+  | 'unmerged'
   | 'binary'
   | 'secret'
   | 'lockfile'

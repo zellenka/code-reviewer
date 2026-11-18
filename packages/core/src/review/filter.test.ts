@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addedFileDiff } from '../diff/parse';
+import { addedFileDiff, parseUnifiedDiff } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
 import { filterFiles, isSecretPath } from './filter';
 import { createRedactor, redactFiles, redactText } from './redact';
@@ -65,6 +65,34 @@ describe('filterFiles', () => {
     );
     expect(isSecretPath('a/b/.env.local')).toBe(true);
     expect(isSecretPath('src/env.ts')).toBe(false);
+  });
+
+  it('files with merge conflicts are skipped as unmerged, not as "no changes" (F26)', () => {
+    const { files, skipped } = filterFiles(
+      parseUnifiedDiff(`diff --cc a.bin
+index 30112f7,8cf1f07..0000000
+Binary files differ
+diff --cc src/app.ts
+index e3dbf38,fb81947..0000000
+--- a/src/app.ts
++++ b/src/app.ts
+@@@ -1,3 -1,3 +1,7 @@@
+  line1
+++<<<<<<< HEAD
+ +main
+++=======
++ feature
+++>>>>>>> feature
+  line3
+* Unmerged path .env
+`).files,
+    );
+    expect(files).toEqual([]);
+    expect(skipped).toEqual([
+      { path: 'a.bin', reason: 'unmerged' },
+      { path: 'src/app.ts', reason: 'unmerged' },
+      { path: '.env', reason: 'secret' },
+    ]);
   });
 
   it('keeps files that only delete lines', () => {
