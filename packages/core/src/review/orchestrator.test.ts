@@ -9,6 +9,7 @@ import { ReviewTooLargeError, chunkFiles, renderChunk } from './chunker';
 import { REPORT_TOOL_NAME } from './output';
 import { runReview } from './orchestrator';
 import { reviewChunk } from './reviewer';
+import { fingerprint } from './validate';
 
 const MODEL: ModelInfo = {
   id: 'm',
@@ -288,6 +289,44 @@ describe('runReview', () => {
     });
     const result = await runReview(diff, { provider, model: MODEL, config: DEFAULT_CONFIG });
     expect(result.findings[0]!.quote).toBe('const key = "AKIAIOSFODNN7EXAMPLE";');
+    // What is kept for later (snapshot, status store) is the redacted form, and the id
+    // hashes that, not the secret (F33).
+    const redacted = 'const key = "[REDACTED:aws-access-key]";';
+    expect(result.findings[0]!.redactedQuote).toBe(redacted);
+    expect(result.findings[0]!.id).toBe(fingerprint('src/k.ts', 'security', redacted));
+    expect(JSON.stringify(result.snapshot)).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  });
+
+  it('two hard-coded secrets that look the same once redacted stay two findings (F33)', async () => {
+    const diff: UnifiedDiff = {
+      files: [
+        addedFileDiff(
+          'src/k.ts',
+          'const key = "AKIAIOSFODNN7EXAMPLE";\nconst x = 1;\nconst key = "AKIAI44QH8DHBEXAMPLE";\n',
+        ),
+      ],
+    };
+    const quote = 'const key = "[REDACTED:aws-access-key]";';
+    const provider = new MockProvider({
+      script: [
+        report(
+          [1, 3].map((line) =>
+            finding({
+              file: 'src/k.ts',
+              startLine: line,
+              endLine: line,
+              category: 'security',
+              quote,
+            }),
+          ),
+        ),
+      ],
+    });
+    const result = await runReview(diff, { provider, model: MODEL, config: DEFAULT_CONFIG });
+    expect(result.findings.map((f) => [f.startLine, f.quote])).toEqual([
+      [1, 'const key = "AKIAIOSFODNN7EXAMPLE";'],
+      [3, 'const key = "AKIAI44QH8DHBEXAMPLE";'],
+    ]);
   });
 
   it('cancel stops in-flight requests within ~1s and keeps finished results', async () => {
@@ -411,6 +450,30 @@ describe('runReview', () => {
     expect(result.chunks.completed).toBe(result.chunks.total - 1);
     expect(result.errors).toEqual(['Part 1: filtered']);
     expect(result.findings.map((f) => f.file)).toEqual(['f1.ts']);
+  });
+
+  it('counts the usage of a part that failed after its first request (F15)', async () => {
+    const files = Array.from({ length: 3 }, (_, i) =>
+      addedFileDiff(`f${i}.ts`, 'z\n'.repeat(3000)),
+    );
+    // Part 1 answers without the tool, then its repair request fails.
+    const provider = new MockProvider({
+      script: [mockText('no tool'), mockError('server', 'overloaded')],
+      fallback: report([]),
+    });
+    const result = await runReview(
+      { files },
+      {
+        provider,
+        model: { ...MODEL, maxInputTokens: 12_000 },
+        config: DEFAULT_CONFIG,
+        concurrency: 1,
+      },
+    );
+    expect(result.chunks.failed).toBe(1);
+    expect(result.errors).toEqual(['Part 1: overloaded']);
+    // Every request but the failed one was answered (and billed).
+    expect(result.usage.requests).toBe(provider.requests.length - 1);
   });
 
   it('an empty diff makes no requests', async () => {

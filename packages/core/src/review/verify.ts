@@ -73,8 +73,13 @@ export interface VerifyResult {
   findings: Finding[];
   rejected: { finding: Finding; reason: string }[];
   usage: Usage;
-  /** Requests that failed or gave no usable answer; their findings were kept. */
+  /**
+   * Requests that failed or gave no usable answer, and those not sent after an auth or
+   * quota error; their findings were kept.
+   */
   failed: number;
+  /** Findings that got a verdict. */
+  checked: number;
   requests: number;
 }
 
@@ -167,6 +172,7 @@ export async function verifyFindings(options: VerifyOptions): Promise<VerifyResu
     rejected: [],
     usage: emptyUsage(),
     failed: 0,
+    checked: 0,
     requests: 0,
   };
   const queue = [...groups];
@@ -184,6 +190,7 @@ export async function verifyFindings(options: VerifyOptions): Promise<VerifyResu
         }
         group.findings.forEach((f, i) => {
           const v = verdicts.get(`F${i + 1}`);
+          if (v) result.checked++;
           if (v && !v.real) rejected.set(f, v.reason);
         });
       } catch (err) {
@@ -192,8 +199,9 @@ export async function verifyFindings(options: VerifyOptions): Promise<VerifyResu
         logger.warn(
           `verify request for ${group.file.path} failed: ${toProviderError(err).message}`,
         );
-        // Auth or quota problems will fail every request the same way.
+        // Auth or quota problems will fail every request the same way: the rest count as failed.
         if (isProviderError(err) && ['auth', 'consent', 'quota', 'notFound'].includes(err.kind)) {
+          result.failed += queue.length;
           queue.length = 0;
         }
       }

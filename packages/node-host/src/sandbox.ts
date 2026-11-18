@@ -9,9 +9,13 @@ export function pathKey(p: string): string {
   return caseInsensitive ? p.toLowerCase() : p;
 }
 
-function isInside(root: string, target: string): boolean {
+/**
+ * Whether absolute path `target` is `root` or inside it (case-insensitive where the file
+ * system is). A name that only starts with `..` (`..config`) is inside; another drive is not.
+ */
+export function isInside(root: string, target: string): boolean {
   const rel = path.relative(pathKey(root), pathKey(target));
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  return rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
 }
 
 /**

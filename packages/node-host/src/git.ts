@@ -119,7 +119,8 @@ export class GitCliDiffSource implements DiffSource {
         await mapLimit(diff.files, 16, async (f) => {
           if (f.status === 'deleted' || f.binary) return;
           // Output past the size cap stops git and marks the file binary, as for working files.
-          const { stdout, code, overflow } = await this.git(['show', `:${f.path}`], {
+          // `:0:` names the stage, so a file called `1:foo` isn't read as stage 1 of `foo`.
+          const { stdout, code, overflow } = await this.git(['show', `:0:${f.path}`], {
             allowFail: true,
             maxBuffer: MAX_FILE_BYTES,
           });

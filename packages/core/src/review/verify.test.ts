@@ -96,6 +96,31 @@ describe('verifyFindings', () => {
     }
   });
 
+  it('counts the requests an auth error leaves unsent as failed (F35)', async () => {
+    // 17 findings in one file: three requests of 8, 8 and 1.
+    const findings = Array.from({ length: 17 }, (_, i) => finding(i + 1, `f${i}`));
+    const provider = new MockProvider({
+      script: [
+        verdicts(Array.from({ length: 8 }, (_, i) => ({ id: `F${i + 1}`, real: i > 0 }))),
+        mockError('auth'),
+      ],
+    });
+    const result = await verifyFindings({
+      provider,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      files: [FILE],
+      findings,
+      signal,
+      concurrency: 1,
+    });
+    expect(provider.requests).toHaveLength(2);
+    expect(result.failed).toBe(2);
+    expect(result.checked).toBe(8);
+    expect(result.rejected).toHaveLength(1);
+    expect(result.findings).toHaveLength(16);
+  });
+
   it('keeps findings without a verdict', async () => {
     const provider = new MockProvider({ script: [verdicts([{ id: 'F2', real: false }])] });
     const result = await verifyFindings({
@@ -107,6 +132,7 @@ describe('verifyFindings', () => {
       signal,
     });
     expect(result.findings).toHaveLength(1);
+    expect(result.checked).toBe(0);
   });
 
   it('sends code from the redacted files only, never the finding quote', () => {
@@ -149,6 +175,27 @@ describe('runReview with verify', () => {
     expect(result.verify).toEqual({ checked: 2, rejected: 1, failed: 0 });
     expect(result.dropped).toContainEqual({ reason: 'rejectedByVerify', count: 1 });
     expect(result.usage.requests).toBe(2);
+  });
+
+  it('reports only the findings that got a verdict as checked after an auth error (F35)', async () => {
+    const files = ['src/a.ts', 'src/b.ts', 'src/c.ts'].map((p) => addedFileDiff(p, CODE));
+    const provider = new MockProvider({
+      script: [
+        mockToolCall(REPORT_TOOL_NAME, { findings: files.map((f) => raw({ file: f.path })) }),
+        verdicts([{ id: 'F1', real: true }]),
+        mockError('auth', 'bad key'),
+      ],
+    });
+    const result = await runReview(
+      { files },
+      { provider, model: MODEL, config: DEFAULT_CONFIG, verify: true, concurrency: 1 },
+    );
+    expect(provider.requests).toHaveLength(3);
+    expect(result.findings).toHaveLength(3);
+    expect(result.verify).toEqual({ checked: 1, rejected: 0, failed: 2 });
+    expect(result.errors).toEqual([
+      'Verify: 2 request(s) failed or were not sent; 2 finding(s) are shown unchecked.',
+    ]);
   });
 
   it('is off by default and skipped when there are no findings', async () => {

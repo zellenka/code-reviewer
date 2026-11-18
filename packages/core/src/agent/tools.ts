@@ -42,10 +42,7 @@ export function createReviewTools(
     redactText(text, { highEntropy: !!options.redactHighEntropy }).text;
   const blocked = (p: string) => isProtectedPath(p) || !!options.isBlocked?.(p);
   const clean = (p: string): string => {
-    const out = p
-      .trim()
-      .replace(/\\/g, '/')
-      .replace(/^(\.\/)+/, '');
+    const out = normalize(p);
     if (blocked(out)) throw new Error(`${out} can't be read: it may contain secrets.`);
     return out;
   };
@@ -53,9 +50,33 @@ export function createReviewTools(
     try {
       return await ws.readFile(p, range, signal);
     } catch (err) {
+      signal.throwIfAborted();
       throw friendly(err, p);
     }
   };
+  /**
+   * Every tool's errors go back to the model, so none may show where the repo lives: an
+   * error with a code (`EBUSY: …, open 'C:\Users\…'`) becomes `failed (EBUSY).`, and the
+   * root and other absolute paths are cut out of any other message (git, language server).
+   */
+  const guarded = <I>(tool: AgentTool<I>, failed: (input: I) => string): AgentTool<I> => ({
+    ...tool,
+    async run(input, signal) {
+      try {
+        return await tool.run(input, signal);
+      } catch (err) {
+        signal.throwIfAborted();
+        const code = errorCode(err);
+        const message = code
+          ? `${failed(input)} (${code}).`
+          : err instanceof Error
+            ? err.message
+            : String(err);
+        // The loop sends only the message; the cause is for debugging.
+        throw new Error(scrubPaths(message, ws.root), { cause: err });
+      }
+    },
+  });
   /**
    * The redacted lines of text read from the start of a file. Tools cut their output from
    * these: a private key body is only known after its BEGIN line, so a part of a file can't
@@ -213,7 +234,20 @@ export function createReviewTools(
     },
   };
 
-  return [readFile, searchCode, findReferences, getSymbol] as unknown as AgentTool<never>[];
+  return [
+    guarded(readFile, (i) => `${normalize(i.path)} can't be read`),
+    guarded(searchCode, () => 'The search failed'),
+    guarded(findReferences, (i) => `References in ${normalize(i.path)} can't be found`),
+    guarded(getSymbol, (i) => `${normalize(i.path)} can't be read`),
+  ] as unknown as AgentTool<never>[];
+}
+
+/** A repo-relative path as the model may write it: `.\src\a.ts` → `src/a.ts`. */
+function normalize(p: string): string {
+  return p
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^(\.\/)+/, '');
 }
 
 function numbered(lines: string[], start: number): string {
@@ -228,8 +262,49 @@ function wordIndex(text: string, word: string): number {
 
 /** Hides absolute paths in fs errors (they'd leak the user's directory layout). */
 function friendly(err: unknown, p: string): Error {
-  const code = (err as { code?: string } | undefined)?.code;
+  const code = errorCode(err);
   if (code === 'ENOENT') return new Error(`File not found: ${p}`);
   if (code === 'EISDIR') return new Error(`${p} is a directory.`);
+  if (code) return new Error(`${p} can't be read (${code}).`);
   return err instanceof Error ? err : new Error(String(err));
+}
+
+/** Node's error code (`EBUSY`, `ERR_FS_FILE_TOO_LARGE`), if any. */
+function errorCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]*$/.test(code) ? code : undefined;
+}
+
+/**
+ * Absolute paths, which can contain a user name: quoted (spaces allowed, as Node quotes
+ * them), `file:` URIs, drive and UNC paths, and POSIX paths of two or more parts.
+ */
+const ABSOLUTE_PATH = new RegExp(
+  [
+    String.raw`(['"\`])(?:[A-Za-z]:[\\/]|\\\\|/|file:)[^'"\`\r\n]*\1`,
+    String.raw`\bfile:[^\s'"\`]+`,
+    String.raw`\b[A-Za-z]:[\\/][^\s'"\`]*`,
+    String.raw`\\\\[^\s'"\`\\]+\\[^\s'"\`]*`,
+    String.raw`(?<=^|[\s(=,:])/[^\s'"\`/]+/[^\s'"\`]*`,
+  ].join('|'),
+  'g',
+);
+
+/**
+ * `text` without the repo root (paths under it become repo-relative, in either slash
+ * direction and any letter case) or any other absolute path (`<path>`).
+ */
+function scrubPaths(text: string, root?: string): string {
+  const parts = root?.split(/[\\/]+/).filter(Boolean) ?? [];
+  if (parts.length) {
+    const escaped = parts.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const lead = root!.startsWith('/') || root!.startsWith('\\') ? '[\\\\/]+' : '';
+    const rootRe = `${lead}${escaped.join('[\\\\/]+')}`;
+    text = text
+      .replace(new RegExp(`${rootRe}[\\\\/]+`, 'gi'), '')
+      .replace(new RegExp(`${rootRe}(?=$|[\\s'"\`,;:)\\]])`, 'gi'), '.');
+  }
+  return text.replace(ABSOLUTE_PATH, (_match, quote: string | undefined) =>
+    quote ? `${quote}<path>${quote}` : '<path>',
+  );
 }

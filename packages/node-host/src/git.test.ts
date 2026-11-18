@@ -1,6 +1,15 @@
 import type * as childProcess from 'node:child_process';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+  realpathSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import type * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
@@ -10,6 +19,7 @@ import {
   FsWorkspaceTools,
   GitCliDiffSource,
   findRepoRoot,
+  isInside,
   isSafeRef,
   resolveInRepo,
 } from './index';
@@ -299,6 +309,28 @@ describe('GitCliDiffSource', () => {
     }
   });
 
+  it('staged: a file named like an index stage (`1:foo`) is read as itself (F10)', async () => {
+    const { root: r9, git: g9 } = makeRepo();
+    const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+      cwd: r9,
+      input: 'colon\n',
+      encoding: 'utf8',
+    }).trim();
+    // Git for Windows refuses `:` in index paths, so stage `1_foo` and rename it in the index.
+    g9('update-index', '--add', '--cacheinfo', `100644,${blob},1_foo`);
+    const indexFile = path.join(r9, '.git', 'index');
+    const index = readFileSync(indexFile);
+    index[index.indexOf('1_foo') + 1] = ':'.charCodeAt(0);
+    const body = index.subarray(0, index.length - 20);
+    writeFileSync(indexFile, Buffer.concat([body, createHash('sha1').update(body).digest()]));
+    try {
+      const { files } = await new GitCliDiffSource({ root: r9 }).getDiff({ kind: 'staged' });
+      expect(files).toMatchObject([{ path: '1:foo', status: 'added', newContent: 'colon\n' }]);
+    } finally {
+      rmSync(r9, { recursive: true, force: true });
+    }
+  });
+
   it('staged: reads the index with a bounded number of git processes (F7)', async () => {
     const { root: r8, git: g8 } = makeRepo();
     for (let i = 0; i < 40; i++) writeFileSync(path.join(r8, `f${i}.txt`), `file ${i}\n`);
@@ -454,6 +486,10 @@ describe('sandbox + FsWorkspaceTools', () => {
     expect(await resolveInRepo(root, 'src/new/not-yet.ts')).toBe(
       path.join(root, 'src', 'new', 'not-yet.ts'),
     );
+    // Names that only start with `..` are inside (F10).
+    expect(await resolveInRepo(root, '..config')).toBe(path.join(root, '..config'));
+    expect(await resolveInRepo(root, 'src/..d/x.ts')).toBe(path.join(root, 'src', '..d', 'x.ts'));
+    await expect(resolveInRepo(root, 'src/../..')).rejects.toSatisfy(isOutside);
     let hasLink = true;
     try {
       realpathSync(path.join(root, 'link'));
@@ -463,6 +499,21 @@ describe('sandbox + FsWorkspaceTools', () => {
     if (hasLink) {
       await expect(resolveInRepo(root, 'link/secret.txt')).rejects.toSatisfy(isOutside);
       await expect(resolveInRepo(root, 'link/new.txt')).rejects.toSatisfy(isOutside);
+    }
+  });
+
+  it('isInside: `..` names are inside, `..` steps and other drives are not (F10)', () => {
+    const base = path.resolve('/repo');
+    expect(isInside(base, base)).toBe(true);
+    expect(isInside(base, path.join(base, '..config'))).toBe(true);
+    expect(isInside(base, path.join(base, '...', 'x'))).toBe(true);
+    expect(isInside(base, path.join(base, 'src', 'a.ts'))).toBe(true);
+    expect(isInside(base, path.dirname(base))).toBe(false);
+    expect(isInside(base, path.join(base, '..', 'other'))).toBe(false);
+    expect(isInside(base, path.resolve('/repo2'))).toBe(false);
+    if (process.platform === 'win32') {
+      expect(isInside('C:\\repo', 'D:\\repo\\x')).toBe(false);
+      expect(isInside('C:\\Repo', 'c:\\repo\\X')).toBe(true);
     }
   });
 

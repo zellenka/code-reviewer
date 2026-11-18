@@ -13,6 +13,7 @@ import type {
   Usage,
 } from '../provider/types';
 import { addUsage, emptyUsage, estimateCostUsd, estimateTokens } from '../provider/usage';
+import { normalizeWhitespace } from './anchor';
 import { chunkFiles, renderChunk, type Chunk } from './chunker';
 import { buildFileContext, changedSymbols, renderChangedSymbols } from './context';
 import { compileGlobs, filterFiles } from './filter';
@@ -23,7 +24,7 @@ import { reviewChunk } from './reviewer';
 import { renderRules, reviewSettingsWarnings, type RepoRules } from './rules';
 import { buildSummarySystemPrompt, summarizeReview } from './summarize';
 import type { SymbolIndex } from './symbols';
-import type { DropReason, RawFinding, ReviewResult, SkippedFile } from './types';
+import type { DropReason, Finding, RawFinding, ReviewResult, SkippedFile } from './types';
 import {
   createSnapshot,
   planIncremental,
@@ -32,7 +33,7 @@ import {
   type ReviewSnapshot,
 } from './incremental';
 import { validateFindings } from './validate';
-import { estimateVerify, verifyFindings } from './verify';
+import { buildVerifySystemPrompt, estimateVerify, verifyFindings } from './verify';
 
 export interface ReviewProgress {
   chunksTotal: number;
@@ -84,7 +85,7 @@ export interface ReviewOptions {
   /**
    * The last review of the same scope (`ReviewResult.snapshot`). Hunks reviewed then are
    * not sent again and their findings are carried over. Ignored when the model, mode,
-   * config or rules changed since.
+   * config, rules or prompts changed since.
    */
   previous?: ReviewSnapshot;
 }
@@ -155,6 +156,10 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
     const { files, redacted, chunks, outputTokens, mode } = prepared;
     // Incremental: report on the whole diff, even the files that needed no new requests.
     const all = plan ? filterFiles(diff.files, config.ignore) : undefined;
+    // The whole diff as sent to the model (for the summary and the snapshot).
+    const allRedacted = all
+      ? redactFiles(all.files, { highEntropy: options.redactHighEntropy ?? false }).files
+      : redacted.files;
     const skipped = all?.skipped ?? prepared.skipped;
     if (plan) {
       logger.info(
@@ -252,8 +257,9 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
           ...(prepared.shared ? { shared: prepared.shared } : {}),
           ...(agent ? { agent } : {}),
           label: `part ${chunk.index + 1}`,
+          // Counted per response: a part that throws later still used these tokens.
+          onUsage: (usage) => (result.usage = addUsage(result.usage, usage)),
         });
-        result.usage = addUsage(result.usage, review.usage);
         if (review.agent && result.agent) {
           result.agent.turns += review.agent.turns;
           result.agent.toolCalls += review.agent.toolCalls;
@@ -327,15 +333,16 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
       });
       result.usage = addUsage(result.usage, checked.usage);
       result.verify = {
-        checked: result.findings.length,
+        checked: checked.checked,
         rejected: checked.rejected.length,
         failed: checked.failed,
       };
+      const unchecked = result.findings.length - checked.checked;
       result.findings = checked.findings;
       if (checked.rejected.length) dropped.set('rejectedByVerify', checked.rejected.length);
       if (checked.failed) {
         result.errors.push(
-          `Verify: ${checked.failed} request(s) failed; their findings are shown unchecked.`,
+          `Verify: ${checked.failed} request(s) failed or were not sent; ${unchecked} finding(s) are shown unchecked.`,
         );
       }
       result.cancelled = !!options.signal?.aborted;
@@ -344,9 +351,11 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
       );
     }
     if (plan) {
-      // A new finding with the same fingerprint replaces the carried one.
-      const ids = new Set(result.findings.map((f) => f.id));
-      const carried = plan.carried.filter((f) => !ids.has(f.id));
+      // A new finding with the same fingerprint replaces the carried one, unless its real
+      // code differs (two secrets that look the same once redacted).
+      const sameKey = (f: Finding) => `${f.id}\n${normalizeWhitespace(f.quote)}`;
+      const ids = new Set(result.findings.map(sameKey));
+      const carried = plan.carried.filter((f) => !ids.has(sameKey(f)));
       result.findings = [...result.findings, ...carried].sort(
         (a, b) =>
           a.file.localeCompare(b.file) || a.startLine - b.startLine || a.endLine - b.endLine,
@@ -383,9 +392,7 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
           model,
           config,
           // Incremental: summarize the whole change, not just the new hunks.
-          files: all
-            ? redactFiles(all.files, { highEntropy: options.redactHighEntropy ?? false }).files
-            : redacted.files,
+          files: allRedacted,
           skipped,
           findings: result.findings,
           signal: controller.signal,
@@ -401,9 +408,15 @@ export async function runReview(diff: UnifiedDiff, options: ReviewOptions): Prom
         result.errors.push(`Summary: ${error.message}`);
       }
     }
-    // Only a complete review may be built on: otherwise the next one starts over.
-    if (!result.cancelled && result.chunks.failed === 0) {
-      result.snapshot = createSnapshot(key, all?.files ?? files, result.findings, result.summary);
+    // Only a complete review may be built on: otherwise the next one starts over. A part
+    // with only some valid findings, or findings verify could not check, is not complete.
+    if (
+      !result.cancelled &&
+      result.chunks.failed === 0 &&
+      !result.chunks.outcomes.includes('partial') &&
+      !result.verify?.failed
+    ) {
+      result.snapshot = createSnapshot(key, allRedacted, result.findings, result.summary);
     }
     return result;
   } finally {
@@ -475,6 +488,23 @@ function resolveMode(options: PrepareOptions): 'single-pass' | 'agentic' {
     : 'single-pass';
 }
 
+/** System blocks of every review request: the prompt for `mode`, then the repo rules. */
+function reviewSystem(
+  options: PrepareOptions,
+  mode: 'single-pass' | 'agentic',
+): { text: string; cache?: boolean }[] {
+  const agentLimits = { ...DEFAULT_AGENT_LIMITS, ...options.agentLimits };
+  const rules = renderRules(options.rules);
+  return buildSystemBlocks({
+    config: options.config,
+    jsonOnly: !options.model.supportsTools,
+    ...(mode === 'agentic'
+      ? { agent: { maxTurns: agentLimits.maxTurns, maxToolCalls: agentLimits.maxToolCalls } }
+      : {}),
+    ...(rules ? { rules } : {}),
+  });
+}
+
 /**
  * The snapshot key of this review and, when `previous` was made with the same key,
  * the incremental plan (what's new, what's carried over).
@@ -484,24 +514,35 @@ function planReview(
   options: PrepareOptions & { previous?: ReviewSnapshot; verify?: boolean },
   logger?: Logger,
 ): { key: string; plan?: IncrementalPlan } {
+  const mode = resolveMode(options);
   const key = snapshotKey({
     modelId: options.model.id,
     config: options.config,
-    mode: resolveMode(options),
+    mode,
     context: options.context ?? true,
     ...(options.rules ? { rules: options.rules } : {}),
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
+    redactHighEntropy: options.redactHighEntropy ?? false,
+    prompts: [
+      ...reviewSystem(options, mode).map((s) => s.text),
+      buildVerifySystemPrompt(options.config),
+    ],
   });
   if (!options.previous) return { key };
   if (options.previous.key !== key) {
     logger?.info(
-      'model, mode, settings or rules changed since the last review: reviewing everything',
+      'model, mode, settings, rules or prompts changed since the last review: reviewing everything',
     );
     return { key };
   }
   // Ignored files are never reviewed, so they are never "new" either.
   const reviewable = { files: filterFiles(diff.files, options.config.ignore).files };
-  return { key, plan: planIncremental(reviewable, options.previous) };
+  return {
+    key,
+    plan: planIncremental(reviewable, options.previous, {
+      highEntropy: options.redactHighEntropy ?? false,
+    }),
+  };
 }
 
 /**
@@ -516,15 +557,7 @@ export function prepareReview(diff: UnifiedDiff, options: PrepareOptions): Prepa
   const { files, skipped } = filterFiles(diff.files, config.ignore);
   const redacted = redactFiles(files, { highEntropy: options.redactHighEntropy ?? false });
 
-  const rules = renderRules(options.rules);
-  const system = buildSystemBlocks({
-    config,
-    jsonOnly,
-    ...(mode === 'agentic'
-      ? { agent: { maxTurns: agentLimits.maxTurns, maxToolCalls: agentLimits.maxToolCalls } }
-      : {}),
-    ...(rules ? { rules } : {}),
-  });
+  const system = reviewSystem(options, mode);
   const tools = jsonOnly
     ? []
     : mode === 'agentic'

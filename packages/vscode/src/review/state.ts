@@ -1,4 +1,10 @@
-import { normalizeWhitespace, similarity, type Finding } from '@ai-review/core';
+import {
+  fingerprint,
+  normalizeWhitespace,
+  redactText,
+  similarity,
+  type Finding,
+} from '@ai-review/core';
 import * as path from 'node:path';
 import type * as vscode from 'vscode';
 
@@ -13,7 +19,8 @@ interface StoredEntry {
   category: string;
   /**
    * Quote without copied line numbers or +/- markers, whitespace collapsed, for the
-   * fuzzy fallback. Older entries may still have the markers.
+   * fuzzy fallback. Older entries may still have the markers. Secrets stay redacted
+   * (`Finding.redactedQuote`): this outlives the code.
    */
   quote: string;
   status: StoredStatus;
@@ -40,7 +47,12 @@ export class FindingStatusStore {
 
   constructor(private readonly memento: vscode.Memento) {
     const saved = memento.get<unknown>(STATE_KEY);
-    this.entries = Array.isArray(saved) ? saved.filter(isEntry) : [];
+    const entries = Array.isArray(saved) ? saved.filter(isEntry) : [];
+    this.entries = entries.map(withoutSecrets);
+    // Entries saved before quotes were redacted: rewrite them now, not at the next change.
+    if (this.entries.some((e, i) => e !== entries[i])) {
+      void this.memento.update(STATE_KEY, this.entries);
+    }
   }
 
   get size(): number {
@@ -52,7 +64,7 @@ export class FindingStatusStore {
     const sameFile = this.entries.filter((e) => e.root === r && e.file === finding.file);
     const exact = sameFile.find((e) => e.id === finding.id);
     if (exact) return exact.status;
-    const quote = normalizeQuote(finding.quote);
+    const quote = storedQuote(finding);
     let best: { entry: StoredEntry; score: number } | undefined;
     for (const e of sameFile) {
       if (e.category !== finding.category) continue;
@@ -65,7 +77,7 @@ export class FindingStatusStore {
   /** Saves the status; "open" forgets the finding (and fuzzy matches of it). */
   async set(root: string, finding: Finding, status: StoredStatus | 'open'): Promise<void> {
     const r = normalizeRoot(root);
-    const quote = normalizeQuote(finding.quote);
+    const quote = storedQuote(finding);
     this.entries = this.entries.filter(
       (e) =>
         !(
@@ -99,6 +111,23 @@ export class FindingStatusStore {
     await this.memento.update(STATE_KEY, undefined);
     return n;
   }
+}
+
+/** The quote as stored and compared: redacted if it has secrets, normalized. */
+function storedQuote(finding: Finding): string {
+  return normalizeQuote(finding.redactedQuote ?? finding.quote);
+}
+
+/**
+ * An entry from before quotes were stored redacted, with its secrets redacted and its
+ * id recomputed from that (an id hashed from a short secret could be guessed back).
+ * Matches by the fuzzy fallback (or the id) as the finding's redacted quote. The same
+ * entry when there is nothing to redact.
+ */
+function withoutSecrets(entry: StoredEntry): StoredEntry {
+  const quote = redactText(entry.quote).text;
+  if (quote === entry.quote) return entry;
+  return { ...entry, quote, id: fingerprint(entry.file, entry.category, quote) };
 }
 
 /**

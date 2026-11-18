@@ -261,6 +261,19 @@ describe('validateFindings', () => {
     expect(run([raw({ file: 'cart.js' })]).findings).toHaveLength(1);
   });
 
+  it('prefers the exact path over one with a/ or b/ stripped', () => {
+    const inDir = (path: string): FileDiff => ({ ...modified(), path });
+    const files = [inDir('a/x.ts'), inDir('x.ts'), inDir('b/y.ts'), inDir('y.ts')];
+    const fileOf = (file: string) =>
+      validateFindings([raw({ file })], { config: DEFAULT_CONFIG, files }).findings[0]?.file;
+    expect(fileOf('a/x.ts')).toBe('a/x.ts');
+    expect(fileOf('x.ts')).toBe('x.ts');
+    expect(fileOf('.\\a\\x.ts')).toBe('a/x.ts');
+    expect(fileOf('b/a/x.ts')).toBe('a/x.ts');
+    expect(fileOf('b/y.ts')).toBe('b/y.ts');
+    expect(fileOf('a/y.ts')).toBe('y.ts');
+  });
+
   it('works without newContent (lines from hunks only)', () => {
     const file = modified();
     delete file.newContent;

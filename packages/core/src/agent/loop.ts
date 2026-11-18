@@ -72,6 +72,8 @@ export interface AgentLoopOptions {
   logger?: Logger;
   /** Prefix for log lines, e.g. "part 2". */
   label?: string;
+  /** Usage of each response as it arrives (also counts the turns before a provider error). */
+  onUsage?: (usage: Usage) => void;
 }
 
 export interface AgentLoopResult {
@@ -145,6 +147,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     );
     turns++;
     usage = addUsage(usage, response.usage);
+    options.onUsage?.(response.usage);
     if (response.stopReason === 'cancelled') return result('cancelled');
 
     const content = response.message.filter((p) => p.type !== 'text' || p.text.trim() !== '');

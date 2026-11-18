@@ -95,7 +95,7 @@ When you run a review, this is exactly what happens:
 2. Files are filtered out **before anything leaves your machine**: secrets (`.env*`, `*.pem`, `*.key`, `*.p12`, `id_rsa*`, …), lockfiles, build output (`dist/`, `build/`, …), minified files, snapshots, generated files, binaries, deleted files, and anything in your `.codereview.yml` `ignore:` list.
 3. In the remaining changes, known secret formats are replaced with `[REDACTED]`: cloud and API keys (AWS, GitHub, Anthropic, OpenAI, Slack, Google, Stripe, npm), private key blocks, JWTs, passwords in connection strings, and values assigned to names like `password`, `secret`, `token` or `api_key`. Turn on `aiReview.redactHighEntropyStrings` to also redact long random-looking strings.
 4. The changed lines, the enclosing function or class of each change (redacted the same way), your repository rules files, and the review instructions are sent to the provider you selected — and nowhere else. In agentic mode, the files the model asks to read (same filtering and redaction) are sent too.
-5. The model's findings come back and are shown in VS Code. Nothing is stored outside your machine by the extension. In VS Code's local workspace storage it keeps the last review per scope (findings and hashes of the reviewed changes, for incremental re-reviews) and which findings you dismissed or resolved.
+5. The model's findings come back and are shown in VS Code. Nothing is stored outside your machine by the extension. In VS Code's local workspace storage it keeps the last review per scope (findings and hashes of the reviewed changes, for incremental re-reviews) and which findings you dismissed or resolved. Code with secrets in it is stored there redacted, as it was sent.
 
 Diff content is marked as untrusted data in the prompt, so instructions hidden in code or comments ("ignore previous instructions…") are not followed.
 
@@ -106,7 +106,8 @@ Diff content is marked as untrusted data in the prompt, so instructions hidden i
 - The summary is one extra request per review; turn it off with `aiReview.summary`.
 - Re-reviewing the same scope only sends what changed since the last review, so a review after a small fix is cheap.
 - The verify pass (off by default) adds up to one request per file with findings; the cost estimate includes it in the upper bound.
-- Agentic reviews cost more: each part can use several requests, up to `aiReview.agent.tokenBudget` input tokens (default 200k). The cost estimate shows the range. Prompt caching makes the repeated parts of those requests much cheaper on Anthropic.
+- Agentic reviews cost more: each part can use several requests, up to `aiReview.agent.tokenBudget` input tokens (default 200k, at most 2M). The cost estimate shows the range. Prompt caching makes the repeated parts of those requests much cheaper on Anthropic.
+- The settings that limit spending (`aiReview.costConfirmationThreshold`, the prices in `aiReview.anthropic.models`, and `aiReview.agent.*`) are read from your user settings only, so a repository's `.vscode/settings.json` can't change them. A repository may still pick the provider and model; if a review with that model needs your confirmation, the question says the workspace chose it.
 - Narrow the scope (staged changes, one file, a selection) to keep reviews cheap and fast.
 
 ## Contributing

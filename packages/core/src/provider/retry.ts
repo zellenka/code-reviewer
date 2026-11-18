@@ -31,8 +31,8 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 /**
  * Re-runs `attempt` on retryable ProviderErrors (rate limit, 5xx, network),
- * honouring `retryAfterMs`. Only retries if nothing was yielded yet, so callers
- * never see duplicated partial output.
+ * waiting at least `retryAfterMs` (and at least the backoff). Only retries if
+ * nothing was yielded yet, so callers never see duplicated partial output.
  */
 export async function* withRetry(
   attempt: () => AsyncIterable<ChatEvent>,
@@ -59,7 +59,9 @@ export async function* withRetry(
         throw error;
       }
       const backoff = Math.min(maxDelayMs, baseDelayMs * 2 ** retry * (0.75 + random() * 0.5));
-      const delay = error.retryAfterMs ?? backoff;
+      // retry-after is a floor, not a replacement: `retry-after: 0` must not
+      // turn into back-to-back retries.
+      const delay = Math.max(error.retryAfterMs ?? 0, backoff);
       if (delay > maxDelayMs) {
         throw new ProviderError(
           error.kind,

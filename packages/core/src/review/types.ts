@@ -3,7 +3,10 @@ import type { Usage } from '../provider/types';
 import type { ReviewSnapshot } from './incremental';
 
 export interface Finding {
-  /** Fingerprint: sha1(file + "\n" + category + "\n" + normalize(quote)). */
+  /**
+   * Fingerprint: sha1(file + "\n" + category + "\n" + normalize(quote)), of
+   * `redactedQuote` when there is one (a hash of a secret could be guessed back).
+   */
   id: string;
   file: string;
   /** 1-based, inclusive, new side. */
@@ -18,6 +21,12 @@ export interface Finding {
   body: string;
   /** Exact new-side code the finding refers to; may be multi-line. */
   quote: string;
+  /**
+   * The same lines with secrets redacted, as the model saw them; set when the model
+   * quoted redacted code and `quote` holds the real lines. This, never `quote`, is what
+   * gets stored (snapshots, statuses).
+   */
+  redactedQuote?: string;
   /** Replacement code for `quote`. */
   suggestion?: string;
   /** 0..1 */
@@ -110,9 +119,15 @@ export interface ReviewResult {
   warnings?: string[];
   /** Incremental re-review (P5-4): hunks sent now vs. reviewed before, findings carried over. */
   incremental?: { newHunks: number; reusedHunks: number; carried: number };
-  /** Pass as `previous` to the next review of the same scope. Missing after a cancelled or partly failed review. */
+  /**
+   * Pass as `previous` to the next review of the same scope. Missing after a cancelled or
+   * partly failed review, a part with only some valid findings, or a failed verify request.
+   */
   snapshot?: ReviewSnapshot;
-  /** Verify pass (P5-2): findings checked, rejected, and requests that failed (findings kept). */
+  /**
+   * Verify pass (P5-2): findings that got a verdict, findings rejected, and requests that
+   * failed or were not sent after an auth or quota error (their findings are kept).
+   */
   verify?: { checked: number; rejected: number; failed: number };
   /** Agentic reviews: totals over all parts. `limitStops` = parts stopped by a limit. */
   agent?: { turns: number; toolCalls: number; limitStops: number };

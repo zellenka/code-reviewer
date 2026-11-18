@@ -32,6 +32,8 @@ export interface ReviewChunkOptions {
   agent?: { tools: AgentTool<never>[]; limits: AgentLimits };
   /** For log lines, e.g. "part 2". */
   label?: string;
+  /** Usage of each response as it arrives (also counts the requests before a provider error). */
+  onUsage?: (usage: Usage) => void;
 }
 
 export interface AgentChunkStats {
@@ -83,6 +85,7 @@ export async function reviewChunk(options: ReviewChunkOptions): Promise<ChunkRev
   let usage = emptyUsage();
   const first = await request();
   usage = addUsage(usage, first.usage);
+  options.onUsage?.(first.usage);
   if (first.stopReason === 'cancelled')
     return { findings: [], invalid: 0, outcome: 'cancelled', usage };
 
@@ -101,6 +104,7 @@ export async function reviewChunk(options: ReviewChunkOptions): Promise<ChunkRev
 
   const second = await request();
   usage = addUsage(usage, second.usage);
+  options.onUsage?.(second.usage);
   if (second.stopReason === 'cancelled') {
     // Keep what was valid in the first answer.
     const kept = firstAttempt.kind === 'ok' ? firstAttempt.findings : [];
@@ -172,6 +176,7 @@ async function reviewChunkAgentic(
     signal,
     logger,
     ...(options.label ? { label: options.label } : {}),
+    ...(options.onUsage ? { onUsage: options.onUsage } : {}),
   });
   const stats: AgentChunkStats = { turns: loop.turns, toolCalls: loop.toolCalls, stop: loop.stop };
   if (loop.wrapUp) stats.wrapUp = loop.wrapUp;

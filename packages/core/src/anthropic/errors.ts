@@ -3,6 +3,9 @@ import { ProviderError, isProviderError } from '../provider/errors';
 
 const PROVIDER = 'anthropic';
 
+/** 400 messages about credits or spend limits ("Your credit balance is too low …"). */
+const ACCOUNT_QUOTA = /credit balance|purchase credits|plans & billing|api usage limits?/i;
+
 /** Maps anything thrown by the Anthropic SDK to a ProviderError. */
 export function mapAnthropicError(err: unknown): ProviderError {
   if (isProviderError(err)) return err;
@@ -54,6 +57,13 @@ export function mapAnthropicError(err: unknown): ProviderError {
     /prompt is too long|too many tokens|context (window|length)/i.test(message)
   ) {
     return new ProviderError('contextTooLong', message, opts);
+  }
+  // Account problems come as a 400 too; they fail every request, so they must stop the review.
+  if (status === 400 && ACCOUNT_QUOTA.test(message)) {
+    return new ProviderError('quota', `Anthropic billing problem: ${message}`, opts);
+  }
+  if (status === 400 && /organization (has been|is) disabled/i.test(message)) {
+    return new ProviderError('auth', `Anthropic API key can't be used: ${message}`, opts);
   }
   return new ProviderError(
     'unknown',

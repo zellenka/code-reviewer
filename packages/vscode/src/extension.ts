@@ -6,6 +6,7 @@ import { AnthropicKeyStore, clearApiKeyCommand, setApiKeyCommand } from './provi
 import { VsCodeLmProvider } from './providers/copilot';
 import { ModelStatusBar, selectModelCommand } from './providers/picker';
 import { CONFIG_SECTION, ProviderRegistry, type Selection } from './providers/registry';
+import { trustedReviewArgs } from './review/args';
 import {
   cancelReview,
   reviewCommand,
@@ -22,6 +23,7 @@ import { FindingStatusStore } from './review/state';
 import { FindingStore } from './review/store';
 import { FindingThreads } from './review/threads';
 import { FindingsTree, SUMMARY_SCHEME, SummaryProvider } from './review/tree';
+import { userSetting } from './settings';
 import { ReviewPanel } from './ui/panel';
 
 /** Returned from `activate`; used by extension tests. Not a stable public API. */
@@ -61,9 +63,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       label: 'Anthropic',
       provider: new AnthropicProvider({
         apiKey: () => keyStore.get(),
+        // Prices feed the cost confirmation, so only the user's own settings count (F23).
         modelOverrides: () =>
-          vscode.workspace.getConfiguration(CONFIG_SECTION).get<unknown[]>('anthropic.models') ??
-          [],
+          userSetting<unknown[]>(
+            vscode.workspace.getConfiguration(CONFIG_SECTION),
+            'anthropic.models',
+          ) ?? [],
         refusalFallback: () =>
           vscode.workspace
             .getConfiguration(CONFIG_SECTION)
@@ -133,6 +138,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     ...registerFindingCommands({ store, threads, previews }),
   );
   const deps = { registry, repos, configs, store, logger, snapshots };
+  // Every review starts here (menus, keybindings, the panel's Run Review), so test-only
+  // options are dropped here outside tests.
+  const testMode = context.extensionMode === vscode.ExtensionMode.Test;
   const reviewCommands: [string, ReviewKind][] = [
     ['aiReview.reviewStaged', 'staged'],
     ['aiReview.reviewUnstaged', 'unstaged'],
@@ -147,7 +155,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         reviewCommand(
           kind,
           deps,
-          isArgs(arg) ? arg : scmRoot(arg) ? { root: scmRoot(arg)! } : {},
+          isArgs(arg)
+            ? trustedReviewArgs(arg, testMode)
+            : scmRoot(arg)
+              ? { root: scmRoot(arg)! }
+              : {},
           arg instanceof vscode.Uri ? arg : undefined,
         ),
       ),

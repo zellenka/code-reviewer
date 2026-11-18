@@ -1,4 +1,4 @@
-import type { ReviewMode, ReviewSnapshot } from '@ai-review/core';
+import { redactText, type ReviewMode, type ReviewSnapshot } from '@ai-review/core';
 import * as path from 'node:path';
 import type * as vscode from 'vscode';
 
@@ -21,7 +21,7 @@ export class SnapshotStore {
 
   constructor(private readonly memento: vscode.Memento) {
     const saved = memento.get<unknown>(STATE_KEY);
-    this.entries = Array.isArray(saved)
+    const entries = Array.isArray(saved)
       ? saved.filter(
           (e): e is Entry =>
             !!e &&
@@ -29,9 +29,14 @@ export class SnapshotStore {
             e.snapshot?.version === 1 &&
             Array.isArray(e.snapshot.findings) &&
             Array.isArray(e.snapshot.findingHunks) &&
+            isHunks(e.snapshot.hunks) &&
             typeof e.at === 'number',
         )
       : [];
+    // Snapshots saved before secrets were kept out of them are dropped (and removed from
+    // storage now): that scope's next review sends everything again.
+    this.entries = entries.filter((e) => !e.snapshot.findings.some(hasSecret));
+    if (this.entries.length < entries.length) void this.memento.update(STATE_KEY, this.entries);
   }
 
   get(root: string, mode: ReviewMode): ReviewSnapshot | undefined {
@@ -56,6 +61,25 @@ export class SnapshotStore {
     this.entries = [];
     await this.memento.update(STATE_KEY, undefined);
   }
+}
+
+/** Hunk hashes per file, as `planIncremental` reads them (a damaged entry is dropped). */
+function isHunks(value: unknown): value is ReviewSnapshot['hunks'] {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.values(value).every((h) => Array.isArray(h) && h.every((x) => typeof x === 'string'))
+  );
+}
+
+/** A finding stored with real code that has a secret in it (saved by an older version). */
+function hasSecret(finding: ReviewSnapshot['findings'][number]): boolean {
+  return (
+    finding?.redactedQuote === undefined &&
+    typeof finding?.quote === 'string' &&
+    redactText(finding.quote).text !== finding.quote
+  );
 }
 
 function scopeKey(root: string, mode: ReviewMode): string | undefined {

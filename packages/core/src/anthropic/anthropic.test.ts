@@ -5,9 +5,12 @@ import type {
   BetaRawMessageStreamEvent,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_CONFIG } from '../config/schema';
+import { addedFileDiff } from '../diff/parse';
 import { noopLogger } from '../logger';
 import { collectChat } from '../provider/collect';
 import type { ChatRequest } from '../provider/types';
+import { runReview } from '../review/orchestrator';
 import { mapAnthropicError, parseRetryAfter } from './errors';
 import { mergeModels, ANTHROPIC_MODELS } from './models';
 import { AnthropicProvider, buildParams, type AnthropicClientLike } from './provider';
@@ -54,6 +57,66 @@ describe('mapAnthropicError', () => {
     expect(mapAnthropicError(err).kind).toBe('contextTooLong');
   });
 
+  it.each([
+    [
+      'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.',
+      'quota',
+    ],
+    [
+      'You have reached your specified API usage limits. You will regain access on 2026-12-01 at 00:00 UTC.',
+      'quota',
+    ],
+    [
+      'You have reached your specified workspace API usage limits. You will regain access on 2026-12-01 at 00:00 UTC.',
+      'quota',
+    ],
+    ['This organization has been disabled.', 'auth'],
+    ['messages: text content blocks must be non-empty', 'unknown'],
+  ] as const)('maps the account-level 400 "%s" → %s', (message, kind) => {
+    const err = mapAnthropicError(
+      APIError.generate(
+        400,
+        { type: 'error', error: { type: 'invalid_request_error', message } },
+        undefined,
+        new Headers(),
+      ),
+    );
+    expect(err).toMatchObject({ kind, retryable: false });
+    expect(err.message).toContain(message);
+  });
+
+  it('stops a multi-part review at the first credit-balance error', async () => {
+    const credit = () =>
+      APIError.generate(
+        400,
+        {
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: 'Your credit balance is too low to access the Anthropic API.',
+          },
+        },
+        undefined,
+        new Headers(),
+      );
+    const { p, calls } = provider(Array.from({ length: 10 }, () => ({ error: credit() })));
+    const files = Array.from({ length: 4 }, (_, i) =>
+      addedFileDiff(`f${i}.ts`, 'z\n'.repeat(3000)),
+    );
+    await expect(
+      runReview(
+        { files },
+        {
+          provider: p,
+          model: { ...ANTHROPIC_MODELS[0]!, maxInputTokens: 12_000, maxOutputTokens: 4_000 },
+          config: DEFAULT_CONFIG,
+          concurrency: 1,
+        },
+      ),
+    ).rejects.toMatchObject({ kind: 'quota' });
+    expect(calls).toHaveLength(1);
+  });
+
   it('reads retry-after', () => {
     expect(
       mapAnthropicError(apiError(429, 'rate_limit_error', { 'retry-after': '7' })).retryAfterMs,
@@ -62,6 +125,17 @@ describe('mapAnthropicError', () => {
     expect(
       parseRetryAfter(new Headers({ 'retry-after': new Date(10_000).toUTCString() }), 4_000),
     ).toBe(6000);
+  });
+
+  it('keeps odd retry-after values sane', () => {
+    const parse = (value: string) => parseRetryAfter(new Headers({ 'retry-after': value }), 4_000);
+    expect(parse('-5')).toBe(0);
+    expect(parse('0')).toBe(0);
+    expect(parse(new Date(1_000).toUTCString())).toBe(0);
+    expect(parse('soon')).toBeUndefined();
+    expect(parse('NaN')).toBeUndefined();
+    expect(parse('Infinity')).toBeUndefined();
+    expect(parseRetryAfter(new Headers({ 'retry-after-ms': '0', 'retry-after': '2' }))).toBe(2000);
   });
 
   it('maps mid-stream errors (no status) by type', () => {

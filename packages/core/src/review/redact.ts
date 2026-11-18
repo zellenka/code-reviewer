@@ -72,12 +72,17 @@ const PATTERNS: Pattern[] = [
   },
   {
     label: 'connection-string-password',
-    re: /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@"'`]+:)([^\s@"'`]{3,})(@)/gi,
+    // scheme://user:password@host. Tried once per run of non-space, non-quote characters, and
+    // only when that run ends in `@`; the scheme is checked backwards from `://`. Starting at
+    // every scheme or `://` instead rescans the rest of a long line from each one.
+    re: /(?<![^\s@"'`])(?=[^\s@"'`]*@)([^\s@"'`]*?:\/\/(?<=\b[a-z][a-z0-9+.-]*:\/\/)[^\s:/@"'`]+:)([^\s@"'`]{3,})(@)/gi,
   },
   {
     label: 'secret',
     // password = "hunter2xyz" — the name is kept so the model can still flag hard-coded secrets.
-    re: /((?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key)[\w.-]*["']?\s*[:=]\s*["'`])(?!\[REDACTED)([^"'`\s]{8,})(["'`])/gi,
+    // The name is any run of [\w.-] with a keyword in it (`db_password`, `passwordHash`). It is
+    // matched from the start of the run only: starting at each keyword is quadratic on long runs.
+    re: /((?<![\w.-])(?=[\w.-]*?(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key))[\w.-]+["']?\s*[:=]\s*["'`])(?!\[REDACTED)([^"'`\s]{8,})(["'`])/gi,
   },
   {
     label: 'bearer-token',

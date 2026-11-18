@@ -42,6 +42,18 @@ describe('withRetry', () => {
     expect(waits).toEqual([4321]);
   });
 
+  it('never waits less than the backoff, even when retryAfterMs is 0', async () => {
+    const { provider, waits, sleep } = setup({
+      script: [
+        mockError('rateLimit', 'slow down', { retryAfterMs: 0 }),
+        mockError('rateLimit', 'slow down', { retryAfterMs: 10 }),
+        mockText('ok'),
+      ],
+    });
+    await collectChat(withRetry(() => provider.chat(req), { sleep, random: () => 0.5 }));
+    expect(waits).toEqual([1000, 2000]);
+  });
+
   it('fails instead of waiting longer than maxDelayMs', async () => {
     const { provider, waits, sleep } = setup({
       script: [mockError('rateLimit', 'slow down', { retryAfterMs: 120_000 }), mockText('ok')],

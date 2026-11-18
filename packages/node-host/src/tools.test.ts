@@ -326,3 +326,70 @@ describe('tool calls can be cancelled and are bounded (F8)', () => {
     expect(readsUnderRoot()).toEqual([]);
   });
 });
+
+describe('tool errors do not show where the repo is (F5)', () => {
+  let root: string;
+
+  beforeAll(() => {
+    const repo = makeRepo('air-errors-');
+    root = repo.root;
+    repo.write('src/a.ts', 'export const a = 1;\n');
+    repo.git('add', '.');
+    repo.git('commit', '-q', '-m', 'init');
+  });
+
+  afterAll(() => {
+    fsMock.onRead = undefined;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /** Error messages of each tool while every file read fails with `fail(absolutePath)`. */
+  const errorsWhile = async (fail: (file: string) => Error) => {
+    const tools = new Map(
+      createReviewTools(new FsWorkspaceTools(root)).map((t) => [t.def.name, t]),
+    );
+    const run = (name: string, input: unknown) => {
+      const tool = tools.get(name)! as unknown as AgentTool<unknown>;
+      return tool.run(tool.schema.parse(input), new AbortController().signal).then(
+        () => 'no error',
+        (e: unknown) => String((e as Error).message),
+      );
+    };
+    fsMock.onRead = (file) => {
+      throw fail(file);
+    };
+    try {
+      return {
+        read_file: await run('read_file', { path: 'src/a.ts' }),
+        get_symbol: await run('get_symbol', { path: 'src/a.ts', line: 1 }),
+        find_references: await run('find_references', { path: 'src/a.ts', line: 1, symbol: 'a' }),
+        search_code: await run('search_code', { pattern: 'a' }),
+      };
+    } finally {
+      fsMock.onRead = undefined;
+    }
+  };
+
+  it('a locked file is named by its repo path and error code', async () => {
+    const errors = await errorsWhile((file) =>
+      Object.assign(new Error(`EBUSY: resource busy or locked, open '${file}'`), {
+        code: 'EBUSY',
+      }),
+    );
+    expect(errors).toEqual({
+      read_file: "src/a.ts can't be read (EBUSY).",
+      get_symbol: "src/a.ts can't be read (EBUSY).",
+      find_references: "src/a.ts can't be read (EBUSY).",
+      search_code: 'The search failed (EBUSY).',
+    });
+  });
+
+  it('the repo root is cut out of errors without a code', async () => {
+    const errors = await errorsWhile((file) => new Error(`could not open ${file} now`));
+    for (const message of Object.values(errors)) {
+      expect(message).not.toContain(root);
+      expect(message).not.toContain(path.basename(root));
+      expect(message).toMatch(/^could not open src[\\/]a\.ts now$/);
+    }
+  });
+});

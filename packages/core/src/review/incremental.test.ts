@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_CONFIG } from '../config/schema';
+import { DEFAULT_CONFIG, type ReviewConfig } from '../config/schema';
 import { parseUnifiedDiff } from '../diff/parse';
-import { MockProvider, mockToolCall, type MockStep } from '../provider/mock';
+import { MockProvider, mockError, mockToolCall, type MockStep } from '../provider/mock';
 import type { ChatRequest, ModelInfo } from '../provider/types';
-import { hunkHash, planIncremental } from './incremental';
+import {
+  createSnapshot,
+  hunkHash,
+  planIncremental,
+  snapshotKey,
+  type ReviewSnapshot,
+} from './incremental';
 import { REPORT_TOOL_NAME } from './output';
 import { estimateReview, runReview } from './orchestrator';
+import { redactFiles } from './redact';
+import type { Finding } from './types';
+import { fingerprint, newSideLines } from './validate';
 
 const MODEL: ModelInfo = {
   id: 'm',
@@ -289,5 +298,248 @@ describe('incremental re-review', () => {
     const r = await runReview(first, { provider, model: MODEL, config: DEFAULT_CONFIG });
     expect(r.chunks.failed).toBe(1);
     expect(r.snapshot).toBeUndefined();
+  });
+});
+
+describe('snapshot validity (F34)', () => {
+  const diff = diffOf({ 'src/a.ts': [[1, 'old a', 'bad a1']] });
+  const finding = {
+    file: 'src/a.ts',
+    startLine: 2,
+    endLine: 2,
+    severity: 'major',
+    category: 'bug',
+    title: 't',
+    body: 'b',
+    quote: 'bad a1',
+    confidence: 0.9,
+  };
+
+  it('reviews everything when high-entropy redaction was switched on', async () => {
+    const r1 = await runReview(diff, {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+    });
+    const p2 = new MockProvider({ fallback: oracle });
+    const r2 = await runReview(diff, {
+      provider: p2,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      redactHighEntropy: true,
+      previous: r1.snapshot!,
+    });
+    expect(p2.requests).toHaveLength(1);
+    expect(r2.incremental).toBeUndefined();
+  });
+
+  it('reviews everything when the review prompt changed', async () => {
+    const agentic: ReviewConfig = {
+      ...DEFAULT_CONFIG,
+      review: { ...DEFAULT_CONFIG.review, mode: 'agentic' },
+    };
+    const workspace = {
+      readFile: () => Promise.resolve(''),
+      grep: () => Promise.resolve([]),
+      findReferences: () => Promise.resolve([]),
+      getSymbolAt: () => Promise.resolve(null),
+    };
+    const p1 = new MockProvider({ fallback: oracle });
+    const r1 = await runReview(diff, { provider: p1, model: MODEL, config: agentic, workspace });
+    // The agentic prompt states the turn limit: same settings file, different prompt.
+    const p2 = new MockProvider({ fallback: oracle });
+    const r2 = await runReview(diff, {
+      provider: p2,
+      model: MODEL,
+      config: agentic,
+      workspace,
+      agentLimits: { maxTurns: 3 },
+      previous: r1.snapshot!,
+    });
+    expect(p2.requests).toHaveLength(1);
+    expect(p2.requests[0]!.system).not.toEqual(p1.requests[0]!.system);
+    expect(r2.incremental).toBeUndefined();
+  });
+
+  it('the key covers the prompts', () => {
+    const parts = {
+      modelId: 'm',
+      config: DEFAULT_CONFIG,
+      mode: 'single-pass' as const,
+      context: true,
+    };
+    expect(snapshotKey({ ...parts, prompts: ['a'] })).not.toBe(
+      snapshotKey({ ...parts, prompts: ['b'] }),
+    );
+  });
+
+  it('gives no snapshot when a verify request failed', async () => {
+    const provider = new MockProvider({
+      script: [mockToolCall(REPORT_TOOL_NAME, { findings: [finding] }), mockError('server')],
+    });
+    const r = await runReview(diff, {
+      provider,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      verify: true,
+    });
+    expect(r.verify).toMatchObject({ failed: 1 });
+    expect(r.findings).toHaveLength(1);
+    expect(r.snapshot).toBeUndefined();
+  });
+
+  it('gives no snapshot when a part was only partly valid', async () => {
+    const bad = mockToolCall(REPORT_TOOL_NAME, {
+      findings: [finding, { ...finding, confidence: 7 }],
+    });
+    const provider = new MockProvider({ script: [bad, bad] });
+    const r = await runReview(diff, { provider, model: MODEL, config: DEFAULT_CONFIG });
+    expect(r.chunks.outcomes).toEqual(['partial']);
+    expect(r.findings).toHaveLength(1);
+    expect(r.snapshot).toBeUndefined();
+  });
+});
+
+describe('incremental re-review of findings not tied to one hunk (F32)', () => {
+  const lineFinding = (startLine: number, endLine: number, quote: string): Finding => ({
+    id: 'x',
+    file: 'src/a.ts',
+    startLine,
+    endLine,
+    anchor: 'line',
+    severity: 'major',
+    category: 'bug',
+    title: 't',
+    body: 'b',
+    quote,
+    confidence: 0.9,
+  });
+  // Two adjacent hunks: new lines 1-3 and 4-6.
+  const adjacent = (second = 'bad a2') =>
+    diffOf({
+      'src/a.ts': [
+        [1, 'old a', 'bad a1'],
+        [4, 'old b', second],
+      ],
+    });
+
+  it('carries a finding across two hunks while neither changed', () => {
+    const across = lineFinding(2, 5, 'bad a1\nbelow old a\nabove old b\nbad a2');
+    const snapshot = createSnapshot('k', adjacent().files, [across]);
+    expect(snapshot.findingHunks).toEqual([null]);
+
+    const plan = planIncremental(adjacent(), snapshot);
+    expect(plan.newHunks).toBe(0);
+    expect(plan.carried).toEqual([across]);
+    // One of its hunks changed: reviewed again instead.
+    expect(planIncremental(adjacent('bad a2 edited'), snapshot).carried).toEqual([]);
+  });
+
+  it('carries a finding outside every hunk while nothing in its file changed', () => {
+    // With the whole file known (as for a file review), code outside the hunks can be flagged.
+    const withContent = (edited: string) => {
+      const diff = diffOf({ 'src/a.ts': [[1, 'old a', edited]] });
+      const lines = ['above old a', edited, 'below old a', '', '', 'const unused = 1;'];
+      diff.files[0] = { ...diff.files[0]!, newContent: `${lines.join('\n')}\n` };
+      return diff;
+    };
+    const outside = lineFinding(6, 6, 'const unused = 1;');
+    const snapshot = createSnapshot('k', withContent('bad a1').files, [outside]);
+    expect(snapshot.findingHunks).toEqual([null]);
+
+    expect(planIncremental(withContent('bad a1'), snapshot).carried).toEqual([outside]);
+    expect(planIncremental(withContent('bad a1 edited'), snapshot).carried).toEqual([]);
+  });
+
+  it('carries such a finding stored with its redacted quote, with the real code back', () => {
+    const KEY = 'AKIAIOSFODNN7EXAMPLE';
+    const diff = adjacent(`bad key = "${KEY}"`);
+    const r = redactFiles(diff.files).files;
+    const quote = `bad a1\nbelow old a\nabove old b\nbad key = "${KEY}"`;
+    const redactedQuote = newSideLines(r[0]!).slice(1, 5).join('\n');
+    expect(redactedQuote).not.toContain(KEY);
+    const across = { ...lineFinding(2, 5, quote), redactedQuote };
+    const snapshot = createSnapshot('k', r, [across]);
+    expect(JSON.stringify(snapshot)).not.toContain(KEY);
+
+    expect(planIncremental(diff, snapshot).carried).toEqual([across]);
+  });
+});
+
+describe('incremental re-review of findings on redacted secrets (F33)', () => {
+  const KEY = 'AKIAIOSFODNN7EXAMPLE';
+  const withKey = (key: string, other = 'bad a1') =>
+    diffOf({
+      'src/k.ts': [
+        [1, 'old k', `bad key = "${key}"`],
+        [20, 'old a', other],
+      ],
+    });
+  /** A snapshot as the host keeps it: written to storage as JSON and read back. */
+  const stored = (snapshot: unknown) => JSON.parse(JSON.stringify(snapshot)) as ReviewSnapshot;
+
+  it('keeps the secret and hashes of it out of the snapshot', async () => {
+    const diff = withKey(KEY);
+    const r1 = await runReview(diff, {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+    });
+    const secret = r1.findings.find((f) => f.startLine === 2)!;
+    expect(secret.quote).toBe(`bad key = "${KEY}"`);
+    const json = JSON.stringify(r1.snapshot);
+    expect(json).not.toContain(KEY);
+    expect(json).not.toContain(fingerprint('src/k.ts', 'bug', secret.quote));
+    expect(json).not.toContain(hunkHash('src/k.ts', diff.files[0]!.hunks[0]!));
+    // The other hunk has no secret: same hash as before, so older snapshots still match.
+    expect(r1.snapshot!.hunks['src/k.ts']).toContain(
+      hunkHash('src/k.ts', diff.files[0]!.hunks[1]!),
+    );
+  });
+
+  it('carries the finding over with its real code, from a stored snapshot', async () => {
+    const r1 = await runReview(withKey(KEY), {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+    });
+    const p2 = new MockProvider({ fallback: oracle });
+    const r2 = await runReview(withKey(KEY), {
+      provider: p2,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      previous: stored(r1.snapshot),
+    });
+    expect(p2.requests).toHaveLength(0);
+    expect(r2.incremental).toEqual({ newHunks: 0, reusedHunks: 2, carried: 2 });
+    expect(r2.findings).toEqual(r1.findings);
+    expect(JSON.stringify(r2.snapshot)).not.toContain(KEY);
+
+    // Only the other hunk changed: the secret finding is still carried, the new one sent.
+    const p3 = new MockProvider({ fallback: oracle });
+    const r3 = await runReview(withKey(KEY, 'bad a1 edited'), {
+      provider: p3,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      previous: stored(r2.snapshot),
+    });
+    expect(sentText(p3)).not.toContain('bad key');
+    expect(r3.findings.map((f) => f.quote)).toEqual([`bad key = "${KEY}"`, 'bad a1 edited']);
+  });
+
+  it('a new finding with the same redacted code on another line does not replace a carried one', async () => {
+    const r1 = await runReview(withKey(KEY), {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+    });
+    const other = 'AKIAI44QH8DHBEXAMPLE';
+    const r2 = await runReview(withKey(KEY, `bad key = "${other}"`), {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      previous: stored(r1.snapshot),
+    });
+    expect(r2.findings.map((f) => f.quote)).toEqual([`bad key = "${KEY}"`, `bad key = "${other}"`]);
   });
 });
