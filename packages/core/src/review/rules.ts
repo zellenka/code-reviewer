@@ -3,7 +3,7 @@ import type { ReviewConfig } from '../config/schema';
 import { normalizeEol } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
 import { noopLogger, type Logger } from '../logger';
-import { estimateTokens } from '../provider/usage';
+import { estimateTokens, truncateToTokens } from '../provider/usage';
 import { isProtectedPath } from './filter';
 import { neutralizeTags } from './prompt';
 import { redactText } from './redact';
@@ -80,7 +80,7 @@ export async function loadRepoRules(
     }
     const source: RuleSource = { path, text };
     if (estimateTokens(text) > budget) {
-      source.text = text.slice(0, Math.floor(budget * 3.5));
+      source.text = truncateToTokens(text, budget);
       source.truncated = true;
       logger.warn(`rules file ${path} is long; only the first ~${budget} tokens are used`);
     }

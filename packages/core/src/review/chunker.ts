@@ -39,7 +39,7 @@ export interface ChunkOptions {
   maxTokens: number;
   /** Max number of chunks. Default 40. */
   maxChunks?: number;
-  /** Token estimator. Default chars/3.5. */
+  /** Token estimator. Default `estimateTokens`. */
   countTokens?: (text: string) => number;
   /** Context to show with a file (or part of one). Dropped for a part that wouldn't fit with it. */
   context?: (file: FileDiff, hunks: Hunk[]) => ContextRange[] | undefined;
