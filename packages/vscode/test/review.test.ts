@@ -946,6 +946,83 @@ suite('Review', () => {
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
   });
 
+  test('the panel keeps its last error while findings move or change status (F22)', async () => {
+    const key = await reviewOne('src/ux-track.ts', DIV('track'));
+    const failInPanel = async () => {
+      await api.panel.update({ scope: 'branch', base: 'no-such-branch' });
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.runReview',
+        { root, silent: true },
+      );
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual((await api.panel.snapshot()).last?.level, 'warn');
+    };
+    const last = async () => (await api.panel.snapshot()).last;
+
+    await failInPanel();
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-track.ts'));
+    const editor = await vscode.window.showTextDocument(doc);
+    try {
+      await editor.edit((e) => e.insert(new vscode.Position(0, 0), '// a\n// b\n'));
+      await until(() => api.findings.get(key)?.startLine === 6);
+      assert.match((await last())?.text ?? '', /no-such-branch/, 'after a line shift');
+      api.findings.setStatus(key, 'dismissed');
+      assert.match((await last())?.text ?? '', /no-such-branch/, 'after dismissing');
+    } finally {
+      await vscode.window.showTextDocument(doc);
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
+
+    // Clear Findings removes it.
+    await vscode.commands.executeCommand('aiReview.clearFindings');
+    assert.strictEqual(await last(), undefined);
+
+    // So does a review started from any command, as soon as it starts.
+    await failInPanel();
+    write('src/ux-lf.ts', DIV('lf'));
+    const gate = hold('return a * b; // lf');
+    const pending = vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+      root,
+      path: 'src/ux-lf.ts',
+      silent: true,
+    });
+    await until(() => gate.arrived);
+    const running = await api.panel.snapshot();
+    gate.release();
+    const result = await pending;
+    assert.strictEqual(running.running, true);
+    assert.strictEqual(running.last, undefined);
+    assert.strictEqual(result.ok, true, result.message);
+    assert.strictEqual((await last())?.level, 'info');
+  });
+
+  test('the panel lists a branch created after it first listed them, a few seconds later (F22)', async () => {
+    // The test repo is outside the workspace: make it the panel's only repository.
+    const roots = api.repos.roots;
+    api.repos.roots = async () => [root];
+    // Move the clock instead of waiting; past the panel's cache times (5 s) to start fresh.
+    const now = Date.now;
+    let ahead = 6_000;
+    Date.now = () => now() + ahead;
+    try {
+      assert.ok((await api.panel.snapshot()).branches.includes('feature'));
+      git('branch', 'f22-new');
+      // Cached for a moment: the panel refreshes on every selection change.
+      assert.ok(!(await api.panel.snapshot()).branches.includes('f22-new'));
+      ahead += 6_000;
+      assert.ok((await api.panel.snapshot()).branches.includes('f22-new'));
+    } finally {
+      git('branch', '-D', 'f22-new');
+      // Leave caches that match the repository again for the tests that follow.
+      ahead += 6_000;
+      await api.panel.snapshot();
+      api.repos.roots = roots;
+      ahead += 6_000;
+      await api.panel.snapshot();
+      Date.now = now;
+    }
+  });
+
   test('the panel shows double-checking as on when the repo config turns it on', async () => {
     // Asks for the test repo directly: it's outside the workspace, so whether the panel
     // lists it depends on when the Git extension finds it.

@@ -30,6 +30,8 @@ export interface ReviewSession {
 export interface StoreChange {
   /** Documents whose findings changed; undefined = everything. */
   uris?: vscode.Uri[];
+  /** A new review's findings replaced the old ones, or they were cleared. */
+  newSession?: boolean;
 }
 
 /** Lines kept around a finding when looking for its moved quote. */
@@ -122,7 +124,7 @@ export class FindingStore implements vscode.Disposable {
         this.items.set(key, { ...reanchor(finding, lines), key, uri, status });
       }
     }
-    this.emitter.fire({});
+    this.emitter.fire({ newSession: true });
     return this.all();
   }
 
@@ -152,7 +154,7 @@ export class FindingStore implements vscode.Disposable {
     this.cancelPending();
     this.items.clear();
     this.current = undefined;
-    this.emitter.fire({});
+    this.emitter.fire({ newSession: true });
   }
 
   /**
