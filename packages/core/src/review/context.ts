@@ -46,13 +46,28 @@ export function buildFileContext(
   const changed = new Set<number>();
   for (const h of hunks) {
     let sawAdd = false;
+    // Pure deletions: the new-side line just before each removal (after it, at the top).
+    const removedAt = new Set<number>();
+    let before: number | undefined;
+    let waiting = false;
     for (const l of h.lines) {
       if (l.kind === 'add' && l.newLine !== undefined) {
         changed.add(l.newLine);
         sawAdd = true;
       }
+      if (l.kind === 'del') {
+        if (before !== undefined) removedAt.add(before);
+        else waiting = true;
+      } else if (l.newLine !== undefined) {
+        before = l.newLine;
+        if (waiting) removedAt.add(before);
+        waiting = false;
+      }
     }
-    if (!sawAdd) changed.add(Math.max(1, h.newStart));
+    if (sawAdd) continue;
+    // Without new-side lines (`git diff -U0`) git's start line is the one before the removal.
+    if (!removedAt.size) changed.add(Math.max(1, h.newStart));
+    for (const l of removedAt) changed.add(l);
   }
 
   const tree = symbols ?? heuristicSymbols(file.newContent);

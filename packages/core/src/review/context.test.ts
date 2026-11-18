@@ -66,6 +66,23 @@ function cartDiff(content = CART): FileDiff {
   return { ...diff, newContent: content };
 }
 
+/** `src/d.ts` with the given hunk lines and new-side content. */
+function deletionDiff(content: string, hunk: string[]): FileDiff {
+  const diff = parseUnifiedDiff(
+    ['diff --git a/src/d.ts b/src/d.ts', '--- a/src/d.ts', '+++ b/src/d.ts', ...hunk, ''].join(
+      '\n',
+    ),
+  ).files[0]!;
+  return { ...diff, newContent: content };
+}
+
+/** Line numbers `buildFileContext` picks for all of `file`'s hunks. */
+function contextLines(file: FileDiff): number[] {
+  return buildFileContext(file, file.hunks, undefined).flatMap((r) =>
+    r.lines.map((_, i) => r.startLine + i),
+  );
+}
+
 describe('heuristicSymbols', () => {
   it('finds classes, methods and functions with their blocks', () => {
     const tree = heuristicSymbols(CART);
@@ -176,6 +193,92 @@ describe('buildFileContext', () => {
       [27, 3],
       [31, 3],
     ]);
+  });
+
+  it('places a pure deletion at the line next to it, not at the hunk start (F9)', () => {
+    // A line removed right under `function second() {`; the hunk's context starts in first().
+    const content = [
+      'function first() {',
+      '  const a = 1;',
+      '  return a;',
+      '}',
+      '',
+      'function second() {',
+      '  const b = 2;',
+      '  const c = 3;',
+      '  const d = 4;',
+      '  return b + c + d;',
+      '}',
+      '',
+    ].join('\n');
+    const file = deletionDiff(content, [
+      '@@ -4,7 +4,6 @@',
+      ' }',
+      ' ',
+      ' function second() {',
+      "-  log('second');",
+      '   const b = 2;',
+      '   const c = 3;',
+      '   const d = 4;',
+    ]);
+    expect(contextLines(file)).toEqual([10, 11]);
+  });
+
+  it('places each separate deletion of a pure-deletion hunk (F9)', () => {
+    const content = [
+      'function first() {',
+      '  const a = 1;',
+      '  const b = 2;',
+      '  const c = 3;',
+      '  return a + b + c;',
+      '}',
+      'function second() {',
+      '  const d = 4;',
+      '  const e = 5;',
+      '  const f = 6;',
+      '  return d + e + f;',
+      '}',
+      '',
+    ].join('\n');
+    const file = deletionDiff(content, [
+      '@@ -3,10 +3,8 @@',
+      '   const b = 2;',
+      '   const c = 3;',
+      '   return a + b + c;',
+      "-  log('unreachable');",
+      ' }',
+      ' function second() {',
+      "-  log('second');",
+      '   const d = 4;',
+      '   const e = 5;',
+      '   const f = 6;',
+    ]);
+    expect(contextLines(file)).toEqual([1, 2, 11, 12]);
+  });
+
+  it('places a deletion at the top of a file, or without context lines, next to it', () => {
+    const content = [
+      'function first() {',
+      '  const a = 1;',
+      '  return a;',
+      '}',
+      'function second() {',
+      '  return 2;',
+      '}',
+      '',
+    ].join('\n');
+    // Nothing before the removed line: the line after it is used.
+    const top = deletionDiff(content, [
+      '@@ -1,4 +1,3 @@',
+      "-import { x } from 'x';",
+      ' function first() {',
+      '   const a = 1;',
+      '   return a;',
+    ]);
+    expect(contextLines(top)).toEqual([4]);
+    // `git diff -U0`: no new-side lines at all, git's start line is the one before the removal.
+    const bare = deletionDiff(content, ['@@ -6 +5,0 @@', "-  log('second');"]);
+    expect(contextLines(bare)).toEqual([5, 6, 7]);
   });
 
   it('keeps within the token budget and returns nothing without content', () => {
