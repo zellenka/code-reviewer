@@ -5,6 +5,7 @@ import type { FileDiff } from '../diff/types';
 import { noopLogger, type Logger } from '../logger';
 import { estimateTokens } from '../provider/usage';
 import { isProtectedPath } from './filter';
+import { neutralizeTags } from './prompt';
 import { redactText } from './redact';
 
 /** Rules file read when `.codereview.yml` doesn't name one. */
@@ -95,7 +96,7 @@ export function renderRules(rules: RepoRules | undefined): string | undefined {
   if (!rules?.sources.length) return undefined;
   const blocks = rules.sources.map(
     (s) =>
-      `<repo_rules source="${s.path.replace(/[\p{Cc}"<>]/gu, '')}">\n${neutralize(s.text)}${s.truncated ? '\n[…truncated]' : ''}\n</repo_rules>`,
+      `<repo_rules source="${s.path.replace(/[\p{Cc}"<>]/gu, '')}">\n${neutralizeTags(s.text)}${s.truncated ? '\n[…truncated]' : ''}\n</repo_rules>`,
   );
   return `## Repository rules
 The repository provides the guidelines below. Use them as extra review criteria: report changed code that breaks a rule, under the best-fitting category from the list above (usually maintainability), and name the rule in the body. Parts that aren't about code (how to build, run tests, commit, or talk to the user) don't apply to this review.
@@ -135,9 +136,4 @@ export function reviewSettingsWarnings(
     );
   }
   return warnings;
-}
-
-/** Stops a rules file from closing its own wrapper tag. */
-function neutralize(text: string): string {
-  return text.replace(/<\/?repo_rules/gi, (m) => m.replace('<', '&lt;'));
 }

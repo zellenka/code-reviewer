@@ -1,6 +1,7 @@
 import type { FileDiff, Hunk } from '../diff/types';
 import { estimateTokens } from '../provider/usage';
 import { renderContext, type ContextRange } from './context';
+import { neutralizeTags } from './prompt';
 
 export interface ChunkFile {
   path: string;
@@ -70,7 +71,7 @@ export function renderHunk(hunk: Hunk): string {
   for (const line of hunk.lines) {
     const num = line.newLine !== undefined ? String(line.newLine).padStart(6) : '      ';
     const marker = line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' ';
-    lines.push(`${num} ${marker} ${line.text}`);
+    lines.push(`${num} ${marker} ${neutralizeTags(line.text)}`);
   }
   return lines.join('\n');
 }

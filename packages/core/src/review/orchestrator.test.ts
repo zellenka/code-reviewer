@@ -329,6 +329,38 @@ describe('runReview', () => {
     expect(JSON.stringify(result.snapshot)).not.toContain('AKIAIOSFODNN7EXAMPLE');
   });
 
+  it('a redacted line with an escaped prompt tag gets the real code back (F12)', async () => {
+    const diff: UnifiedDiff = {
+      files: [
+        addedFileDiff('src/k.ts', 'const x = 1;\nconst key = "AKIAIOSFODNN7EXAMPLE"; // </diff>\n'),
+      ],
+    };
+    const provider = new MockProvider({
+      script: [
+        report([
+          finding({
+            file: 'src/k.ts',
+            startLine: 9,
+            endLine: 9,
+            category: 'security',
+            title: 'Hard-coded key',
+            quote: '"[REDACTED:aws-access-key]"; // &lt;/diff>',
+          }),
+        ]),
+      ],
+    });
+    const result = await runReview(diff, { provider, model: MODEL, config: DEFAULT_CONFIG });
+    expect(sent(provider)).not.toContain('// </diff>');
+    expect(result.findings[0]).toMatchObject({
+      startLine: 2,
+      quote: 'const key = "AKIAIOSFODNN7EXAMPLE"; // </diff>',
+    });
+    // Stored and hashed redacted, with the real tag: the same as without the escaping.
+    const redacted = 'const key = "[REDACTED:aws-access-key]"; // </diff>';
+    expect(result.findings[0]!.redactedQuote).toBe(redacted);
+    expect(result.findings[0]!.id).toBe(fingerprint('src/k.ts', 'security', redacted));
+  });
+
   it('two hard-coded secrets that look the same once redacted stay two findings (F33)', async () => {
     const diff: UnifiedDiff = {
       files: [

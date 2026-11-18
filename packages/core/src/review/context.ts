@@ -1,6 +1,7 @@
 import { splitLines } from '../diff/parse';
 import type { FileDiff, Hunk } from '../diff/types';
 import { estimateTokens } from '../provider/usage';
+import { neutralizeTags } from './prompt';
 import { enclosingSymbols, heuristicSymbols, type CodeSymbol, type SymbolIndex } from './symbols';
 
 /** Unchanged new-side lines shown next to a file's hunks. */
@@ -159,7 +160,9 @@ export function renderContext(path: string, ranges: readonly ContextRange[]): st
   const out = [`<context path="${escapeAttr(path)}">`];
   ranges.forEach((r, i) => {
     if (i > 0) out.push('   ...');
-    r.lines.forEach((text, j) => out.push(`${String(r.startLine + j).padStart(6)}   ${text}`));
+    r.lines.forEach((text, j) =>
+      out.push(`${String(r.startLine + j).padStart(6)}   ${neutralizeTags(text)}`),
+    );
   });
   out.push('</context>');
   return out.join('\n');
@@ -218,9 +221,10 @@ export function renderChangedSymbols(
   const max = options.maxEntries ?? 60;
   const lines = list
     .slice(0, max)
-    .map(
-      (s) =>
+    .map((s) =>
+      neutralizeTags(
         `- ${s.path}:${s.startLine}-${s.endLine} ${s.kind} ${s.names.join('.')}: \`${s.signature.replace(/`/g, "'")}\``,
+      ),
     );
   if (list.length > max) lines.push(`- … and ${list.length - max} more`);
   return `<changed_symbols>
