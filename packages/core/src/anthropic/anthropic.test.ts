@@ -9,6 +9,11 @@ import { DEFAULT_CONFIG } from '../config/schema';
 import { addedFileDiff } from '../diff/parse';
 import { noopLogger } from '../logger';
 import { collectChat } from '../provider/collect';
+import {
+  PROVIDER_CONFORMANCE,
+  type ConformanceHarness,
+  type ConformanceStep,
+} from '../provider/conformance';
 import type { ChatRequest } from '../provider/types';
 import { runReview } from '../review/orchestrator';
 import { mapAnthropicError, parseRetryAfter } from './errors';
@@ -631,4 +636,79 @@ describe('buildParams', () => {
       buildParams(baseReq({ maxOutputTokens: 500 }), ANTHROPIC_MODELS[0], false).max_tokens,
     ).toBe(500);
   });
+});
+
+describe('AnthropicProvider conformance', () => {
+  const text = (value: string) =>
+    [{ type: 'text', text: value, citations: null }] as unknown as BetaMessage['content'];
+  const errors = {
+    rateLimit: () => apiError(429, 'rate_limit_error'),
+    quota: () => apiError(402, 'billing_error'),
+    auth: () => apiError(401, 'authentication_error'),
+  };
+
+  /** Plays conformance steps as SDK streams. */
+  function stepClient(steps: ConformanceStep[]) {
+    let requests = 0;
+    const client: AnthropicClientLike = {
+      beta: {
+        messages: {
+          stream(_params, options) {
+            requests++;
+            const step = steps.shift() ?? { kind: 'fail', error: 'quota' };
+            const signal = options?.signal;
+            const delta = (value: string) =>
+              ({
+                type: 'content_block_delta',
+                index: 0,
+                delta: { type: 'text_delta', text: value },
+              }) as BetaRawMessageStreamEvent;
+            return {
+              async *[Symbol.asyncIterator]() {
+                if (step.kind === 'fail') {
+                  if (step.error === 'blocked') return;
+                  throw errors[step.error]();
+                }
+                yield delta(step.text);
+                if (step.kind === 'failAfter') throw errors.rateLimit();
+                if (step.kind === 'stall') {
+                  if (!signal?.aborted) {
+                    await new Promise((resolve) =>
+                      signal?.addEventListener('abort', resolve, { once: true }),
+                    );
+                  }
+                  throw new APIUserAbortError();
+                }
+              },
+              finalMessage: async () =>
+                step.kind === 'fail'
+                  ? finalMessage([], 'refusal')
+                  : finalMessage(
+                      text(step.text),
+                      step.kind === 'truncated' ? 'max_tokens' : 'end_turn',
+                    ),
+              abort() {},
+            };
+          },
+        },
+      },
+    };
+    return { client, requests: () => requests };
+  }
+
+  const harness: ConformanceHarness = {
+    model: 'claude-opus-5-5',
+    reportsTruncation: true,
+    create(steps) {
+      const fake = stepClient([...steps]);
+      const provider = new AnthropicProvider({
+        apiKey: 'sk-ant-test',
+        createClient: () => fake.client,
+        retry: { sleep: async () => {} },
+      });
+      return { provider, requests: fake.requests };
+    },
+  };
+
+  for (const c of PROVIDER_CONFORMANCE) it(c.name, () => c.run(harness));
 });

@@ -86,6 +86,38 @@ describe('reviewChunk (structured output)', () => {
     expect(JSON.stringify(provider.requests[1]!.messages.at(-1))).toMatch(/must call/);
   });
 
+  it('asks for a shorter answer when the output limit cut it off', async () => {
+    const cut: MockStep = {
+      events: [
+        { type: 'text', delta: '{"findings": [{"file": "src/a.ts", "body": "Long' },
+        { type: 'stop', reason: 'max_tokens' },
+      ],
+    };
+    const provider = new MockProvider({ script: [cut, report([])] });
+    const result = await reviewChunk({ ...base, provider, signal });
+    expect(result.outcome).toBe('repaired');
+    expect(JSON.stringify(provider.requests[1]!.messages.at(-1))).toMatch(/cut off.*fewer/);
+  });
+
+  it('treats unfinished JSON as possibly cut off when the provider cannot tell (vscode.lm)', async () => {
+    // Copilot ends every answer with stop: end, even one cut off by the output limit.
+    const provider = new MockProvider({
+      script: [mockText('```json\n{"findings": [{"file": "src/a.ts", "body": "Long'), report([])],
+    });
+    const result = await reviewChunk({ ...base, provider, signal });
+    expect(result.outcome).toBe('repaired');
+    const repair = JSON.stringify(provider.requests[1]!.messages.at(-1));
+    expect(repair).toMatch(/cut off/);
+    expect(repair).toMatch(/fewer findings with shorter bodies/);
+    expect(repair).toMatch(new RegExp(REPORT_TOOL_NAME));
+  });
+
+  it('does not suggest a cut-off for a finished prose answer', async () => {
+    const provider = new MockProvider({ script: [mockText('All fine [no issues].'), report([])] });
+    await reviewChunk({ ...base, provider, signal });
+    expect(JSON.stringify(provider.requests[1]!.messages.at(-1))).not.toMatch(/cut off/);
+  });
+
   it('accepts JSON in text, and uses JSON-only mode for models without tools', async () => {
     const fenced = mockText('```json\n' + JSON.stringify({ findings: [finding()] }) + '\n```');
     const provider = new MockProvider({ script: [fenced, fenced] });
