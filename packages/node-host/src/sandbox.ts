@@ -2,7 +2,8 @@ import { realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import { DiffSourceError } from '@ai-review/core';
 
-const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin';
+/** Whether file names that differ only in letter case name the same file here. */
+export const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin';
 
 /** `p` as paths are compared: lower case where the file system ignores case. */
 export function pathKey(p: string): string {
@@ -20,7 +21,7 @@ export function isInside(root: string, target: string): boolean {
 
 /**
  * Where an existing file inside the repo really lives (after symlinks), repo-relative with
- * `/`. A committed `docs/notes.md → ../.env` gives `.env`, so callers can refuse secrets by
+ * `/`. A committed `docs/notes.md → ../.env` gives `.env`, so core can refuse secrets by
  * what is read, not by the name asked for.
  */
 export async function realRepoPath(root: string, abs: string): Promise<string> {

@@ -5,16 +5,14 @@ import * as vscode from 'vscode';
 import type { Logger } from '@ai-review/core';
 import { CONFIG_SECTION, targetFor, type ProviderRegistry } from '../providers/registry';
 import {
-  cancelReview,
-  isReviewRunning,
   needsAttention,
-  onDidChangeReviewRunning,
   summarize,
   type ReviewCommandArgs,
   type ReviewCommandResult,
 } from '../review/commands';
 import type { ReviewConfigService } from '../review/config';
 import { relativeToRepo, type RepoLocator } from '../review/repo';
+import type { ReviewRuns } from '../review/runs';
 import type { FindingStore } from '../review/store';
 import { panelHtml } from './panelHtml';
 
@@ -98,6 +96,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
       registry: ProviderRegistry;
       repos: RepoLocator;
       store: FindingStore;
+      runs: ReviewRuns;
       logger: Logger;
       /** Repo configs, for settings that default to `.codereview.yml` ("auto"). */
       configs?: ReviewConfigService;
@@ -116,7 +115,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
         if (change.newSession) this.lastError = undefined;
         refresh();
       }),
-      onDidChangeReviewRunning((running) => {
+      deps.runs.onDidChange((running) => {
         // So does starting a review from anywhere.
         if (running) this.lastError = undefined;
         refresh();
@@ -242,7 +241,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
       reviewMode: settings.get<string>('reviewMode') ?? 'auto',
       includeContext: settings.get<boolean>('includeContext') ?? true,
       verifyFindings: await this.verifyOn(branchRoot, settings.get<string>('verifyFindings')),
-      running: isReviewRunning(),
+      running: this.deps.runs.running,
       ...(last ? { last } : {}),
     };
   }
@@ -342,10 +341,10 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
         return;
       case 'run':
         // A double click must not start a second review that cancels the first.
-        if (!isReviewRunning()) await this.run();
+        if (!this.deps.runs.running) await this.run();
         return;
       case 'cancel':
-        cancelReview();
+        this.deps.runs.cancel();
         return;
       case 'command':
         if (typeof value === 'string' && PANEL_COMMANDS.has(value)) {

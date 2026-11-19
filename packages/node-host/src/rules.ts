@@ -1,11 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import {
-  isDiffSourceError,
-  isProtectedPath,
   loadRepoRules,
-  noopLogger,
   type LoadRulesOptions,
-  type Logger,
   type RepoRules,
   type ReviewConfig,
 } from '@ai-review/core';
@@ -13,15 +9,12 @@ import { realRepoPath, resolveInRepo } from './sandbox';
 
 /**
  * Reads a repo-relative text file, sandboxed to `root`. Undefined when it doesn't exist.
- * Throws for paths outside the repo (e.g. a `rules:` value of `../secrets.md`) and for
- * symlinks to secret files.
+ * Throws for paths outside the repo (e.g. a `rules:` value of `../secrets.md`). Secret files
+ * are refused by the caller (`loadRepoRules`).
  */
 export async function readRepoText(root: string, relPath: string): Promise<string | undefined> {
   const abs = await resolveInRepo(root, relPath);
   try {
-    if (isProtectedPath(await realRepoPath(root, abs))) {
-      throw new Error(`${relPath} can't be read: it may contain secrets.`);
-    }
     return await readFile(abs, 'utf8');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -34,22 +27,10 @@ export async function readRepoText(root: string, relPath: string): Promise<strin
 export async function loadRepoRulesFromDisk(
   root: string,
   config: Pick<ReviewConfig, 'rules'>,
-  options: LoadRulesOptions & { logger?: Logger } = {},
+  options: LoadRulesOptions = {},
 ): Promise<RepoRules> {
-  const logger = options.logger ?? noopLogger;
-  return loadRepoRules(
-    async (p) => {
-      try {
-        return await readRepoText(root, p);
-      } catch (err) {
-        if (isDiffSourceError(err)) {
-          logger.warn(`rules file ${p} ignored: it is outside the repository`);
-          return undefined;
-        }
-        throw err;
-      }
-    },
-    config,
-    options,
-  );
+  return loadRepoRules((p) => readRepoText(root, p), config, {
+    realPath: async (p) => realRepoPath(root, await resolveInRepo(root, p)),
+    ...options,
+  });
 }

@@ -6,10 +6,12 @@ import { MockProvider, mockError, mockText, mockToolCall, type MockStep } from '
 import type { ChatRequest, ModelInfo } from '../provider/types';
 import { estimateTokens } from '../provider/usage';
 import { ReviewTooLargeError, chunkFiles, renderChunk } from './chunker';
+import { noopLogger } from '../logger';
 import { REPORT_TOOL_NAME } from './output';
-import { runReview } from './orchestrator';
+import { estimateReview, runReview, type ReviewProgress } from './orchestrator';
 import { reviewChunk } from './reviewer';
 import { fingerprint } from './validate';
+import { VERIFY_TOOL_NAME } from './verify';
 
 const MODEL: ModelInfo = {
   id: 'm',
@@ -549,5 +551,242 @@ describe('runReview', () => {
     });
     expect(result.chunks.total).toBe(0);
     expect(provider.requests).toHaveLength(0);
+  });
+});
+
+describe('runReview scheduling and post-processing', () => {
+  const parts = (n: number) =>
+    Array.from({ length: n }, (_, i) => addedFileDiff(`f${i}.ts`, 'z\n'.repeat(3000)));
+  const small = { ...MODEL, maxInputTokens: 12_000 };
+  const cached = { ...small, promptCaching: { minTokens: 1 } };
+
+  it('reports progress per part, then the verify and summary phases', async () => {
+    const provider = new MockProvider({
+      script: [
+        report([finding()]),
+        mockToolCall(VERIFY_TOOL_NAME, { verdicts: [{ id: 'F1', real: true, reason: 'r' }] }),
+        mockText('walkthrough'),
+      ],
+    });
+    const progress: ReviewProgress[] = [];
+    const result = await runReview(SAMPLE, {
+      provider,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      verify: true,
+      summary: true,
+      onProgress: (p) => progress.push({ ...p }),
+    });
+    expect(progress).toEqual([
+      { chunksTotal: 1, chunksDone: 0, findings: 0 },
+      { chunksTotal: 1, chunksDone: 1, findings: 1 },
+      { chunksTotal: 1, chunksDone: 1, findings: 1, phase: 'verify' },
+      { chunksTotal: 1, chunksDone: 1, findings: 1, phase: 'summary' },
+    ]);
+    expect(result.verify).toEqual({ checked: 1, rejected: 0, failed: 0 });
+    expect(result.summary).toBe('walkthrough');
+    // Review, verify and summary requests are all counted.
+    expect(provider.requests).toHaveLength(3);
+    expect(result.usage.requests).toBe(3);
+    expect(result.snapshot?.summary).toBe('walkthrough');
+  });
+
+  it('throws the first error when every part failed', async () => {
+    const provider = new MockProvider({
+      script: [mockError('server', 'first')],
+      fallback: mockError('server', 'later'),
+    });
+    await expect(
+      runReview(
+        { files: parts(2) },
+        { provider, model: small, config: DEFAULT_CONFIG, concurrency: 1 },
+      ),
+    ).rejects.toMatchObject({ kind: 'server', message: 'first' });
+  });
+
+  it('a part without usable findings fails with a note instead of throwing', async () => {
+    const provider = new MockProvider({ script: [mockText('no'), mockText('still no')] });
+    const result = await runReview(SAMPLE, { provider, model: MODEL, config: DEFAULT_CONFIG });
+    expect(result.chunks).toEqual({ total: 1, completed: 0, failed: 1, outcomes: ['failed'] });
+    expect(result.errors).toEqual(['Part 1: the model returned no usable findings.']);
+    expect(result.snapshot).toBeUndefined();
+  });
+
+  it('a review cancelled before it starts sends nothing and marks every part cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const provider = new MockProvider({ fallback: report([]) });
+    const result = await runReview(
+      { files: parts(3) },
+      { provider, model: small, config: DEFAULT_CONFIG, signal: controller.signal, summary: true },
+    );
+    expect(provider.requests).toHaveLength(0);
+    expect(result.cancelled).toBe(true);
+    expect(result.chunks.total).toBeGreaterThan(1);
+    expect(result.chunks.outcomes).toEqual(Array(result.chunks.total).fill('cancelled'));
+    expect(result.summary).toBeUndefined();
+    expect(result.snapshot).toBeUndefined();
+  });
+
+  it('a failed first part still lets the others start while warming the cache', async () => {
+    const provider = new MockProvider({
+      script: [mockError('server', 'down')],
+      fallback: report([]),
+    });
+    const result = await runReview(
+      { files: parts(3) },
+      { provider, model: cached, config: DEFAULT_CONFIG, concurrency: 3 },
+    );
+    expect(result.chunks.failed).toBe(1);
+    expect(result.chunks.completed).toBe(result.chunks.total - 1);
+    expect(result.chunks.outcomes[0]).toBe('failed');
+    expect(result.errors).toEqual(['Part 1: down']);
+  });
+
+  it('a fatal error in the first part fails the review while warming the cache', async () => {
+    const provider = new MockProvider({
+      script: [mockError('auth', 'bad key')],
+      fallback: report([]),
+    });
+    const result = runReview(
+      { files: parts(3) },
+      { provider, model: cached, config: DEFAULT_CONFIG, concurrency: 3 },
+    );
+    await expect(result).rejects.toMatchObject({ kind: 'auth' });
+    // The waiting parts are released as the first one ends, just before it aborts them.
+    expect(provider.requests.length).toBeLessThanOrEqual(3);
+  });
+
+  it('logs what it sends', async () => {
+    const logs: string[] = [];
+    const logger = {
+      ...noopLogger,
+      info: (m: string) => logs.push(`info: ${m}`),
+      warn: (m: string) => logs.push(`warn: ${m}`),
+    };
+    const diff: UnifiedDiff = {
+      files: [
+        addedFileDiff('src/k.ts', 'const key = "AKIAIOSFODNN7EXAMPLE";\n'),
+        addedFileDiff('.env', 'TOKEN=1\n'),
+      ],
+    };
+    const agentic = { ...DEFAULT_CONFIG, review: { ...DEFAULT_CONFIG.review, mode: 'agentic' } };
+    await runReview(diff, {
+      provider: new MockProvider({ fallback: report([]) }),
+      model: MODEL,
+      config: agentic as typeof DEFAULT_CONFIG,
+      logger,
+    });
+    expect(logs).toMatchInlineSnapshot(`
+      [
+        "warn: agentic review needs repository access here; running single-pass",
+        "info: redacted 1 secret(s) before sending",
+        "info: reviewing 1 file(s) in 1 request(s) with m (single-pass); skipped 1",
+        "info: review done: 0 finding(s), 0 failed part(s)",
+      ]
+    `);
+  });
+});
+
+describe('estimateReview numbers', () => {
+  const files = Array.from({ length: 6 }, (_, i) =>
+    addedFileDiff(
+      `src/f${i}.ts`,
+      Array.from({ length: 300 }, (_, n) => `export const v${i}_${n} = compute(${n}, 'x');\n`).join(
+        '',
+      ),
+    ),
+  );
+  const diff: UnifiedDiff = { files: [...files, addedFileDiff('.env', 'TOKEN=1\n')] };
+  const priced: ModelInfo = {
+    ...MODEL,
+    pricing: { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheWritePerMTok: 3.75 },
+    promptCaching: { minTokens: 512 },
+  };
+  const workspace = {
+    readFile: () => Promise.resolve(''),
+    grep: () => Promise.resolve([]),
+    findReferences: () => Promise.resolve([]),
+    getSymbolAt: () => Promise.resolve(null),
+  };
+
+  it('single-pass with caching, summary and verify', () => {
+    expect(
+      estimateReview(diff, {
+        model: priced,
+        config: DEFAULT_CONFIG,
+        maxChunkTokens: 4_000,
+        summary: true,
+        verify: true,
+        rules: { sources: [{ path: 'AGENTS.md', text: 'Never use `any`.' }] },
+      }),
+    ).toMatchInlineSnapshot(`
+      {
+        "costUsd": {
+          "high": 0.6540927,
+          "low": 0.16141470000000002,
+        },
+        "files": 6,
+        "inputTokens": 60924,
+        "mode": "single-pass",
+        "outputTokens": {
+          "high": 24800,
+          "low": 2000,
+        },
+        "requests": 13,
+        "skipped": 1,
+        "verify": {
+          "maxInputTokens": 32226,
+          "maxRequests": 6,
+        },
+      }
+    `);
+  });
+
+  it('agentic', () => {
+    expect(
+      estimateReview(diff, {
+        model: priced,
+        config: { ...DEFAULT_CONFIG, review: { ...DEFAULT_CONFIG.review, mode: 'agentic' } },
+        maxChunkTokens: 4_000,
+        summary: true,
+        workspace,
+        agentLimits: { maxTurns: 4 },
+      }),
+    ).toMatchInlineSnapshot(`
+      {
+        "costUsd": {
+          "high": 7.903465349999999,
+          "low": 0.16503135,
+        },
+        "files": 6,
+        "inputTokens": 67080,
+        "inputTokensHigh": 2412558,
+        "mode": "agentic",
+        "outputTokens": {
+          "high": 48800,
+          "low": 2000,
+        },
+        "requests": 13,
+        "skipped": 1,
+      }
+    `);
+  });
+
+  it('without pricing or context', () => {
+    expect(estimateReview(diff, { model: MODEL, config: DEFAULT_CONFIG, context: false }))
+      .toMatchInlineSnapshot(`
+      {
+        "files": 6,
+        "inputTokens": 28617,
+        "mode": "single-pass",
+        "outputTokens": {
+          "high": 4000,
+          "low": 300,
+        },
+        "requests": 2,
+        "skipped": 1,
+      }
+    `);
   });
 });

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { addedFileDiff, parseUnifiedDiff } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
-import { filterFiles, isSecretPath } from './filter';
+import { filterFiles, isProtectedPath, isSecretPath } from './filter';
 import { createRedactor, redactFiles, redactText } from './redact';
+import { loadRepoRules } from './rules';
 
 const file = (
   path: string,
@@ -65,6 +66,51 @@ describe('filterFiles', () => {
     );
     expect(isSecretPath('a/b/.env.local')).toBe(true);
     expect(isSecretPath('src/env.ts')).toBe(false);
+  });
+
+  // One predicate for every sender (A1): the diff filter, the agent tools and the rules loader.
+  it('knows the other names Windows opens a secret file or .git/ by', async () => {
+    const blocked = [
+      '.env',
+      './.env',
+      '.\\.env',
+      'src/../.env',
+      'src/./../.env',
+      '.env.',
+      '.env ',
+      '.env. .',
+      '.env::$DATA',
+      '.env:stream',
+      'config/server.key.',
+      'server.key::$DATA',
+      'id_rsa.',
+      '.git./config',
+      '.git /config',
+      '.git::$INDEX_ALLOCATION/config',
+      'sub\\.GIT\\config',
+    ];
+    for (const p of blocked) expect(isProtectedPath(p), p).toBe(true);
+    const allowed = [
+      'src/env.ts',
+      '.gitignore',
+      '.github/workflows/ci.yml',
+      'src/..env/a.ts',
+      'docs/key.md',
+      'a:b.ts',
+    ];
+    for (const p of allowed) expect(isProtectedPath(p), p).toBe(false);
+    // A reader that opens names as Windows does: the loader refuses what the tools refuse.
+    const read = async (p: string) =>
+      p
+        .replace(/\\/g, '/')
+        .replace(/^src\/\.\.\//, '')
+        .replace(/(::\$DATA|[. ]+)$/, '') === '.env'
+        ? 'TOKEN=LEAKED_ENV_VALUE'
+        : undefined;
+    for (const rules of ['src/../.env', '.env::$DATA', '.env.', '.\\.env']) {
+      const loaded = await loadRepoRules(read, { rules });
+      expect(JSON.stringify(loaded), rules).not.toContain('LEAKED');
+    }
   });
 
   it('files with merge conflicts are skipped as unmerged, not as "no changes" (F26)', () => {

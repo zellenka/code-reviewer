@@ -90,15 +90,37 @@ const builtInMatchers = BUILT_IN.map(({ reason, globs }) => ({
   match: compileGlobs(globs, reason === 'secret'),
 }));
 
-/** True for files that must never be sent, whatever the config says. */
-export function isSecretPath(path: string): boolean {
-  return builtInMatchers[0]!.match(path);
+/**
+ * The file Windows opens for `path` (with `/`): `.` and `..` steps resolved, and in each name
+ * an alternate data stream (`.env::$DATA`) and trailing dots and spaces (`.env.`) dropped.
+ * Short names (`GIT~1`) are left to the host, which gives core the real path of a file.
+ */
+function openedPath(path: string): string {
+  const out: string[] = [];
+  for (const part of path.split('/')) {
+    const name = part.replace(/:.*$/, '').replace(/[. ]+$/, '');
+    if (part === '..') out.pop();
+    else if (name) out.push(name);
+  }
+  return out.join('/');
 }
 
-/** Secret files and anything in `.git/`: never readable by the model, whatever the path. */
+/**
+ * True for files that must never be sent, whatever the config says. Also checks the name
+ * Windows opens the path by (`src/../.env`, `.env.`, `server.key::$DATA`).
+ */
+export function isSecretPath(path: string): boolean {
+  const p = path.replace(/\\/g, '/');
+  return builtInMatchers[0]!.match(p) || builtInMatchers[0]!.match(openedPath(p));
+}
+
+/**
+ * Secret files and anything in `.git/`: never readable by the model, whatever the path. The
+ * one check of what may be sent: the diff filter, the agent tools and the rules loader use it.
+ */
 export function isProtectedPath(path: string): boolean {
   const p = path.replace(/\\/g, '/');
-  return isSecretPath(p) || /(^|\/)\.git(\/|$)/i.test(p);
+  return isSecretPath(p) || [p, openedPath(p)].some((s) => /(^|\/)\.git(\/|$)/i.test(s));
 }
 
 /** `@generated` / "Code generated … DO NOT EDIT." near the top of the file. */

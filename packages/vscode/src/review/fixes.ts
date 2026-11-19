@@ -133,11 +133,17 @@ async function plan(store: FindingStore, key: string): Promise<Planned> {
   return { ok: true, finding, doc, edit };
 }
 
-/** What a fix replaces and with what; edits elsewhere in the file may move it. */
+/** Where a fix goes, what it replaces and with what; edits elsewhere in the file may move it. */
 export interface FixContent {
+  uri: vscode.Uri;
   oldText: string;
   newText: string;
 }
+
+const PREVIEW_CHANGED: FixOutcome = {
+  ok: false,
+  message: 'The fix changed while the preview was open, so it wasn’t applied. Preview it again.',
+};
 
 function rangeOf(edit: FixEdit): vscode.Range {
   return new vscode.Range(edit.startLine - 1, edit.startColumn, edit.endLine - 1, edit.endColumn);
@@ -153,16 +159,18 @@ export async function applyFix(
   expected?: FixContent,
 ): Promise<FixOutcome> {
   const planned = await plan(store, key);
-  if (!planned.ok) return planned;
+  // A newer review (even of another repository) gives its findings new keys.
+  if (!planned.ok) return expected && !store.get(key) ? PREVIEW_CHANGED : planned;
   const { doc, edit, finding } = planned;
   const range = rangeOf(edit);
-  // E.g. a re-review changed the suggestion while the preview was open.
-  if (expected && (doc.getText(range) !== expected.oldText || edit.newText !== expected.newText)) {
-    return {
-      ok: false,
-      message:
-        'The fix changed while the preview was open, so it wasn’t applied. Preview it again.',
-    };
+  // E.g. the file was edited where the fix goes while the preview was open.
+  if (
+    expected &&
+    (uriKey(doc.uri) !== uriKey(expected.uri) ||
+      doc.getText(range) !== expected.oldText ||
+      edit.newText !== expected.newText)
+  ) {
+    return PREVIEW_CHANGED;
   }
   const eol = doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
   const workspaceEdit = new vscode.WorkspaceEdit();
@@ -192,13 +200,18 @@ export async function previewFix(
   const planned = await plan(store, key);
   if (!planned.ok) return planned;
   const { doc, edit, finding } = planned;
+  // The key is this review's own: previews from two reviews (or repositories) never share content.
   const previewUri = vscode.Uri.from({
     scheme: PREVIEW_SCHEME,
     path: `/${finding.file}`,
     query: `key=${encodeURIComponent(key)}`,
   });
   previews.set(previewUri, applyFixToText(doc.getText(), edit));
-  const shown: FixContent = { oldText: doc.getText(rangeOf(edit)), newText: edit.newText };
+  const shown: FixContent = {
+    uri: doc.uri,
+    oldText: doc.getText(rangeOf(edit)),
+    newText: edit.newText,
+  };
   await vscode.commands.executeCommand(
     'vscode.diff',
     doc.uri,

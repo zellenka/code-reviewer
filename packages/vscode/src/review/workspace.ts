@@ -36,10 +36,10 @@ const STRUCTURAL = new Set<vscode.SymbolKind>([
 ]);
 
 /**
- * Read-only workspace tools for agentic reviews: file reads and grep from node-host
- * (same path sandbox: no `..`, no symlinks out of the repo, no git-ignored files, size
- * caps), references and symbols from the language server when one answers, else grep /
- * heuristics.
+ * Raw, read-only workspace access for agentic reviews: file reads, the git file list and
+ * grep from node-host (same path sandbox: no `..`, no symlinks out of the repo; size caps),
+ * references and symbols from the language server when one answers, else grep /
+ * heuristics. Core checks what the model may see (secret and git-ignored files included).
  */
 export class VsCodeWorkspaceTools extends FsWorkspaceTools {
   constructor(
@@ -58,7 +58,7 @@ export class VsCodeWorkspaceTools extends FsWorkspaceTools {
     signal?: AbortSignal,
   ): Promise<{ path: string; line: number }[]> {
     signal?.throwIfAborted();
-    const abs = await this.resolveReadable(relPath);
+    const abs = await resolveInRepo(this.root, relPath);
     try {
       const locations = await withTimeout(
         vscode.commands.executeCommand<vscode.Location[] | undefined>(
@@ -71,10 +71,9 @@ export class VsCodeWorkspaceTools extends FsWorkspaceTools {
         const out: { path: string; line: number }[] = [];
         for (const loc of locations) {
           const rel = relativeToRepo(this.root, loc.uri.fsPath);
-          // Outside the repo, or in dependencies: not useful and possibly large.
-          if (!rel || /(^|\/)(node_modules|\.git)\//.test(rel)) continue;
-          // The language server also knows files git ignores (local config, generated code).
-          if (!(await this.isListed(rel))) continue;
+          // Outside the repo, or in dependencies: not useful and possibly large. Files git
+          // ignores, which the language server also knows, are left out by core.
+          if (!rel || /(^|\/)node_modules\//.test(rel)) continue;
           out.push({ path: rel, line: loc.range.start.line + 1 });
         }
         // A server that only knows the open file (no project loaded) finds just the
@@ -96,7 +95,7 @@ export class VsCodeWorkspaceTools extends FsWorkspaceTools {
     relPath: string,
     line: number,
   ): Promise<{ name: string; kind: string; startLine: number; endLine: number } | null> {
-    const abs = await this.resolveReadable(relPath);
+    const abs = await resolveInRepo(this.root, relPath);
     const symbols = await documentSymbols(vscode.Uri.file(abs), this.logger);
     const inner = symbols ? enclosingSymbols(symbols, line).at(-1) : undefined;
     if (!inner) return null;

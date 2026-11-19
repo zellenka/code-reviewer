@@ -1,4 +1,12 @@
-import { ProviderError, type LLMProvider, type ModelInfo } from '@ai-review/core';
+import {
+  ProviderError,
+  noopLogger,
+  withModelValidation,
+  withSecretRedaction,
+  type LLMProvider,
+  type Logger,
+  type ModelInfo,
+} from '@ai-review/core';
 import * as vscode from 'vscode';
 
 export const CONFIG_SECTION = 'aiReview';
@@ -7,6 +15,7 @@ export interface ProviderEntry {
   /**
    * The built-in providers retry their own transient failures (`withRetry`) and pass
    * `PROVIDER_CONFORMANCE`. Not wrapped here: Anthropic also runs outside VS Code.
+   * `register` wraps every provider in `withModelValidation` and `withSecretRedaction`.
    */
   provider: LLMProvider;
   label: string;
@@ -36,7 +45,8 @@ export class ProviderRegistry implements vscode.Disposable {
   /** Fires when providers, availability, models or the selection change. */
   readonly onDidChange = this.changed.event;
 
-  constructor() {
+  /** `logger` gets the problems of models the providers list (A6). */
+  constructor(private readonly logger: Logger = noopLogger) {
     this.disposables.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration(CONFIG_SECTION)) this.changed.fire();
@@ -45,13 +55,24 @@ export class ProviderRegistry implements vscode.Disposable {
     );
   }
 
-  /** Registers (or overrides) a provider. Disposing restores the one it replaced. */
+  /**
+   * Registers (or overrides) a provider. Disposing restores the one it replaced. No known
+   * secret reaches any registered provider (A1), and only models with usable limits come
+   * out of one (A6).
+   */
   register(id: string, entry: ProviderEntry): vscode.Disposable {
     const previous = this.entries.get(id);
-    this.entries.set(id, entry);
+    const stored: ProviderEntry = {
+      label: entry.label,
+      provider: withSecretRedaction(
+        withModelValidation(entry.provider, (warning) => this.logger.warn(warning)),
+      ),
+      isAvailable: () => entry.isAvailable(),
+    };
+    this.entries.set(id, stored);
     this.changed.fire();
     return new vscode.Disposable(() => {
-      if (this.entries.get(id) === entry) {
+      if (this.entries.get(id) === stored) {
         if (previous) this.entries.set(id, previous);
         else this.entries.delete(id);
         this.changed.fire();

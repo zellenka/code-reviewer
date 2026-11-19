@@ -31,10 +31,16 @@ const repo: Record<string, string> = {
   'src/config.ts': '/** Request timeout in seconds. */\nexport const REQUEST_TIMEOUT = 30;\n',
   'src/client.ts': CALLER,
 };
+const missing = () => Object.assign(new Error('missing'), { code: 'ENOENT' });
 const ws: WorkspaceTools = {
+  listFiles: async () => Object.keys(repo),
+  realPath: async (p) => {
+    if (repo[p] === undefined) throw missing();
+    return p;
+  },
   readFile: async (p) => {
     const text = repo[p];
-    if (text === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    if (text === undefined) throw missing();
     return text;
   },
   grep: async () => [],

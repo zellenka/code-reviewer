@@ -27,6 +27,7 @@ import {
   addUsage,
   estimateCostUsd,
   estimateReview,
+  prepareDiff,
   runReview,
   type ChatRequest,
   type LLMProvider,
@@ -35,6 +36,8 @@ import {
   type ReviewConfig,
   type Usage,
   VERIFY_TOOL_NAME,
+  withModelValidation,
+  withSecretRedaction,
 } from '@ai-review/core';
 import { FsWorkspaceTools, GitCliDiffSource, loadRepoRulesFromDisk } from '@ai-review/node-host';
 import { compareReports, loadReport, type Report } from './compare';
@@ -141,14 +144,12 @@ async function main(): Promise<number> {
         try {
           const rules = await loadRepoRulesFromDisk(repo, config);
           const workspace = new FsWorkspaceTools(repo);
-          const estimate = estimateReview(diff, { model: m, config, summary, rules, workspace });
-          const result = await runReview(diff, {
+          const options = { model: m, config, summary, rules, workspace };
+          const prepared = prepareDiff(diff, options);
+          const estimate = estimateReview(prepared, options);
+          const result = await runReview(prepared, {
+            ...options,
             provider,
-            model: m,
-            config,
-            summary,
-            rules,
-            workspace,
             ...(verifyModel ? { verifyModel } : {}),
             ...(values.concurrency ? { concurrency: Number(values.concurrency) } : {}),
           });
@@ -303,19 +304,25 @@ function printComparison(a: ModeRun, b: ModeRun): void {
   }
 }
 
+/**
+ * Every provider is wrapped in `withModelValidation` and `withSecretRedaction`, as the
+ * extension's registry does; the models come from the wrapped provider.
+ */
 async function createProvider(
   name: string,
   modelId: string | undefined,
   fixture: Fixture,
 ): Promise<{ provider: LLMProvider; model: ModelInfo }> {
+  const wrap = (provider: LLMProvider) =>
+    withSecretRedaction(withModelValidation(provider, (warning) => console.warn(warning)));
   if (name === 'mock') {
-    const provider = new MockProvider({ fallback: (req) => oracle(req, fixture) });
+    const provider = wrap(new MockProvider({ fallback: (req) => oracle(req, fixture) }));
     return { provider, model: (await provider.listModels())[0]! };
   }
   if (name === 'anthropic') {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) throw new Error('Set ANTHROPIC_API_KEY to run evals against Anthropic.');
-    const provider = new AnthropicProvider({ apiKey });
+    const provider = wrap(new AnthropicProvider({ apiKey }));
     const models = await provider.listModels();
     const id = modelId ?? process.env.ANTHROPIC_EVAL_MODEL ?? 'claude-sonnet-5-5';
     const model = models.find((m) => m.id === id);

@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { WorkspaceTools } from '../diff/types';
 import { MockProvider, mockToolCall } from '../provider/mock';
 import { runAgentLoop, type AgentTool } from './loop';
-import { createReviewTools, type ReviewToolsOptions } from './tools';
+import {
+  AGENT_TOOL_NAMES,
+  createReviewTools,
+  reviewToolDefs,
+  type ReviewToolsOptions,
+} from './tools';
 
 const FILES: Record<string, string> = {
   'src/price.ts':
@@ -29,13 +34,20 @@ const FILES: Record<string, string> = {
 };
 const KEY_BODY = /MIIEvQ|FAKEKEYBODY/;
 
-/** In-memory host: sandboxing is the host's job, so this one just refuses '..'. */
+const enoent = (p: string) =>
+  Object.assign(new Error(`ENOENT: C:\\Users\\me\\${p}`), { code: 'ENOENT' });
+
+/** In-memory host: raw IO only, sandboxing is the host's job, so this one just refuses '..'. */
 const ws: WorkspaceTools = {
+  listFiles: async () => Object.keys(FILES),
+  realPath: async (p) => {
+    if (FILES[p] === undefined) throw enoent(p);
+    return p;
+  },
   readFile: async (p, range) => {
     if (p.includes('..')) throw new Error(`Path is outside the repository: ${p}`);
     const text = FILES[p];
-    if (text === undefined)
-      throw Object.assign(new Error(`ENOENT: C:\\Users\\me\\${p}`), { code: 'ENOENT' });
+    if (text === undefined) throw enoent(p);
     return range
       ? text
           .split('\n')
@@ -43,9 +55,9 @@ const ws: WorkspaceTools = {
           .join('\n')
       : text;
   },
-  grep: async (pattern) =>
-    Object.entries(FILES).flatMap(([path, text]) =>
-      text
+  grep: async (pattern, paths) =>
+    paths.flatMap((path) =>
+      (FILES[path] ?? '')
         .split('\n')
         .flatMap((t, i) => (new RegExp(pattern).test(t) ? [{ path, line: i + 1, text: t }] : [])),
     ),
@@ -84,7 +96,7 @@ describe('review tools', () => {
       /outside the repository/,
     );
     await expect(call('read_file', { path: 'missing.ts' })).rejects.toThrow(
-      'File not found: missing.ts',
+      "missing.ts can't be read: it is ignored by git or missing.",
     );
     expect(await call('search_code', { pattern: 'TOKEN|remote' })).toBe('No matches.');
   });
@@ -113,6 +125,17 @@ describe('review tools', () => {
     const out = await call('get_symbol', { path: 'src/price.ts', line: 2 });
     expect(out).toMatch(/^function formatPrice \(src\/price\.ts lines 1-3\):/);
     expect(out).toContain('     3  }');
+  });
+});
+
+describe('review tool definitions', () => {
+  it('are available without a workspace and match the tools', () => {
+    expect(reviewToolDefs().map((d) => d.name)).toEqual([...AGENT_TOOL_NAMES]);
+    expect(reviewToolDefs()).toEqual(createReviewTools(ws).map((t) => t.def));
+    const limits = { maxLines: 50, maxMatches: 7 };
+    expect(reviewToolDefs(limits)).toEqual(createReviewTools(ws, limits).map((t) => t.def));
+    expect(reviewToolDefs(limits)[0]!.description).toContain('first 50 lines');
+    expect(reviewToolDefs(limits)[1]!.description).toContain('up to 7 matching lines');
   });
 });
 
@@ -154,8 +177,9 @@ describe('read_file ranges', () => {
 
 describe('search_code results', () => {
   it('lists hits as path:line: trimmed text', async () => {
+    // Files in the order of a directory walk.
     expect(await call('search_code', { pattern: 'formatPrice|toFixed' })).toBe(
-      "src/price.ts:1: export function formatPrice(cents: number, currency: string) {\nsrc/price.ts:2: return `${currency} ${(cents / 100).toFixed(2)}`;\nsrc/cart.ts:1: import { formatPrice } from './price';\nsrc/cart.ts:3: export const label = formatPrice('EUR', 100);",
+      "src/cart.ts:1: import { formatPrice } from './price';\nsrc/cart.ts:3: export const label = formatPrice('EUR', 100);\nsrc/price.ts:1: export function formatPrice(cents: number, currency: string) {\nsrc/price.ts:2: return `${currency} ${(cents / 100).toFixed(2)}`;",
     );
     expect(await call('search_code', { pattern: 'nothing-like-this' })).toBe('No matches.');
   });
@@ -238,9 +262,9 @@ describe('cancellation (F8)', () => {
         if (cancelOn.has(p)) controller.abort();
         return ws.readFile(p, range);
       },
-      grep: async (pattern, glob, signal) => {
+      grep: async (pattern, paths, signal) => {
         seen.push(`grep ${signal === controller.signal}`);
-        return ws.grep(pattern, glob);
+        return ws.grep(pattern, paths);
       },
       findReferences: async (p, line, col, signal) => {
         seen.push(`findReferences ${signal === controller.signal}`);
@@ -256,9 +280,9 @@ describe('cancellation (F8)', () => {
     await run('find_references', { path: 'src/price.ts', line: 1, symbol: 'formatPrice' });
     // Hits in three files: reading the second one cancels, so the third isn't read.
     reads.length = 0;
-    cancelOn.add('src/cart.ts');
+    cancelOn.add('src/keys.ts');
     await expect(run('search_code', { pattern: 'formatPrice|pem' })).rejects.toThrow();
-    expect(reads).toEqual(['src/price.ts', 'src/cart.ts']);
+    expect(reads).toEqual(['src/cart.ts', 'src/keys.ts']);
     // Every host call got the loop's signal.
     expect(seen.filter((s) => s.endsWith('false'))).toEqual([]);
     expect(seen).toContain('grep true');
@@ -334,19 +358,141 @@ describe('private key blocks in parts of a file', () => {
     const wide = `const wide = '${'x'.repeat(600)}';`;
     const host: WorkspaceTools = {
       ...ws,
+      listFiles: async () => ['wide.ts', ...Object.keys(FILES)],
+      realPath: async (p) => p,
       readFile: async (p, range) => {
         reads.push(p);
         return p === 'wide.ts' ? wide : ws.readFile(p, range);
       },
-      grep: async (pattern) => [
+      grep: async (pattern, paths) => [
         { path: 'wide.ts', line: 1, text: wide.slice(0, 500) },
-        ...(await ws.grep(pattern)),
+        ...(await ws.grep(pattern, paths)),
       ],
     };
     const out = await toolsOn(host)('search_code', { pattern: 'FAKEKEYBODY|formatPrice' });
     expect(out.split('\n')[0]).toBe(`wide.ts:1: ${wide.slice(0, 500)}`);
     expect(out.split('\n')).toHaveLength(6);
     expect(reads.sort()).toEqual(['src/cart.ts', 'src/keys.ts', 'src/price.ts', 'wide.ts']);
+  });
+});
+
+// Hosts do raw IO only; core checks every path, redacts every file and scrubs every error.
+describe('a host without checks of its own (A1)', () => {
+  const ROOT = 'C:\\Users\\Jane Doe\\repo';
+  const RAW: Record<string, string> = {
+    'src/a.ts': 'export const a = 1;\n',
+    'src/keys.ts': FILES['src/keys.ts']!,
+    '.env': 'TOKEN=LEAKED_ENV_VALUE',
+    'server.key': 'LEAKED_KEY_VALUE',
+    '.git/config': '[remote] url = LEAKED_GIT_VALUE',
+    'notes/untracked.md': 'export const n = LEAKED_UNTRACKED_VALUE;',
+  };
+  /** What git shows; `src/link.ts` is a committed symlink to `.env`. */
+  const LISTED = ['src/a.ts', 'src/keys.ts', '.env', 'server.key', '.git/config', 'src/link.ts'];
+  const LEAKED = /LEAKED_/;
+  /**
+   * The file Windows opens for a name: `..` resolved, no stream suffix, no trailing dots or
+   * spaces, any letter case, symlinks followed.
+   */
+  const opened = (p: string): string => {
+    const out: string[] = [];
+    for (const part of p.replace(/\\/g, '/').split('/')) {
+      const seg = part.replace(/:.*$/, '').replace(/[. ]+$/, '');
+      if (part === '..') out.pop();
+      else if (seg) out.push(seg);
+    }
+    const name = out.join('/').toLowerCase();
+    if (name === 'src/link.ts') return '.env';
+    return Object.keys(RAW).find((k) => k.toLowerCase() === name) ?? name;
+  };
+  const enoent = (p: string) =>
+    Object.assign(new Error(`ENOENT: no such file, open '${ROOT}\\${p}'`), { code: 'ENOENT' });
+  const raw = {
+    root: ROOT,
+    listFiles: async () => LISTED,
+    realPath: async (p: string) => {
+      const name = opened(p);
+      if (RAW[name] === undefined) throw enoent(p);
+      return name;
+    },
+    readFile: async (p: string) => {
+      const text = RAW[opened(p)];
+      if (text === undefined) throw enoent(p);
+      return text;
+    },
+    grep: async (pattern: string) =>
+      Object.entries(RAW).flatMap(([path, text]) =>
+        text
+          .split('\n')
+          .flatMap((t, i) => (new RegExp(pattern).test(t) ? [{ path, line: i + 1, text: t }] : [])),
+      ),
+    findReferences: async () => [
+      { path: '.env', line: 1 },
+      { path: 'notes/untracked.md', line: 1 },
+      { path: 'src/link.ts', line: 1 },
+      { path: 'src/a.ts', line: 1 },
+    ],
+    getSymbolAt: async () => ({ name: 'x', kind: 'variable', startLine: 1, endLine: 1 }),
+  } as WorkspaceTools;
+  const run = toolsOn(raw);
+  const settle = (p: Promise<string>) =>
+    p.then(
+      (ok) => `resolved: ${ok}`,
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+
+  it('refuses secret files and .git/ in every spelling the file system accepts', async () => {
+    const spellings = [
+      '.env',
+      '.ENV',
+      '.env.',
+      '.env ',
+      '.env::$DATA',
+      'src/../.env',
+      '.\\.env',
+      'src/link.ts',
+      'server.key.',
+      'server.key::$DATA',
+      '.git./config',
+      '.git /config',
+      '.GIT/config',
+    ];
+    for (const path of spellings) {
+      for (const tool of ['read_file', 'get_symbol'] as const) {
+        const message = await settle(run(tool, { path, line: 1 }));
+        expect(message, `${tool} ${path}`).toMatch(/may contain secrets/);
+        expect(message).not.toMatch(LEAKED);
+      }
+    }
+  });
+
+  it('shows nothing from files git does not show, and says so like for a missing file', async () => {
+    const message = await settle(run('read_file', { path: 'notes/untracked.md' }));
+    expect(message).toBe("notes/untracked.md can't be read: it is ignored by git or missing.");
+    expect(await settle(run('read_file', { path: 'notes/missing.md' }))).toBe(
+      "notes/missing.md can't be read: it is ignored by git or missing.",
+    );
+    expect(await run('search_code', { pattern: 'LEAKED|export' })).toBe(
+      'src/a.ts:1: export const a = 1;\nsrc/keys.ts:1: export const before = 1;\nsrc/keys.ts:9: export function size() {',
+    );
+    expect(await run('find_references', { path: 'src/a.ts', line: 1, symbol: 'a' })).toBe(
+      'src/a.ts:1: export const a = 1;',
+    );
+  });
+
+  it('redacts whole files and scrubs host errors', async () => {
+    expect(await run('read_file', { path: 'src/keys.ts', startLine: 4, endLine: 4 })).toBe(
+      'src/keys.ts lines 4-4:\n     4  [REDACTED:private-key]\n… (11 lines in total; ask for startLine 5+)',
+    );
+    const failing = {
+      ...raw,
+      readFile: async (p: string) => {
+        throw Object.assign(new Error(`EBUSY: locked, open '${ROOT}\\${p}'`), { code: 'EBUSY' });
+      },
+    } as WorkspaceTools;
+    expect(await settle(toolsOn(failing)('read_file', { path: 'src/a.ts' }))).toBe(
+      "src/a.ts can't be read (EBUSY).",
+    );
   });
 });
 
@@ -376,6 +522,8 @@ describe('tool errors (F5)', () => {
   const throwing = (err: () => unknown, root?: string): WorkspaceTools => ({
     ...ws,
     ...(root ? { root } : {}),
+    listFiles: async () => [...Object.keys(FILES), 'src/x.ts'],
+    realPath: async (p) => p,
     readFile: async (p, range) => {
       if (p === 'src/price.ts') return ws.readFile(p, range);
       throw err();

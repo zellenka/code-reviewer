@@ -14,6 +14,8 @@ export interface FindingCommandDeps {
 /**
  * Commands that act on one finding. They accept a finding key (code actions,
  * tree items, tests), a comment thread (thread title buttons) or a tree node.
+ * Keys are new with every review: a key from an earlier one (e.g. a quick fix menu
+ * opened before it) finds nothing.
  */
 export function registerFindingCommands(deps: FindingCommandDeps): vscode.Disposable[] {
   const { store, threads, previews } = deps;

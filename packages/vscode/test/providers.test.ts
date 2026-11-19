@@ -1,4 +1,10 @@
-import { MockProvider, isProviderError, type ChatRequest, type MockStep } from '@ai-review/core';
+import {
+  MockProvider,
+  isProviderError,
+  withSecretRedaction,
+  type ChatRequest,
+  type MockStep,
+} from '@ai-review/core';
 import * as assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
@@ -104,6 +110,87 @@ suite('Providers', () => {
     });
     await vscode.commands.executeCommand('aiReview.testConnection', { silent: true });
     assert.strictEqual(stub.requests.at(-1)?.model, 'm1');
+  });
+
+  test('no registered provider is sent a known secret (A1)', async () => {
+    const stub = new MockProvider({
+      id: 'copilot',
+      models: [stubModel('m1')],
+      fallback: { events: [{ type: 'text', delta: 'ok' }] },
+    });
+    disposables.push(
+      api.registry.register('copilot', {
+        label: 'Stub Copilot',
+        provider: stub,
+        isAvailable: () => true,
+      }),
+    );
+    const { provider, model } = await api.registry.resolveActive();
+    for await (const _ of provider.chat({
+      model: model.id,
+      system: [{ text: 'Example: AKIAIOSFODNN7EXAMPLE' }],
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789AB' }],
+        },
+      ],
+      signal: new AbortController().signal,
+    })) {
+      // drain
+    }
+    const sent = JSON.stringify(stub.requests);
+    assert.ok(!/AKIAIOSFODNN7EXAMPLE|ghp_abcdef/.test(sent), sent);
+    assert.ok(sent.includes('[REDACTED:aws-access-key]'), sent);
+    // The built-in providers too: a wrapped provider is not wrapped again.
+    assert.ok(api.registry.ids().includes('anthropic'));
+    for (const id of api.registry.ids()) {
+      const registered = api.registry.get(id)!.provider;
+      assert.strictEqual(withSecretRedaction(registered), registered, id);
+    }
+  });
+
+  test('the registry offers only models with usable limits, repaired (A6)', async () => {
+    const stub = new MockProvider({
+      id: 'copilot',
+      models: [
+        stubModel('m1'),
+        { ...stubModel('nan'), maxInputTokens: Number.NaN },
+        { ...stubModel('zero'), maxOutputTokens: 0 },
+        { ...stubModel('nameless'), name: '', supportsTools: 'yes' as unknown as boolean },
+      ],
+    });
+    disposables.push(
+      api.registry.register('copilot', {
+        label: 'Stub Copilot',
+        provider: stub,
+        isAvailable: () => true,
+      }),
+    );
+    // What the model picker lists.
+    const listed = await api.registry.get('copilot')!.provider.listModels();
+    assert.deepStrictEqual(
+      listed.map((m) => m.id),
+      ['m1', 'nameless'],
+    );
+    for (const modelId of ['nan', 'zero']) {
+      await vscode.commands.executeCommand('aiReview.selectModel', {
+        providerId: 'copilot',
+        modelId,
+      });
+      await assert.rejects(
+        api.registry.resolveActive(),
+        (err) => isProviderError(err) && err.kind === 'notFound',
+        modelId,
+      );
+    }
+    await vscode.commands.executeCommand('aiReview.selectModel', {
+      providerId: 'copilot',
+      modelId: 'nameless',
+    });
+    const { model } = await api.registry.resolveActive();
+    assert.strictEqual(model.name, 'nameless');
+    assert.strictEqual(model.supportsTools, false);
   });
 
   test('an unknown model gives a notFound error', async () => {

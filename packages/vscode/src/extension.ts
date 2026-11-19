@@ -7,17 +7,13 @@ import { VsCodeLmProvider } from './providers/copilot';
 import { ModelStatusBar, selectModelCommand } from './providers/picker';
 import { CONFIG_SECTION, ProviderRegistry, type Selection } from './providers/registry';
 import { trustedReviewArgs } from './review/args';
-import {
-  cancelReview,
-  reviewCommand,
-  type ReviewCommandArgs,
-  type ReviewKind,
-} from './review/commands';
+import { reviewCommand, type ReviewCommandArgs, type ReviewKind } from './review/commands';
 import { ReviewConfigService } from './review/config';
 import { FindingsDiagnostics } from './review/diagnostics';
 import { registerFindingCommands } from './review/findingCommands';
 import { FindingCodeActions, FixPreviewProvider, PREVIEW_SCHEME } from './review/fixes';
 import { RepoLocator } from './review/repo';
+import { ReviewRuns } from './review/runs';
 import { SnapshotStore } from './review/snapshots';
 import { FindingStatusStore } from './review/state';
 import { FindingStore } from './review/store';
@@ -32,6 +28,7 @@ export interface ExtensionApi {
   keyStore: AnthropicKeyStore;
   repos: RepoLocator;
   configs: ReviewConfigService;
+  runs: ReviewRuns;
   findings: FindingStore;
   statuses: FindingStatusStore;
   snapshots: SnapshotStore;
@@ -45,7 +42,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   context.subscriptions.push(logger);
   logger.info(`${PRODUCT_NAME} activated (v${context.extension.packageJSON.version})`);
 
-  const registry = new ProviderRegistry();
+  const registry = new ProviderRegistry(logger);
   const keyStore = await AnthropicKeyStore.create(context.secrets);
   context.subscriptions.push(
     registry,
@@ -113,13 +110,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const configs = new ReviewConfigService(logger);
   const statuses = new FindingStatusStore(context.workspaceState);
   const snapshots = new SnapshotStore(context.workspaceState);
-  const store = new FindingStore(statuses);
+  const runs = new ReviewRuns();
+  const store = new FindingStore(runs, statuses);
   const threads = new FindingThreads(store);
   const tree = new FindingsTree(store);
   const previews = new FixPreviewProvider();
   const summaries = new SummaryProvider(store);
   context.subscriptions.push(
     configs,
+    runs,
     store,
     new FindingsDiagnostics(store),
     threads,
@@ -137,7 +136,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     ),
     ...registerFindingCommands({ store, threads, previews }),
   );
-  const deps = { registry, repos, configs, store, logger, snapshots };
+  const deps = { registry, repos, configs, store, logger, runs, snapshots };
   // Every review starts here (menus, keybindings, the panel's Run Review), so test-only
   // options are dropped here outside tests.
   const testMode = context.extensionMode === vscode.ExtensionMode.Test;
@@ -165,7 +164,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       ),
     );
   }
-  const panel = new ReviewPanel(context, { registry, repos, store, logger, configs });
+  const panel = new ReviewPanel(context, { registry, repos, store, runs, logger, configs });
   context.subscriptions.push(
     panel,
     vscode.commands.registerCommand('aiReview.clearFindings', async () => {
@@ -188,7 +187,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     vscode.commands.registerCommand('aiReview.runReview', (arg?: unknown) =>
       panel.run(isArgs(arg) ? arg : {}),
     ),
-    vscode.commands.registerCommand('aiReview.cancelReview', () => cancelReview()),
+    vscode.commands.registerCommand('aiReview.cancelReview', () => runs.cancel()),
     vscode.commands.registerCommand('aiReview.openPanel', () =>
       vscode.commands.executeCommand('workbench.view.extension.aiReview'),
     ),
@@ -199,6 +198,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     keyStore,
     repos,
     configs,
+    runs,
     findings: store,
     statuses,
     snapshots,

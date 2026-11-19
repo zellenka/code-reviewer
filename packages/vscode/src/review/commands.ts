@@ -4,10 +4,10 @@ import {
   describeMode,
   estimateCostUsd,
   estimateReview,
-  filterFiles,
   isDiffSourceError,
   loadSymbols,
   isProviderError,
+  prepareDiff,
   runReview,
   type Finding,
   type Logger,
@@ -32,6 +32,7 @@ import {
 } from '../settings';
 import type { ReviewConfigService } from './config';
 import { relativeToRepo, unsavedFiles, type RepoLocator } from './repo';
+import type { ReviewRuns } from './runs';
 import type { SnapshotStore } from './snapshots';
 import type { FindingStore } from './store';
 import { formatTokens } from './tree';
@@ -73,28 +74,9 @@ export interface ReviewDeps {
   configs: ReviewConfigService;
   store: FindingStore;
   logger: Logger;
+  runs: ReviewRuns;
   /** Last complete review per scope, for incremental re-reviews. */
   snapshots?: SnapshotStore;
-}
-
-let running: vscode.CancellationTokenSource | undefined;
-const runningChanged = new vscode.EventEmitter<boolean>();
-/** Fires `true` when a review starts and `false` when no review is running any more. */
-export const onDidChangeReviewRunning = runningChanged.event;
-
-export function isReviewRunning(): boolean {
-  return !!running;
-}
-
-/** Cancels the running review, if any. Findings from finished parts are kept. */
-export function cancelReview(): void {
-  running?.cancel();
-}
-
-function setRunning(cts: vscode.CancellationTokenSource | undefined): void {
-  running = cts;
-  runningChanged.fire(!!cts);
-  void vscode.commands.executeCommand('setContext', 'aiReview.running', !!cts);
 }
 
 export async function reviewCommand(
@@ -131,9 +113,7 @@ export async function reviewCommand(
   }
 
   // Starting a new review cancels the previous one.
-  running?.cancel();
-  const cts = new vscode.CancellationTokenSource();
-  setRunning(cts);
+  const run = deps.runs.start();
 
   try {
     const editor = vscode.window.activeTextEditor;
@@ -208,10 +188,10 @@ export async function reviewCommand(
         const controller = new AbortController();
         const subs = [
           token.onCancellationRequested(() => controller.abort()),
-          cts.token.onCancellationRequested(() => controller.abort()),
+          run.token.onCancellationRequested(() => controller.abort()),
         ];
         // Cancelled already (e.g. while the repository was looked up).
-        if (token.isCancellationRequested || cts.token.isCancellationRequested) controller.abort();
+        if (token.isCancellationRequested || run.token.isCancellationRequested) controller.abort();
         try {
           progress.report({ message: 'collecting changes…' });
           const diff = await repo.source.getDiff(mode);
@@ -223,25 +203,13 @@ export async function reviewCommand(
             logger,
             redactHighEntropy,
           });
-          let symbols;
-          if (includeContext) {
-            progress.report({ message: 'reading code structure…' });
-            symbols = await loadSymbols(
-              filterFiles(diff.files, config.ignore).files,
-              new VsCodeSymbolProvider(repo.root, logger),
-              { logger },
-            );
-          }
-          // Don't ask about the cost of a review that was cancelled.
-          if (controller.signal.aborted) return { cancelled: true as const };
-          const reviewOptions = {
+          const baseOptions = {
             model,
             config,
             redactHighEntropy,
             summary,
             rules,
             context: includeContext,
-            ...(symbols ? { symbols } : {}),
             workspace: new VsCodeWorkspaceTools(
               repo.root,
               logger,
@@ -251,7 +219,21 @@ export async function reviewCommand(
             ...(verify !== undefined ? { verify } : {}),
             ...(previous ? { previous } : {}),
           };
-          const estimate = estimateReview(diff, reviewOptions);
+          // Filtered, redacted and planned once: for the symbols, the estimate and the review.
+          const prepared = prepareDiff(diff, baseOptions);
+          let symbols;
+          if (includeContext) {
+            progress.report({ message: 'reading code structure…' });
+            symbols = await loadSymbols(
+              prepared.files,
+              new VsCodeSymbolProvider(repo.root, logger),
+              { logger },
+            );
+          }
+          // Don't ask about the cost of a review that was cancelled.
+          if (controller.signal.aborted) return { cancelled: true as const };
+          const reviewOptions = { ...baseOptions, ...(symbols ? { symbols } : {}) };
+          const estimate = estimateReview(prepared, reviewOptions);
           logger.info(describeEstimate(estimate, model));
           const threshold = costThreshold(settings);
           if (estimate.costUsd && estimate.costUsd.high > threshold && !args.confirmCost) {
@@ -276,7 +258,7 @@ export async function reviewCommand(
           if (!estimate.costUsd) progress.report({ message: `${estimate.requests} request(s)…` });
 
           let done = 0;
-          const result = await runReview(diff, {
+          const result = await runReview(prepared, {
             ...reviewOptions,
             provider,
             signal: controller.signal,
@@ -318,7 +300,7 @@ export async function reviewCommand(
       return { ok: false, message: 'cancelled', estimate: outcome.estimate };
     }
     // A newer review cancelled this one; the findings, snapshot and summary are its now.
-    if (running !== cts) {
+    if (!run.isCurrent) {
       logger.info('review superseded by a newer one; its results are dropped');
       return { ok: false, message: 'cancelled' };
     }
@@ -343,7 +325,7 @@ export async function reviewCommand(
     // A cancelled review replaces the last one only once a part has finished.
     if (result.cancelled && !result.chunks.completed) return keepPrevious({ result, estimate });
     const findings = await deps.store.set(
-      { root: repo.root, mode, model, result, finishedAt: new Date() },
+      { root: repo.root, mode, model, result, finishedAt: new Date(), generation: run.generation },
       result.findings,
     );
     if (!findings) {
@@ -352,7 +334,7 @@ export async function reviewCommand(
     }
     // Cancelled or incomplete (no snapshot): keep the last one, it still matches its hunks.
     // Superseded meanwhile: the newer review writes it.
-    if (result.snapshot && running === cts) {
+    if (result.snapshot && run.isCurrent) {
       await deps.snapshots?.set(repo.root, mode, result.snapshot);
     }
     const message = withUnsavedNote(summarize(result, model));
@@ -374,6 +356,13 @@ export async function reviewCommand(
     }
     return { ok: true, result, findings, message, estimate };
   } catch (err) {
+    // Superseded: the newer review's outcome is the one to show, not this one's error.
+    if (!run.isCurrent) {
+      logger.info(
+        `review superseded by a newer one failed (${err instanceof Error ? err.message : String(err)}); only the newer one is shown`,
+      );
+      return { ok: false, message: 'cancelled' };
+    }
     if (isDiffSourceError(err) || err instanceof ReviewTooLargeError || isTooLarge(err)) {
       const message = (err as Error).message;
       logger.warn(message);
@@ -387,8 +376,7 @@ export async function reviewCommand(
     } else logger.error(err instanceof Error ? err : String(err));
     return { ok: false, message: err instanceof Error ? err.message : String(err) };
   } finally {
-    if (running === cts) setRunning(undefined);
-    cts.dispose();
+    deps.runs.finish(run);
   }
 }
 
