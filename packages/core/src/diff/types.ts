@@ -48,8 +48,12 @@ export interface DiffSource {
 }
 
 /**
- * Read-only, sandboxed to the repo root. Implemented per host. A call given a `signal` stops
- * early (rejects with its abort reason) when the review is cancelled.
+ * Raw, read-only access to the repo. Implemented per host, which does IO only and keeps every
+ * path inside the repo root (no absolute paths, `..` steps or symlinks out of it). What the
+ * model may see is decided in core (`guardWorkspace`, applied by `createReviewTools`): secret
+ * files, files git doesn't show, redaction and error text. Paths are repo-relative with `/`.
+ * A call given a `signal` stops early (rejects with its abort reason) when the review is
+ * cancelled.
  */
 export interface WorkspaceTools {
   /**
@@ -57,14 +61,30 @@ export interface WorkspaceTools {
    * spelling) from error messages before the model sees them.
    */
   readonly root?: string;
+  /** File names that differ only in letter case name the same file (Windows, macOS). */
+  readonly caseInsensitive?: boolean;
+  /**
+   * The files git shows: tracked ones, and untracked ones that aren't ignored. Rejects when
+   * they can't be listed (not a repo, git missing); then nothing is read.
+   */
+  listFiles(signal?: AbortSignal): Promise<string[]>;
+  /**
+   * Where an existing file or directory really is, after symlinks (`docs/notes.md` → `.env`
+   * for a link to it). Rejects paths outside the repo, and with `ENOENT` missing ones.
+   */
+  realPath(path: string, signal?: AbortSignal): Promise<string>;
   readFile(
     path: string,
     range?: { start: number; end: number },
     signal?: AbortSignal,
   ): Promise<string>;
+  /**
+   * Matching lines in `paths` (files from `listFiles`), in that order. Files it can't search
+   * (binary, very large, symlinks) may be skipped.
+   */
   grep(
     pattern: string,
-    glob?: string,
+    paths: readonly string[],
     signal?: AbortSignal,
   ): Promise<{ path: string; line: number; text: string }[]>;
   findReferences(

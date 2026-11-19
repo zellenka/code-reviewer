@@ -339,6 +339,8 @@ describe('snapshot validity (F34)', () => {
       review: { ...DEFAULT_CONFIG.review, mode: 'agentic' },
     };
     const workspace = {
+      listFiles: () => Promise.resolve([]),
+      realPath: (p: string) => Promise.resolve(p),
       readFile: () => Promise.resolve(''),
       grep: () => Promise.resolve([]),
       findReferences: () => Promise.resolve([]),

@@ -1,5 +1,7 @@
+import { resolveRepoPath } from '../agent/guard';
 import { CONFIG_FILE_NAME } from '../config/load';
 import type { ReviewConfig } from '../config/schema';
+import { isDiffSourceError } from '../diff/errors';
 import { normalizeEol } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
 import { noopLogger, type Logger } from '../logger';
@@ -40,12 +42,18 @@ export interface LoadRulesOptions {
   /** Same as the review's `redactHighEntropy`. Known secret formats are always redacted. */
   redactHighEntropy?: boolean;
   logger?: Logger;
+  /**
+   * Where a file really is, after symlinks (`WorkspaceTools.realPath`). A rules file that is
+   * a link to a secret file is refused by what it points to.
+   */
+  realPath?: (path: string) => Promise<string>;
 }
 
 /**
  * Reads the rules files with a host-provided `read` (which must sandbox paths to the repo
- * and return undefined for missing files). Secret files (e.g. `rules: .env`) are refused,
- * the text is redacted like diffs, empty files are skipped and long ones truncated.
+ * and return undefined for missing files). Paths outside the repo and secret files (e.g.
+ * `rules: .env`, by name and by `realPath`) are refused, the text is redacted like diffs,
+ * empty files are skipped and long ones truncated.
  */
 export async function loadRepoRules(
   read: (path: string) => Promise<string | undefined>,
@@ -56,14 +64,28 @@ export async function loadRepoRules(
   let budget = options.maxTokens ?? 6_000;
   const sources: RuleSource[] = [];
   for (const path of ruleFilePaths(config)) {
-    if (isProtectedPath(path)) {
-      logger.warn(`rules file ${path} ignored: it may contain secrets`);
-      continue;
-    }
+    const ignored = (why: string) => logger.warn(`rules file ${path} ignored: ${why}`);
     let text: string | undefined;
     try {
+      // The same check as the agent tools' (A1), without the git listing: a rules file may
+      // be local to the user.
+      if (isProtectedPath(resolveRepoPath(path))) {
+        ignored('it may contain secrets');
+        continue;
+      }
+      const real = await options.realPath?.(path);
+      if (real !== undefined && isProtectedPath(real)) {
+        ignored('it may contain secrets');
+        continue;
+      }
       text = await read(path);
     } catch (err) {
+      if (isDiffSourceError(err) && err.kind === 'outsideRepo') {
+        ignored('it is outside the repository');
+        continue;
+      }
+      const code = (err as { code?: unknown } | null | undefined)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
       logger.warn(
         `could not read rules file ${path}: ${err instanceof Error ? err.message : String(err)}`,
       );

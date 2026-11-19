@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import type * as fsPromises from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import picomatch from 'picomatch';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createReviewTools, type AgentTool } from '@ai-review/core';
 import { FsWorkspaceTools } from './tools';
@@ -58,6 +59,27 @@ function tryLink(target: string, at: string): boolean {
 
 const hitsOf = (hits: { path: string; line: number }[]) => hits.map((h) => `${h.path}:${h.line}`);
 
+/** The host's grep over the files git shows, as core asks it (core picks the files). */
+const grepListed = async (
+  ws: FsWorkspaceTools,
+  pattern: string,
+  glob?: string,
+  signal?: AbortSignal,
+) => {
+  const inGlob = glob ? picomatch(glob, { dot: true }) : undefined;
+  const paths = (await ws.listFiles()).filter((p) => !inGlob || inGlob(p));
+  return ws.grep(pattern, paths, signal);
+};
+
+/** The review tools on a host, through core's checks. */
+const toolsOn = (ws: FsWorkspaceTools) => {
+  const tools = new Map(createReviewTools(ws).map((t) => [t.def.name, t]));
+  return (name: string, input: unknown) => {
+    const tool = tools.get(name)! as unknown as AgentTool<unknown>;
+    return tool.run(tool.schema.parse(input), new AbortController().signal);
+  };
+};
+
 describe('FsWorkspaceTools in a git repo', () => {
   let root: string;
   let outside: string;
@@ -90,15 +112,23 @@ describe('FsWorkspaceTools in a git repo', () => {
     expect(await ws.readFile('src/new.ts', { start: 2, end: 2 })).toBe('// needle untracked');
   });
 
-  it('grep searches tracked and untracked files but skips large, binary, secret, skipped-dir and symlinked ones', async () => {
+  it('grep searches tracked and untracked files but skips large, binary, skipped-dir and symlinked ones', async () => {
     const ws = new FsWorkspaceTools(root);
-    expect(hitsOf(await ws.grep('needle'))).toEqual(['src/a.ts:2', 'src/new.ts:2']);
-    if (linked) expect(hitsOf(await ws.grep('outside'))).toEqual([]);
+    // Raw IO: the secret file is searched too; core never asks for it (below).
+    expect(hitsOf(await grepListed(ws, 'needle')).sort()).toEqual([
+      '.env:1',
+      'src/a.ts:2',
+      'src/new.ts:2',
+    ]);
+    if (linked) expect(hitsOf(await grepListed(ws, 'outside'))).toEqual([]);
+    expect(await toolsOn(ws)('search_code', { pattern: 'needle' })).toBe(
+      'src/a.ts:2: // needle tracked\nsrc/new.ts:2: // needle untracked',
+    );
   });
 
   it('grep stops at maxGrepResults; findReferences falls back to grep', async () => {
     const ws = new FsWorkspaceTools(root, { maxGrepResults: 1 });
-    expect(hitsOf(await ws.grep('needle'))).toEqual(['src/a.ts:2']);
+    expect(await grepListed(ws, 'needle')).toHaveLength(1);
     const refs = await new FsWorkspaceTools(root).findReferences('src/a.ts', 1, 15);
     expect(hitsOf(refs)).toEqual(['src/a.ts:1', 'src/new.ts:1']);
   });
@@ -139,13 +169,6 @@ describe('files ignored by git are not shown (F4)', () => {
 
   afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-  const toolsOn = (ws: FsWorkspaceTools) => {
-    const tools = new Map(createReviewTools(ws).map((t) => [t.def.name, t]));
-    return (name: string, input: unknown) => {
-      const tool = tools.get(name)! as unknown as AgentTool<unknown>;
-      return tool.run(tool.schema.parse(input), new AbortController().signal);
-    };
-  };
   const errorOf = async (p: Promise<unknown>) =>
     p.then(
       () => 'no error',
@@ -164,28 +187,31 @@ describe('files ignored by git are not shown (F4)', () => {
         (await errorOf(run('read_file', { path: missing }))).replaceAll(missing, '<p>'),
       );
     }
-    // Other spellings of the same files, and the host interface directly.
+    // Other spellings of the same files.
     await expect(run('read_file', { path: './.aws/../.aws/credentials' })).rejects.toThrow();
-    const ws = new FsWorkspaceTools(root);
-    await expect(ws.readFile('secrets.yml')).rejects.toThrow();
-    await expect(ws.readFile('.aws\\credentials')).rejects.toThrow();
+    await expect(run('read_file', { path: '.aws\\credentials' })).rejects.toThrow();
   });
 
   it.skipIf(process.platform !== 'win32' && process.platform !== 'darwin')(
     'refuses other casings of an ignored file where the file system ignores case',
     async () => {
-      const ws = new FsWorkspaceTools(root);
-      await expect(ws.readFile('Secrets.YML')).rejects.toThrow();
-      await expect(ws.readFile('.AWS/Credentials')).rejects.toThrow();
-      expect(await ws.readFile('SRC/App.ts')).toContain('loadConfig');
+      const run = toolsOn(new FsWorkspaceTools(root));
+      await expect(run('read_file', { path: 'Secrets.YML' })).rejects.toThrow(/ignored by git/);
+      await expect(run('read_file', { path: '.AWS/Credentials' })).rejects.toThrow(
+        /ignored by git/,
+      );
+      expect(await run('read_file', { path: 'SRC/App.ts' })).toContain('loadConfig');
     },
   );
 
   it('read_file refuses an ignored file reached through a junction', async () => {
     if (!linked) return;
     const ws = new FsWorkspaceTools(root);
-    await expect(ws.readFile('awslink/credentials')).rejects.toThrow();
-    expect(await ws.grep('HIDDEN_VALUE', 'awslink/**')).toEqual([]);
+    // Git on Windows lists the file by the junction's name; core checks where it really is.
+    await expect(toolsOn(ws)('read_file', { path: 'awslink/credentials' })).rejects.toThrow(
+      /ignored by git/,
+    );
+    expect(await grepListed(ws, 'HIDDEN_VALUE', 'awslink/**')).toEqual([]);
   });
 
   it('search_code shows no hits from ignored files, also under ignored directories', async () => {
@@ -197,8 +223,8 @@ describe('files ignored by git are not shown (F4)', () => {
       'src/fresh.ts',
     ]);
     const ws = new FsWorkspaceTools(root);
-    expect(await ws.grep('HIDDEN_VALUE', '.aws/**')).toEqual([]);
-    expect(await ws.grep('leak')).toEqual([]);
+    expect(await grepListed(ws, 'HIDDEN_VALUE', '.aws/**')).toEqual([]);
+    expect(await grepListed(ws, 'leak')).toEqual([]);
   });
 
   it('untracked files that are not ignored, and force-added files, stay readable', async () => {
@@ -232,16 +258,16 @@ describe('files ignored by git are not shown (F4)', () => {
     const plain = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'air-nogit-')));
     try {
       writeFileSync(path.join(plain, 'a.ts'), 'const a = 1;\n');
-      const ws = new FsWorkspaceTools(plain);
-      await expect(ws.readFile('a.ts')).rejects.toThrow(/git/);
-      await expect(ws.grep('a')).rejects.toThrow(/git/);
+      const run = toolsOn(new FsWorkspaceTools(plain));
+      await expect(run('read_file', { path: 'a.ts' })).rejects.toThrow(/git/);
+      await expect(run('search_code', { pattern: 'a' })).rejects.toThrow(/git/);
     } finally {
       rmSync(plain, { recursive: true, force: true });
     }
-    const broken = new FsWorkspaceTools(root, { gitPath: path.join(root, 'no-such-git') });
-    await expect(broken.readFile('src/app.ts')).rejects.toThrow(/git/);
+    const broken = toolsOn(new FsWorkspaceTools(root, { gitPath: path.join(root, 'no-such-git') }));
+    await expect(broken('read_file', { path: 'src/app.ts' })).rejects.toThrow(/git/);
     // The model is not shown git's output (it can contain absolute paths).
-    await expect(broken.readFile('src/app.ts')).rejects.not.toThrow(root);
+    await expect(broken('read_file', { path: 'src/app.ts' })).rejects.not.toThrow(root);
   });
 });
 
@@ -270,12 +296,12 @@ describe('tool calls can be cancelled and are bounded (F8)', () => {
 
   it('grep stops walking when the signal is aborted', async () => {
     const ws = new FsWorkspaceTools(root);
-    await ws.grep('warm-up'); // lists the git files
+    const listed = await ws.listFiles();
     const controller = new AbortController();
     fsMock.reads.length = 0;
     fsMock.onRead = () => controller.abort();
     try {
-      const err = await ws.grep('needle', undefined, controller.signal).catch((e: unknown) => e);
+      const err = await ws.grep('needle', listed, controller.signal).catch((e: unknown) => e);
       expect(isAbort(err), String(err)).toBe(true);
     } finally {
       fsMock.onRead = undefined;
@@ -284,17 +310,16 @@ describe('tool calls can be cancelled and are bounded (F8)', () => {
 
     // Aborted before it starts: nothing is read.
     fsMock.reads.length = 0;
-    await expect(ws.grep('needle', undefined, controller.signal)).rejects.toSatisfy(isAbort);
+    await expect(ws.grep('needle', listed, controller.signal)).rejects.toSatisfy(isAbort);
     expect(readsUnderRoot()).toEqual([]);
   });
 
   it('grep stops a slow regex when the signal is aborted, before its timeout', async () => {
     const ws = new FsWorkspaceTools(root, { grepTimeoutMs: 60_000 });
-    await ws.grep('warm-up');
     const controller = new AbortController();
     const started = Date.now();
     setTimeout(() => controller.abort(), 200);
-    await expect(ws.grep('^(a+)+$', 'slow.txt', controller.signal)).rejects.toSatisfy(isAbort);
+    await expect(ws.grep('^(a+)+$', ['slow.txt'], controller.signal)).rejects.toSatisfy(isAbort);
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 

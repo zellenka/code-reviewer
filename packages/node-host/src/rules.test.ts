@@ -10,7 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { createReviewTools, type AgentTool } from '@ai-review/core';
+import { createReviewTools, isProtectedPath, type AgentTool } from '@ai-review/core';
 import { loadRepoRulesFromDisk, readRepoText } from './rules';
 import { FsWorkspaceTools } from './tools';
 
@@ -160,9 +160,16 @@ describe('secret files behind other names', () => {
   }
 
   it.skipIf(!linked)('refuses a symlink that points at .git/', async () => {
-    const ws = new FsWorkspaceTools(root);
-    await expect(ws.readFile('linked/config')).rejects.toThrow(/secrets/);
-    await expect(readRepoText(root, 'linked/config')).rejects.toThrow(/secrets/);
+    const readFile = createReviewTools(new FsWorkspaceTools(root)).find(
+      (t) => t.def.name === 'read_file',
+    )! as unknown as AgentTool<unknown>;
+    // Git on Windows lists the file by the junction's name; core checks where it really is.
+    await expect(
+      readFile.run({ path: 'linked/config' }, new AbortController().signal),
+    ).rejects.toThrow(/secrets|ignored by git/);
+    const rules = await loadRepoRulesFromDisk(root, { rules: 'linked/config' });
+    expect(JSON.stringify(rules)).not.toContain('user:pw');
+    expect(rules.sources.map((s) => s.path)).not.toContain('linked/config');
   });
 
   it('refuses a rules path that names a secret file and redacts rules text', async () => {
@@ -180,6 +187,31 @@ describe('secret files behind other names', () => {
   });
 });
 
+describe('one blocked-path check for the tools and the rules (A1)', () => {
+  it('the tools, the rules loader and the predicate refuse the same names', async () => {
+    const dir = path.join(base, 'repo5');
+    gitInit(dir);
+    writeFileSync(path.join(dir, '.env'), 'TOKEN=LEAKED_ENV_VALUE\n');
+    writeFileSync(path.join(dir, 'server.key'), 'LEAKED_KEY_VALUE\n');
+    mkdirSync(path.join(dir, 'src'));
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1;\n');
+    // Names Windows opens the same files by; elsewhere they are other (missing) files.
+    const names = ['src/../.env', '.env.', '.env::$DATA', 'server.key.', 'server.key::$DATA'];
+    const tools = new Map(createReviewTools(new FsWorkspaceTools(dir)).map((t) => [t.def.name, t]));
+    const readFile = tools.get('read_file')! as unknown as AgentTool<unknown>;
+    for (const name of names) {
+      expect(isProtectedPath(name), name).toBe(true);
+      const message = await readFile.run({ path: name }, new AbortController().signal).then(
+        (ok) => `resolved: ${ok}`,
+        (e: unknown) => String((e as Error).message),
+      );
+      expect(message, name).toMatch(/may contain secrets/);
+      const rules = await loadRepoRulesFromDisk(dir, { rules: name });
+      expect(JSON.stringify(rules), name).not.toContain('LEAKED');
+    }
+  });
+});
+
 describe('grep with a model-written pattern', () => {
   it('fails fast on a catastrophic regex instead of blocking the host', async () => {
     const dir = path.join(base, 'repo3');
@@ -187,10 +219,10 @@ describe('grep with a model-written pattern', () => {
     writeFileSync(path.join(dir, 'a.txt'), `${'a'.repeat(40)}!\n`);
     const ws = new FsWorkspaceTools(dir, { grepTimeoutMs: 300 });
     const started = Date.now();
-    await expect(ws.grep('^(a+)+$')).rejects.toThrow(/too slow/);
+    await expect(ws.grep('^(a+)+$', ['a.txt'])).rejects.toThrow(/too slow/);
     expect(Date.now() - started).toBeLessThan(5_000);
     // A normal search still works.
-    expect(await ws.grep('a{40}')).toEqual([
+    expect(await ws.grep('a{40}', ['a.txt'])).toEqual([
       { path: 'a.txt', line: 1, text: `${'a'.repeat(40)}!` },
     ]);
   });

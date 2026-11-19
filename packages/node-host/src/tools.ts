@@ -1,16 +1,9 @@
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { lstat, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { Worker } from 'node:worker_threads';
-import picomatch from 'picomatch';
-import {
-  isProtectedPath,
-  normalizeEol,
-  splitLines,
-  toPosixPath,
-  type WorkspaceTools,
-} from '@ai-review/core';
+import { compareRepoPaths, normalizeEol, splitLines, type WorkspaceTools } from '@ai-review/core';
 import { createGitRunner } from './git';
-import { pathKey, realRepoPath, resolveInRepo } from './sandbox';
+import { caseInsensitive, isInside, realRepoPath, resolveInRepo } from './sandbox';
 
 export interface FsWorkspaceToolsOptions {
   /** Git executable that lists the repository's files. Default `git`. */
@@ -69,27 +62,21 @@ parentPort.on('message', (texts) => {
 });
 `;
 
-/** Files git shows (keys from `pathKey`), and the directories that hold them. */
-interface GitFiles {
-  files: Set<string>;
-  dirs: Set<string>;
-}
-
 /**
- * Read-only file tools sandboxed to the repo root (no LSP: references fall back to grep).
- * They show only the files git shows: tracked ones, and untracked ones that aren't ignored,
- * as the diff modes do. Ignored files (`.aws/credentials`, `*.tfvars`, …) often hold
- * secrets the protected-path list doesn't name. The list is read once per instance (one
- * review). If git can't list the files (not a repo, git missing), nothing is read.
+ * Raw, read-only file access sandboxed to the repo root: no absolute paths, `..` steps or
+ * symlinks out of it (no LSP: references fall back to grep). What the model may see (secret
+ * and git-ignored files, redaction, error text) is checked in core, around every host.
+ * `listFiles` asks git once per instance (one review), as the diff modes see the repo.
  */
 export class FsWorkspaceTools implements WorkspaceTools {
   readonly root: string;
+  readonly caseInsensitive = caseInsensitive;
   private readonly maxReadChars: number;
   private readonly maxGrepResults: number;
   private readonly skipDirs: Set<string>;
   private readonly grepTimeoutMs: number;
   private readonly gitPath: string | undefined;
-  private gitFiles?: Promise<GitFiles>;
+  private gitFiles?: Promise<string[]>;
 
   constructor(root: string, options: FsWorkspaceToolsOptions = {}) {
     this.root = path.resolve(root);
@@ -107,7 +94,7 @@ export class FsWorkspaceTools implements WorkspaceTools {
     signal?: AbortSignal,
   ): Promise<string> {
     signal?.throwIfAborted();
-    const abs = await this.resolveReadable(relPath);
+    const abs = await resolveInRepo(this.root, relPath);
     const tooLarge = () =>
       new Error(`${relPath} is too large to read (over ${MAX_READ_FILE_BYTES / 1024 / 1024} MB).`);
     if ((await stat(abs)).size > MAX_READ_FILE_BYTES) throw tooLarge();
@@ -127,61 +114,34 @@ export class FsWorkspaceTools implements WorkspaceTools {
     return text;
   }
 
-  /**
-   * Absolute path of a file the tools may open: inside the repo, shown by git, not a
-   * secret file. Hosts that open files another way (e.g. a language server) call this first.
-   */
-  protected async resolveReadable(relPath: string): Promise<string> {
-    const abs = await resolveInRepo(this.root, relPath);
-    const { files } = await this.listGitFiles();
-    const notShown = () => new Error(`${relPath} can't be read: it is ignored by git or missing.`);
-    // Checked by name before the file is looked up, so the answer doesn't tell whether an
-    // ignored file exists. A path under a listed symlink (git lists the link) is checked by
-    // its target.
-    const rel = toPosixPath(path.relative(this.root, abs));
-    const viaLink = !files.has(pathKey(rel));
-    if (viaLink && !ancestors(rel).some((dir) => files.has(pathKey(dir)))) throw notShown();
-    let real: string;
-    try {
-      real = await realRepoPath(this.root, abs);
-    } catch (err) {
-      if (viaLink) throw notShown();
-      throw err;
-    }
-    // Callers check the name they ask for; this checks what a symlink points to.
-    if (isProtectedPath(real)) {
-      throw new Error(`${relPath} can't be read: it may contain secrets.`);
-    }
-    if (!files.has(pathKey(real))) throw notShown();
-    return abs;
-  }
-
-  /** Whether git shows `rel` (repo-relative, `/`). Hosts filter paths from other sources with it. */
-  protected async isListed(rel: string): Promise<boolean> {
-    return (await this.listGitFiles()).files.has(pathKey(toPosixPath(rel)));
-  }
-
   /** `git ls-files`, once per instance: a file created during the review is not shown. */
-  private listGitFiles(): Promise<GitFiles> {
+  listFiles(signal?: AbortSignal): Promise<string[]> {
+    signal?.throwIfAborted();
     this.gitFiles ??= gitFileList(this.root, this.gitPath);
     return this.gitFiles;
   }
 
-  /** Reads every listed file: a `signal` stops the walk and the regex worker. */
+  async realPath(relPath: string, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
+    return realRepoPath(this.root, await resolveInRepo(this.root, relPath));
+  }
+
+  /**
+   * Reads the given files in order, skipping dependency and build directories, symlinks,
+   * large and binary files. A `signal` stops the reads and the regex worker.
+   */
   async grep(
     pattern: string,
-    glob?: string,
+    paths: readonly string[],
     signal?: AbortSignal,
   ): Promise<{ path: string; line: number; text: string }[]> {
     signal?.throwIfAborted();
-    const { files: listed, dirs } = await this.listGitFiles();
     let regex: RegExp;
     try {
       regex = new RegExp(pattern);
     } catch {
       regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
     }
-    const matchGlob = glob ? picomatch(glob, { dot: true }) : undefined;
     const results: { path: string; line: number; text: string }[] = [];
     const worker = new Worker(GREP_WORKER, { eval: true, workerData: regex.source });
     worker.unref();
@@ -206,25 +166,34 @@ export class FsWorkspaceTools implements WorkspaceTools {
       }
     };
 
-    const walk = async (dir: string): Promise<void> => {
-      const entries = await readdir(dir, { withFileTypes: true });
-      entries.sort((a, b) => a.name.localeCompare(b.name));
-      for (const entry of entries) {
+    // Git lists files under a symlinked directory (a junction) by the link's name.
+    const realDirs = new Map<string, Promise<boolean>>();
+    const isRealDir = (dir: string): Promise<boolean> => {
+      if (!dir) return Promise.resolve(true);
+      let known = realDirs.get(dir);
+      if (!known) {
+        const parent = dir.slice(0, Math.max(0, dir.lastIndexOf('/')));
+        known = isRealDir(parent).then(
+          async (ok) =>
+            ok && !!(await lstat(path.join(this.root, dir)).catch(() => undefined))?.isDirectory(),
+        );
+        realDirs.set(dir, known);
+      }
+      return known;
+    };
+
+    const search = async (): Promise<void> => {
+      for (const rel of paths) {
         if (results.length >= this.maxGrepResults) return;
         signal?.throwIfAborted();
-        const abs = path.join(dir, entry.name);
-        const rel = toPosixPath(path.relative(this.root, abs));
-        if (entry.isDirectory()) {
-          // A directory with no file git shows (ignored, a nested repo) isn't entered.
-          if (!this.skipDirs.has(entry.name) && dirs.has(pathKey(rel))) await walk(abs);
-          continue;
-        }
-        if (!entry.isFile()) continue; // symlinks are not followed
-        if (!listed.has(pathKey(rel))) continue;
-        if (matchGlob && !matchGlob(rel)) continue;
-        // Never even scanned, so matches can't hint at their content.
-        if (isProtectedPath(rel)) continue;
-        if ((await stat(abs)).size > MAX_GREP_FILE_BYTES) continue;
+        const parts = rel.split('/');
+        if (parts.slice(0, -1).some((dir) => this.skipDirs.has(dir))) continue;
+        const abs = path.resolve(this.root, ...parts);
+        if (!isInside(this.root, abs)) continue;
+        // Symlinks are not followed; a file deleted since it was listed is skipped.
+        if (!(await isRealDir(parts.slice(0, -1).join('/')))) continue;
+        const info = await lstat(abs).catch(() => undefined);
+        if (!info?.isFile() || info.size > MAX_GREP_FILE_BYTES) continue;
         const buf = await readFile(abs, { signal });
         if (buf.subarray(0, 8000).includes(0)) continue;
         const text = normalizeEol(buf.toString('utf8'));
@@ -234,7 +203,7 @@ export class FsWorkspaceTools implements WorkspaceTools {
       }
     };
     try {
-      await walk(this.root);
+      await search();
       await flush();
     } finally {
       void worker.terminate();
@@ -282,7 +251,10 @@ export class FsWorkspaceTools implements WorkspaceTools {
     });
   }
 
-  /** Grep fallback: whole-word matches of the identifier at `line`/`col` (1-based). */
+  /**
+   * Grep fallback: whole-word matches of the identifier at `line`/`col` (1-based) in the
+   * listed files (core leaves out the ones the model may not see).
+   */
   async findReferences(
     relPath: string,
     line: number,
@@ -292,7 +264,9 @@ export class FsWorkspaceTools implements WorkspaceTools {
     const text = splitLines(await this.readFile(relPath, undefined, signal))[line - 1] ?? '';
     const ident = identifierAt(text, col - 1);
     if (!ident) return [];
-    const hits = await this.grep(`\\b${ident.replace(/\$/g, '\\$')}\\b`, undefined, signal);
+    const pattern = `\\b${ident.replace(/\$/g, '\\$')}\\b`;
+    const paths = [...(await this.listFiles(signal))].sort(compareRepoPaths);
+    const hits = await this.grep(pattern, paths, signal);
     return hits.map(({ path: p, line: l }) => ({ path: p, line: l }));
   }
 
@@ -307,7 +281,7 @@ export class FsWorkspaceTools implements WorkspaceTools {
  * .git/info/exclude, the user's excludes file). Submodules and nested repos are listed as
  * one entry, so their files aren't shown. Fails with a message that hides git's output.
  */
-async function gitFileList(root: string, gitPath?: string): Promise<GitFiles> {
+async function gitFileList(root: string, gitPath?: string): Promise<string[]> {
   const git = createGitRunner(root, gitPath);
   let stdout: string;
   try {
@@ -317,28 +291,8 @@ async function gitFileList(root: string, gitPath?: string): Promise<GitFiles> {
       cause: err,
     });
   }
-  const files = new Set<string>();
-  const dirs = new Set<string>();
-  for (const p of stdout.split('\0')) {
-    // `nested/` is an untracked repository inside this one.
-    if (!p || p.endsWith('/')) continue;
-    const key = pathKey(p);
-    files.add(key);
-    for (const dir of ancestors(key)) {
-      if (dirs.has(dir)) break;
-      dirs.add(dir);
-    }
-  }
-  return { files, dirs };
-}
-
-/** `a/b/c` → `a/b`, `a`. */
-function ancestors(rel: string): string[] {
-  const out: string[] = [];
-  for (let i = rel.lastIndexOf('/'); i > 0; i = rel.lastIndexOf('/', i - 1)) {
-    out.push(rel.slice(0, i));
-  }
-  return out;
+  // `nested/` is an untracked repository inside this one.
+  return [...new Set(stdout.split('\0').filter((p) => p && !p.endsWith('/')))];
 }
 
 function identifierAt(text: string, index: number): string | undefined {

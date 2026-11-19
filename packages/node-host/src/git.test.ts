@@ -557,16 +557,18 @@ describe('sandbox + FsWorkspaceTools', () => {
     );
   });
 
-  it('grep skips node_modules and honours globs; findReferences uses grep', async () => {
+  it('grep skips node_modules and searches only the given files; findReferences uses grep', async () => {
     const tools = new FsWorkspaceTools(root);
-    const hits = await tools.grep('foo\\(\\)');
+    const listed = await tools.listFiles();
+    expect(listed).toContain('node_modules/x/i.js');
+    const hits = await tools.grep('foo\\(\\)', listed);
     expect(hits.map((h) => `${h.path}:${h.line}`)).toEqual([
       'src/a.ts:1',
       'src/a.ts:2',
       'src/b.ts:2',
     ]);
-    expect((await tools.grep('foo', 'src/b.ts')).every((h) => h.path === 'src/b.ts')).toBe(true);
-    expect(await tools.grep('(unclosed')).toEqual([]);
+    expect((await tools.grep('foo', ['src/b.ts'])).every((h) => h.path === 'src/b.ts')).toBe(true);
+    expect(await tools.grep('(unclosed', listed)).toEqual([]);
     const refs = await tools.findReferences('src/a.ts', 1, 18);
     expect(refs).toHaveLength(4);
     expect(await tools.getSymbolAt('src/a.ts', 1)).toBeNull();

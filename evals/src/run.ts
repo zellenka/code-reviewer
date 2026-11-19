@@ -36,6 +36,7 @@ import {
   type ReviewConfig,
   type Usage,
   VERIFY_TOOL_NAME,
+  withSecretRedaction,
 } from '@ai-review/core';
 import { FsWorkspaceTools, GitCliDiffSource, loadRepoRulesFromDisk } from '@ai-review/node-host';
 import { compareReports, loadReport, type Report } from './compare';
@@ -302,6 +303,7 @@ function printComparison(a: ModeRun, b: ModeRun): void {
   }
 }
 
+/** Every provider is wrapped in `withSecretRedaction`, as the extension's registry does. */
 async function createProvider(
   name: string,
   modelId: string | undefined,
@@ -309,7 +311,7 @@ async function createProvider(
 ): Promise<{ provider: LLMProvider; model: ModelInfo }> {
   if (name === 'mock') {
     const provider = new MockProvider({ fallback: (req) => oracle(req, fixture) });
-    return { provider, model: (await provider.listModels())[0]! };
+    return { provider: withSecretRedaction(provider), model: (await provider.listModels())[0]! };
   }
   if (name === 'anthropic') {
     const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -322,7 +324,7 @@ async function createProvider(
       throw new Error(
         `Unknown Anthropic model ${id}. Known: ${models.map((m) => m.id).join(', ')}`,
       );
-    return { provider, model };
+    return { provider: withSecretRedaction(provider), model };
   }
   throw new Error(`Unknown provider "${name}". Use mock or anthropic.`);
 }
