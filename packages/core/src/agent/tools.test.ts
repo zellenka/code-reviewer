@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { WorkspaceTools } from '../diff/types';
 import { MockProvider, mockToolCall } from '../provider/mock';
 import { runAgentLoop, type AgentTool } from './loop';
-import { createReviewTools, type ReviewToolsOptions } from './tools';
+import {
+  AGENT_TOOL_NAMES,
+  createReviewTools,
+  reviewToolDefs,
+  type ReviewToolsOptions,
+} from './tools';
 
 const FILES: Record<string, string> = {
   'src/price.ts':
@@ -113,6 +118,17 @@ describe('review tools', () => {
     const out = await call('get_symbol', { path: 'src/price.ts', line: 2 });
     expect(out).toMatch(/^function formatPrice \(src\/price\.ts lines 1-3\):/);
     expect(out).toContain('     3  }');
+  });
+});
+
+describe('review tool definitions', () => {
+  it('are available without a workspace and match the tools', () => {
+    expect(reviewToolDefs().map((d) => d.name)).toEqual([...AGENT_TOOL_NAMES]);
+    expect(reviewToolDefs()).toEqual(createReviewTools(ws).map((t) => t.def));
+    const limits = { maxLines: 50, maxMatches: 7 };
+    expect(reviewToolDefs(limits)).toEqual(createReviewTools(ws, limits).map((t) => t.def));
+    expect(reviewToolDefs(limits)[0]!.description).toContain('first 50 lines');
+    expect(reviewToolDefs(limits)[1]!.description).toContain('up to 7 matching lines');
   });
 });
 

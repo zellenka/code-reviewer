@@ -134,13 +134,14 @@ export function createSnapshot(
  * unchanged and the quote is found in it (exactly or up to whitespace). Whole-file
  * findings are carried when nothing in the file changed, and so are findings outside
  * a single hunk (outside every hunk or across several) whose quote is still found.
- * Hunks are compared redacted with `redact` (as `createSnapshot` stored them); a
- * finding stored with its redacted quote gets the real lines back.
+ * Hunks are compared redacted with `redact` (as `createSnapshot` stored them), or as
+ * given in `redact.redacted` (`diff.files` redacted, same order) when the caller has
+ * them already; a finding stored with its redacted quote gets the real lines back.
  */
 export function planIncremental(
   diff: UnifiedDiff,
   previous: ReviewSnapshot,
-  redact: RedactOptions = {},
+  redact: RedactOptions | { redacted: readonly FileDiff[] } = {},
 ): IncrementalPlan {
   const files: FileDiff[] = [];
   const carried: Finding[] = [];
@@ -153,7 +154,7 @@ export function planIncremental(
     byFile.set(finding.file, list);
   });
 
-  const redacted = redactFiles(diff.files, redact).files;
+  const redacted = 'redacted' in redact ? redact.redacted : redactFiles(diff.files, redact).files;
   for (const [fileIndex, file] of diff.files.entries()) {
     const safe = redacted[fileIndex]!;
     const known = new Set(previous.hunks[file.path] ?? []);

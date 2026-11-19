@@ -527,6 +527,46 @@ describe('incremental re-review of findings on redacted secrets (F33)', () => {
     expect(r3.findings.map((f) => f.quote)).toEqual([`bad key = "${KEY}"`, 'bad a1 edited']);
   });
 
+  it('reports on the whole diff, but counts the redactions of the new hunks only', async () => {
+    const diff = (other: string) => ({
+      files: [...withKey(KEY, other).files, ...diffOf({ '.env': [[1, 'A=1', 'A=2']] }).files],
+    });
+    const r1 = await runReview(diff('bad a1'), {
+      provider: new MockProvider({ fallback: oracle }),
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+    });
+    expect(r1.redactions).toBe(1);
+    const p2 = new MockProvider({ fallback: oracle });
+    const r2 = await runReview(diff('bad a1 edited'), {
+      provider: p2,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      summary: true,
+      previous: stored(r1.snapshot),
+    });
+    expect(r2.redactions).toBe(0);
+    expect(r2.reviewedFiles).toEqual(['src/k.ts']);
+    expect(r2.skipped).toEqual([{ path: '.env', reason: 'secret' }]);
+    expect(r2.snapshot!.hunks['src/k.ts']).toHaveLength(2);
+    expect(r2.snapshot!.findings).toHaveLength(2);
+    // The summary is of the whole change, redacted.
+    expect(p2.requests).toHaveLength(2);
+    const summary = JSON.stringify(p2.requests[1]!.messages);
+    expect(summary).toContain('bad key = \\"[REDACTED:aws-access-key]\\"');
+    expect(summary).toContain('bad a1 edited');
+    expect(summary).not.toContain(KEY);
+    // The estimate counts only the files with new hunks (none of them skipped).
+    expect(
+      estimateReview(diff('bad a1 edited'), {
+        model: MODEL,
+        config: DEFAULT_CONFIG,
+        summary: true,
+        previous: stored(r1.snapshot),
+      }),
+    ).toMatchObject({ files: 1, skipped: 0, requests: 2 });
+  });
+
   it('a new finding with the same redacted code on another line does not replace a carried one', async () => {
     const r1 = await runReview(withKey(KEY), {
       provider: new MockProvider({ fallback: oracle }),

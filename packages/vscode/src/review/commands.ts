@@ -4,10 +4,10 @@ import {
   describeMode,
   estimateCostUsd,
   estimateReview,
-  filterFiles,
   isDiffSourceError,
   loadSymbols,
   isProviderError,
+  prepareDiff,
   runReview,
   type Finding,
   type Logger,
@@ -223,25 +223,13 @@ export async function reviewCommand(
             logger,
             redactHighEntropy,
           });
-          let symbols;
-          if (includeContext) {
-            progress.report({ message: 'reading code structure…' });
-            symbols = await loadSymbols(
-              filterFiles(diff.files, config.ignore).files,
-              new VsCodeSymbolProvider(repo.root, logger),
-              { logger },
-            );
-          }
-          // Don't ask about the cost of a review that was cancelled.
-          if (controller.signal.aborted) return { cancelled: true as const };
-          const reviewOptions = {
+          const baseOptions = {
             model,
             config,
             redactHighEntropy,
             summary,
             rules,
             context: includeContext,
-            ...(symbols ? { symbols } : {}),
             workspace: new VsCodeWorkspaceTools(
               repo.root,
               logger,
@@ -251,7 +239,21 @@ export async function reviewCommand(
             ...(verify !== undefined ? { verify } : {}),
             ...(previous ? { previous } : {}),
           };
-          const estimate = estimateReview(diff, reviewOptions);
+          // Filtered, redacted and planned once: for the symbols, the estimate and the review.
+          const prepared = prepareDiff(diff, baseOptions);
+          let symbols;
+          if (includeContext) {
+            progress.report({ message: 'reading code structure…' });
+            symbols = await loadSymbols(
+              prepared.files,
+              new VsCodeSymbolProvider(repo.root, logger),
+              { logger },
+            );
+          }
+          // Don't ask about the cost of a review that was cancelled.
+          if (controller.signal.aborted) return { cancelled: true as const };
+          const reviewOptions = { ...baseOptions, ...(symbols ? { symbols } : {}) };
+          const estimate = estimateReview(prepared, reviewOptions);
           logger.info(describeEstimate(estimate, model));
           const threshold = costThreshold(settings);
           if (estimate.costUsd && estimate.costUsd.high > threshold && !args.confirmCost) {
@@ -276,7 +278,7 @@ export async function reviewCommand(
           if (!estimate.costUsd) progress.report({ message: `${estimate.requests} request(s)…` });
 
           let done = 0;
-          const result = await runReview(diff, {
+          const result = await runReview(prepared, {
             ...reviewOptions,
             provider,
             signal: controller.signal,

@@ -201,13 +201,15 @@ export function redactText(
 
 /**
  * Returns copies of the files with secrets replaced in diff lines and `newContent`.
- * Lines are only changed in place, so line numbers stay valid.
+ * Lines are only changed in place, so line numbers stay valid. Each hunk is redacted on
+ * its own: `hunkCounts[file][hunk]` is what it adds to `count`.
  */
 export function redactFiles(
   files: FileDiff[],
   options: RedactOptions = {},
-): { files: FileDiff[]; count: number } {
+): { files: FileDiff[]; count: number; hunkCounts: number[][] } {
   let count = 0;
+  const hunkCounts: number[][] = [];
   const out = files.map((file) => {
     // With the full file, new-side lines come from the redacted file, so a hunk that
     // starts inside a private key block is still redacted.
@@ -215,9 +217,12 @@ export function redactFiles(
       file.newContent !== undefined ? redactText(file.newContent, options).text : undefined;
     const contentLines = content?.split('\n');
     const redactor = createRedactor(options);
+    const counts: number[] = [];
+    hunkCounts.push(counts);
     const hunks = file.hunks.map((h) => {
       redactor.reset();
-      return {
+      const before = redactor.count;
+      const hunk = {
         ...h,
         lines: h.lines.map((l) => {
           const fromContent = l.newLine !== undefined ? contentLines?.[l.newLine - 1] : undefined;
@@ -233,13 +238,15 @@ export function redactFiles(
           return { ...l, text };
         }),
       };
+      counts.push(redactor.count - before);
+      return hunk;
     });
     count += redactor.count;
     const copy: FileDiff = { ...file, hunks };
     if (content !== undefined) copy.newContent = content;
     return copy;
   });
-  return { files: out, count };
+  return { files: out, count, hunkCounts };
 }
 
 /** Shannon entropy per character + a mix of character classes. */

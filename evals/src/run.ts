@@ -27,6 +27,7 @@ import {
   addUsage,
   estimateCostUsd,
   estimateReview,
+  prepareDiff,
   runReview,
   type ChatRequest,
   type LLMProvider,
@@ -141,14 +142,12 @@ async function main(): Promise<number> {
         try {
           const rules = await loadRepoRulesFromDisk(repo, config);
           const workspace = new FsWorkspaceTools(repo);
-          const estimate = estimateReview(diff, { model: m, config, summary, rules, workspace });
-          const result = await runReview(diff, {
+          const options = { model: m, config, summary, rules, workspace };
+          const prepared = prepareDiff(diff, options);
+          const estimate = estimateReview(prepared, options);
+          const result = await runReview(prepared, {
+            ...options,
             provider,
-            model: m,
-            config,
-            summary,
-            rules,
-            workspace,
             ...(verifyModel ? { verifyModel } : {}),
             ...(values.concurrency ? { concurrency: Number(values.concurrency) } : {}),
           });
