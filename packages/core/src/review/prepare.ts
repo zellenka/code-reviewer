@@ -262,7 +262,9 @@ export function prepareParts(diff: PreparedDiff, options: PrepareOptions): Prepa
     fixedTokens: sharedPrefixTokens,
     agentic: mode === 'agentic',
   });
-  // NaN would fail every size check in the chunker and send the whole diff at once.
+  // NaN would fail every size check in the chunker and send the whole diff at once. Models
+  // from a host's provider are checked already (`withModelValidation`); this catches a
+  // model or `maxOutputTokens` a caller passes in directly.
   if (!Number.isFinite(chunkTokens) || !Number.isFinite(outputTokens)) {
     throw new Error(
       `${model.name} has an invalid token limit (input ${model.maxInputTokens}, output ${model.maxOutputTokens}).`,

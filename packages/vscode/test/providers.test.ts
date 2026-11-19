@@ -150,6 +150,49 @@ suite('Providers', () => {
     }
   });
 
+  test('the registry offers only models with usable limits, repaired (A6)', async () => {
+    const stub = new MockProvider({
+      id: 'copilot',
+      models: [
+        stubModel('m1'),
+        { ...stubModel('nan'), maxInputTokens: Number.NaN },
+        { ...stubModel('zero'), maxOutputTokens: 0 },
+        { ...stubModel('nameless'), name: '', supportsTools: 'yes' as unknown as boolean },
+      ],
+    });
+    disposables.push(
+      api.registry.register('copilot', {
+        label: 'Stub Copilot',
+        provider: stub,
+        isAvailable: () => true,
+      }),
+    );
+    // What the model picker lists.
+    const listed = await api.registry.get('copilot')!.provider.listModels();
+    assert.deepStrictEqual(
+      listed.map((m) => m.id),
+      ['m1', 'nameless'],
+    );
+    for (const modelId of ['nan', 'zero']) {
+      await vscode.commands.executeCommand('aiReview.selectModel', {
+        providerId: 'copilot',
+        modelId,
+      });
+      await assert.rejects(
+        api.registry.resolveActive(),
+        (err) => isProviderError(err) && err.kind === 'notFound',
+        modelId,
+      );
+    }
+    await vscode.commands.executeCommand('aiReview.selectModel', {
+      providerId: 'copilot',
+      modelId: 'nameless',
+    });
+    const { model } = await api.registry.resolveActive();
+    assert.strictEqual(model.name, 'nameless');
+    assert.strictEqual(model.supportsTools, false);
+  });
+
   test('an unknown model gives a notFound error', async () => {
     const stub = new MockProvider({ id: 'copilot', models: [stubModel('m1')] });
     disposables.push(

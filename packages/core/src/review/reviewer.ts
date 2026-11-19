@@ -74,7 +74,6 @@ export async function reviewChunk(options: ReviewChunkOptions): Promise<ChunkRev
         system,
         messages,
         maxOutputTokens: options.maxOutputTokens,
-        temperature: 0,
         signal,
         ...(jsonOnly
           ? {}

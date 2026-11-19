@@ -51,6 +51,10 @@ export interface ToolDef {
 /** `{ name }` asks the model to call exactly that tool. */
 export type ToolChoice = 'auto' | 'none' | { name: string };
 
+/**
+ * No `temperature` (A6): Anthropic's API rejects sampling parameters and vscode.lm has no
+ * portable option, so no provider could honour it.
+ */
 export interface ChatRequest {
   model: string;
   system: { text: string; cache?: boolean }[];
@@ -58,8 +62,6 @@ export interface ChatRequest {
   tools?: ToolDef[];
   toolChoice?: ToolChoice;
   maxOutputTokens?: number;
-  /** Hint only. Currently ignored: Anthropic's API rejects it and vscode.lm has no portable option. */
-  temperature?: number;
   signal: AbortSignal;
 }
 

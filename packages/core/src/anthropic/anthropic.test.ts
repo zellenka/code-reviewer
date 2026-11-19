@@ -620,7 +620,7 @@ describe('buildParams', () => {
   });
 
   it('never sends temperature; enables refusal fallback only for supported models', () => {
-    const p1 = buildParams(baseReq({ temperature: 0 }), undefined, true);
+    const p1 = buildParams(baseReq(), undefined, true);
     expect(p1).not.toHaveProperty('temperature');
     expect(p1.fallbacks).toBe('default');
     expect(p1.betas).toEqual(['server-side-fallback-2026-07-01']);

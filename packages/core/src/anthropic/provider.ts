@@ -276,7 +276,6 @@ export function buildParams(
       req.maxOutputTokens ??
       Math.min(model?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT, DEFAULT_MAX_OUTPUT),
     messages: req.messages.map((m) => toAnthropicMessage(m, breakpoints)),
-    // `temperature` is not sent: the API version the SDK uses rejects sampling parameters.
   };
   if (system.length) params.system = system;
   if (tools) {

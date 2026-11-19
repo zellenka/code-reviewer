@@ -42,7 +42,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   context.subscriptions.push(logger);
   logger.info(`${PRODUCT_NAME} activated (v${context.extension.packageJSON.version})`);
 
-  const registry = new ProviderRegistry();
+  const registry = new ProviderRegistry(logger);
   const keyStore = await AnthropicKeyStore.create(context.secrets);
   context.subscriptions.push(
     registry,

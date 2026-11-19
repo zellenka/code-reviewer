@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { priceSchema as price, tokenLimitSchema as tokenLimit } from '../provider/model';
 import type { ModelInfo, ModelPricing } from '../provider/types';
 
 /**
@@ -48,12 +49,11 @@ function model(id: string, name: string, pricing: ModelPricing): ModelInfo {
   };
 }
 
-const tokenLimit = z.number().int().positive();
-const price = z.number().nonnegative();
-
 /**
  * A settings entry: `id` is required, everything else overrides or fills in defaults.
  * Token limits feed the chunk budget, so they must be positive integers (not "200k").
+ * Same field rules as `parseModelInfo`, which checks every listed model again; here a bad
+ * field falls back to the default instead of hiding the model.
  */
 const modelOverrideSchema = z
   .object({

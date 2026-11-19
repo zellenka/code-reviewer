@@ -36,6 +36,7 @@ import {
   type ReviewConfig,
   type Usage,
   VERIFY_TOOL_NAME,
+  withModelValidation,
   withSecretRedaction,
 } from '@ai-review/core';
 import { FsWorkspaceTools, GitCliDiffSource, loadRepoRulesFromDisk } from '@ai-review/node-host';
@@ -303,20 +304,25 @@ function printComparison(a: ModeRun, b: ModeRun): void {
   }
 }
 
-/** Every provider is wrapped in `withSecretRedaction`, as the extension's registry does. */
+/**
+ * Every provider is wrapped in `withModelValidation` and `withSecretRedaction`, as the
+ * extension's registry does; the models come from the wrapped provider.
+ */
 async function createProvider(
   name: string,
   modelId: string | undefined,
   fixture: Fixture,
 ): Promise<{ provider: LLMProvider; model: ModelInfo }> {
+  const wrap = (provider: LLMProvider) =>
+    withSecretRedaction(withModelValidation(provider, (warning) => console.warn(warning)));
   if (name === 'mock') {
-    const provider = new MockProvider({ fallback: (req) => oracle(req, fixture) });
-    return { provider: withSecretRedaction(provider), model: (await provider.listModels())[0]! };
+    const provider = wrap(new MockProvider({ fallback: (req) => oracle(req, fixture) }));
+    return { provider, model: (await provider.listModels())[0]! };
   }
   if (name === 'anthropic') {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) throw new Error('Set ANTHROPIC_API_KEY to run evals against Anthropic.');
-    const provider = new AnthropicProvider({ apiKey });
+    const provider = wrap(new AnthropicProvider({ apiKey }));
     const models = await provider.listModels();
     const id = modelId ?? process.env.ANTHROPIC_EVAL_MODEL ?? 'claude-sonnet-5-5';
     const model = models.find((m) => m.id === id);
@@ -324,7 +330,7 @@ async function createProvider(
       throw new Error(
         `Unknown Anthropic model ${id}. Known: ${models.map((m) => m.id).join(', ')}`,
       );
-    return { provider: withSecretRedaction(provider), model };
+    return { provider, model };
   }
   throw new Error(`Unknown provider "${name}". Use mock or anthropic.`);
 }

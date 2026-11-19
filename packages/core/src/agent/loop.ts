@@ -141,7 +141,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         tools: defs,
         toolChoice: forced ? { name: finalTool.name } : 'auto',
         maxOutputTokens: options.maxOutputTokens,
-        temperature: 0,
         signal,
       }),
     );

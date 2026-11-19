@@ -241,7 +241,6 @@ async function verifyGroup(
         { role: 'user', content: [{ type: 'text', text: buildVerifyUserPrompt(file, findings) }] },
       ],
       maxOutputTokens: Math.min(model.maxOutputTokens, 300 + 200 * findings.length),
-      temperature: 0,
       signal: options.signal,
       ...(jsonOnly ? {} : { tools: [VERIFY_TOOL], toolChoice: { name: VERIFY_TOOL_NAME } }),
     }),
