@@ -133,8 +133,9 @@ async function plan(store: FindingStore, key: string): Promise<Planned> {
   return { ok: true, finding, doc, edit };
 }
 
-/** What a fix replaces and with what; edits elsewhere in the file may move it. */
+/** Where a fix goes, what it replaces and with what; edits elsewhere in the file may move it. */
 export interface FixContent {
+  uri: vscode.Uri;
   oldText: string;
   newText: string;
 }
@@ -156,8 +157,14 @@ export async function applyFix(
   if (!planned.ok) return planned;
   const { doc, edit, finding } = planned;
   const range = rangeOf(edit);
-  // E.g. a re-review changed the suggestion while the preview was open.
-  if (expected && (doc.getText(range) !== expected.oldText || edit.newText !== expected.newText)) {
+  // E.g. a re-review changed the suggestion, or reported the same key in another
+  // repository's file, while the preview was open.
+  if (
+    expected &&
+    (uriKey(doc.uri) !== uriKey(expected.uri) ||
+      doc.getText(range) !== expected.oldText ||
+      edit.newText !== expected.newText)
+  ) {
     return {
       ok: false,
       message:
@@ -198,7 +205,11 @@ export async function previewFix(
     query: `key=${encodeURIComponent(key)}`,
   });
   previews.set(previewUri, applyFixToText(doc.getText(), edit));
-  const shown: FixContent = { oldText: doc.getText(rangeOf(edit)), newText: edit.newText };
+  const shown: FixContent = {
+    uri: doc.uri,
+    oldText: doc.getText(rangeOf(edit)),
+    newText: edit.newText,
+  };
   await vscode.commands.executeCommand(
     'vscode.diff',
     doc.uri,

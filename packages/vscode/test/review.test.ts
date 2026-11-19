@@ -1847,4 +1847,166 @@ suite('Review', () => {
       }
     }
   });
+
+  // ---------- Review runs (A3) ----------
+
+  /** A second repository with `rel` written (untracked) as `content`; same paths, same findings. */
+  const otherRepo = (rel: string, content: string) => {
+    const other = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'air-ext-other-')));
+    const run = (...args: string[]) =>
+      execFileSync('git', args, { cwd: other, env: GIT_ENV, encoding: 'utf8' });
+    run('init', '-q', '-b', 'main');
+    run('config', 'core.autocrlf', 'false');
+    writeFileSync(path.join(other, 'README.md'), '# other\n');
+    run('add', '.');
+    run('commit', '-q', '-m', 'init');
+    mkdirSync(path.join(other, path.dirname(rel)), { recursive: true });
+    writeFileSync(path.join(other, rel), content);
+    return other;
+  };
+  const removeRepo = (dir: string) => {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // left in the temp dir
+    }
+  };
+  const ourDiagnostics = (rel: string) =>
+    vscode.languages.getDiagnostics(uriOf(rel)).filter((d) => d.source === 'AI Review');
+
+  test('a new review replaces the previous findings in every view; Clear Findings empties them', async () => {
+    const oldKey = await reviewOne('src/ux-track.ts', DIV('track'));
+    const newKey = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    assert.strictEqual(api.threads.threadOf(oldKey), undefined);
+    assert.ok(api.threads.threadOf(newKey));
+    assert.strictEqual(ourDiagnostics('src/ux-track.ts').length, 0);
+    assert.strictEqual(ourDiagnostics('src/ux-lf.ts').length, 1);
+    const files = api.tree.getChildren().flatMap((n) => (n.kind === 'file' ? [n.file] : []));
+    assert.deepStrictEqual(files, ['src/ux-lf.ts']);
+
+    await vscode.commands.executeCommand('aiReview.clearFindings');
+    assert.strictEqual(api.threads.threadOf(newKey), undefined);
+    assert.strictEqual(ourDiagnostics('src/ux-lf.ts').length, 0);
+    assert.deepStrictEqual(api.tree.getChildren(), []);
+  });
+
+  test('each review run tags the findings it shows with a newer generation (A3)', async () => {
+    const generation = () => api.findings.session?.generation;
+    await reviewOne('src/ux-track.ts', DIV('track'));
+    const first = generation();
+    assert.strictEqual(typeof first, 'number');
+    await reviewOne('src/ux-lf.ts', DIV('lf'));
+    assert.ok(generation()! > first!, `${generation()} > ${first}`);
+  });
+
+  test('the store refuses the findings of a run that a newer run superseded (A3)', async () => {
+    await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const session = api.findings.session!;
+    const findings = api.findings.all();
+    const newer = api.runs.start();
+    try {
+      assert.strictEqual(api.runs.running, true);
+      assert.strictEqual(await api.findings.set(session, findings), undefined);
+      assert.strictEqual(api.findings.session, session);
+      const written = await api.findings.set({ ...session, generation: newer.generation }, []);
+      assert.deepStrictEqual(written, []);
+      assert.strictEqual(api.findings.session?.generation, newer.generation);
+    } finally {
+      api.runs.finish(newer);
+    }
+    assert.strictEqual(api.runs.running, false);
+  });
+
+  test('a review of another repository with the same finding moves its comment thread there (A3)', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const other = otherRepo('src/ux-lf.ts', DIV('lf'));
+    try {
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root: other, path: 'src/ux-lf.ts', silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      // Same file path, category and quote: the same key, in another file.
+      const otherUri = vscode.Uri.file(path.join(other, 'src', 'ux-lf.ts')).toString();
+      assert.strictEqual(api.findings.get(key)?.uri.toString(), otherUri);
+      assert.strictEqual(api.threads.threadOf(key)?.uri.toString(), otherUri);
+      assert.strictEqual(api.threads.threadOf(key)?.range?.start.line, 3);
+      assert.strictEqual(ourDiagnostics('src/ux-lf.ts').length, 0);
+    } finally {
+      api.findings.clear();
+      removeRepo(other);
+    }
+  });
+
+  test('accepting a preview never applies its fix to another repository’s file (A3)', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const other = otherRepo('src/ux-lf.ts', DIV('lf'));
+    const doc = await vscode.workspace.openTextDocument(uriOf('src/ux-lf.ts'));
+    const otherUri = vscode.Uri.file(path.join(other, 'src', 'ux-lf.ts'));
+    try {
+      const outcome = await previewFix(api.findings, new FixPreviewProvider(), key, async () => {
+        // While the question is open, a review of the other repository reports the same finding.
+        const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+          'aiReview.reviewFile',
+          { root: other, path: 'src/ux-lf.ts', silent: true },
+        );
+        assert.strictEqual(result.ok, true, result.message);
+        assert.strictEqual(api.findings.get(key)?.uri.toString(), otherUri.toString());
+        return true;
+      });
+      assert.strictEqual(outcome.ok, false);
+      assert.match(outcome.message ?? '', /changed while the preview was open/);
+      assert.strictEqual(doc.getText(), DIV('lf'));
+      assert.strictEqual((await vscode.workspace.openTextDocument(otherUri)).getText(), DIV('lf'));
+      assert.strictEqual(api.findings.get(key)?.status, 'open');
+    } finally {
+      for (const d of vscode.workspace.textDocuments.filter((d) => d.isDirty)) {
+        await vscode.window.showTextDocument(d);
+        await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+      }
+      api.findings.clear();
+      removeRepo(other);
+    }
+  });
+
+  test('a superseded review that fails afterwards leaves the newer one in the panel (A3)', async () => {
+    write('src/ux-track.ts', DIV('track'));
+    const resolve = api.repos.resolve;
+    let entered = false;
+    let fail!: () => void;
+    const failing = new Promise<void>((r) => (fail = r));
+    let calls = 0;
+    // The panel's review waits while looking up the repository, then git fails.
+    api.repos.resolve = async (target) => {
+      if (calls++ === 0) {
+        entered = true;
+        await failing;
+        throw new Error('git exploded');
+      }
+      return resolve.call(api.repos, target);
+    };
+    try {
+      const first = Promise.resolve(
+        vscode.commands.executeCommand<ReviewCommandResult>('aiReview.runReview', {
+          root,
+          silent: true,
+        }),
+      );
+      await until(() => entered);
+      const second = await startReview('src/ux-track.ts');
+      assert.strictEqual(second.ok, true, second.message);
+
+      fail();
+      const result = await first;
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(result.message, 'cancelled');
+    } finally {
+      api.repos.resolve = resolve;
+    }
+    const last = (await api.panel.snapshot()).last;
+    assert.strictEqual(last?.level, 'info', last?.text);
+    assert.match(last.text, /^1 finding/);
+    assert.deepStrictEqual(titles(), ['tracked bug']);
+    assert.strictEqual(await isRunning(), false);
+  });
 });

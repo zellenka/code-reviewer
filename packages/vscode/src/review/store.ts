@@ -7,6 +7,7 @@ import {
 } from '@ai-review/core';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import type { ReviewRuns } from './runs';
 import type { FindingStatusStore } from './state';
 
 export type FindingStatus = 'open' | 'resolved' | 'dismissed';
@@ -25,6 +26,8 @@ export interface ReviewSession {
   model: ModelInfo;
   result: ReviewResult;
   finishedAt: Date;
+  /** The run that produced it (`ReviewRun.generation`); one session per run. */
+  generation: number;
 }
 
 export interface StoreChange {
@@ -45,18 +48,24 @@ const REANCHOR_DELAY_MS = 400;
  * and on save). A finding whose quote is gone is marked stale.
  */
 export class FindingStore implements vscode.Disposable {
-  private readonly items = new Map<string, TrackedFinding>();
+  private items = new Map<string, TrackedFinding>();
   private readonly emitter = new vscode.EventEmitter<StoreChange>();
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly subscriptions: vscode.Disposable[] = [];
   private current: ReviewSession | undefined;
   /** Counts `set` and `clear` calls; only the latest one may write. */
-  private generation = 0;
+  private writes = 0;
 
   readonly onDidChange = this.emitter.event;
 
-  /** `statuses` persists dismissed/resolved findings across reviews and reloads. */
-  constructor(private readonly statuses?: FindingStatusStore) {
+  /**
+   * Only the current run's sessions are accepted (see `set`). `statuses` persists
+   * dismissed/resolved findings across reviews and reloads.
+   */
+  constructor(
+    private readonly runs: ReviewRuns,
+    private readonly statuses?: FindingStatusStore,
+  ) {
     this.subscriptions.push(
       vscode.workspace.onDidChangeTextDocument((e) => this.onEdit(e)),
       vscode.workspace.onDidSaveTextDocument((doc) => this.reanchorDocument(doc)),
@@ -89,13 +98,14 @@ export class FindingStore implements vscode.Disposable {
    * against the working-tree document (which may differ from what was reviewed,
    * e.g. for staged changes). The documents are opened first and the findings
    * swapped in at once, so overlapping calls never mix: a call that a newer `set`
-   * or `clear` overtook changes nothing and returns undefined.
+   * or `clear` overtook changes nothing and returns undefined, and so does a
+   * session from a run that a newer run superseded.
    */
   async set(
     session: ReviewSession,
     findings: readonly Finding[],
   ): Promise<TrackedFinding[] | undefined> {
-    const generation = ++this.generation;
+    const write = ++this.writes;
     const byFile = new Map<string, Finding[]>();
     for (const f of findings) byFile.set(f.file, [...(byFile.get(f.file) ?? []), f]);
     const docs = new Map<string, vscode.TextDocument | undefined>();
@@ -106,11 +116,9 @@ export class FindingStore implements vscode.Disposable {
         docs.set(file, undefined);
       }
     }
-    if (generation !== this.generation) return undefined;
+    if (write !== this.writes || session.generation < this.runs.generation) return undefined;
 
-    this.cancelPending();
-    this.items.clear();
-    this.current = session;
+    const items = new Map<string, TrackedFinding>();
     for (const [file, list] of byFile) {
       const uri = fileUri(session.root, file);
       const doc = docs.get(file);
@@ -118,12 +126,15 @@ export class FindingStore implements vscode.Disposable {
       const lines = doc ? documentLines(doc) : undefined;
       for (const finding of list) {
         let key = finding.id;
-        for (let n = 2; this.items.has(key); n++) key = `${finding.id}#${n}`;
+        for (let n = 2; items.has(key); n++) key = `${finding.id}#${n}`;
         // A finding the user dismissed or resolved before keeps that status.
         const status = this.statuses?.lookup(session.root, finding) ?? 'open';
-        this.items.set(key, { ...reanchor(finding, lines), key, uri, status });
+        items.set(key, { ...reanchor(finding, lines), key, uri, status });
       }
     }
+    this.cancelPending();
+    this.items = items;
+    this.current = session;
     this.emitter.fire({ newSession: true });
     return this.all();
   }
@@ -150,9 +161,9 @@ export class FindingStore implements vscode.Disposable {
   }
 
   clear(): void {
-    this.generation++;
+    this.writes++;
     this.cancelPending();
-    this.items.clear();
+    this.items = new Map();
     this.current = undefined;
     this.emitter.fire({ newSession: true });
   }

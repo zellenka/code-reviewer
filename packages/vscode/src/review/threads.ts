@@ -80,6 +80,12 @@ export class FindingThreads implements vscode.Disposable {
       finding.suggestion,
     ]);
     let thread = this.threads.get(finding.key);
+    // A newer review can report the same key in another file (another repository):
+    // a thread can't move there.
+    if (thread && uriKey(thread.uri) !== uriKey(finding.uri)) {
+      this.drop(finding.key, thread);
+      thread = undefined;
+    }
     if (thread && this.rendered.get(finding.key) === signature) return;
 
     if (!thread) {
