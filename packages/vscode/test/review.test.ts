@@ -686,11 +686,11 @@ suite('Review', () => {
     } finally {
       revise = false;
     }
-    const finding = api.findings.get(key);
+    const [finding] = api.findings.all();
     assert.strictEqual(finding?.suggestion, 'return b === 0 ? 0 : a / b; // revise');
 
-    // Same key, same thread, new text.
-    assert.strictEqual(api.threads.threadOf(key), thread);
+    // Same fingerprint and file, same thread, new text.
+    assert.strictEqual(api.threads.threadOf(finding.key), thread);
     const shown = bodyOf();
     assert.match(shown, /Division by zero is not handled/);
     assert.match(shown, /Return 0 when b is 0\./);
@@ -1058,6 +1058,7 @@ suite('Review', () => {
 
   test('a dismissed finding stays dismissed in the next review, even reworded', async () => {
     const key = await reviewOne('src/ux-state.ts', DIV('state'));
+    const id = api.findings.get(key)!.id;
     await vscode.commands.executeCommand('aiReview.dismissFinding', key);
     assert.strictEqual(api.statuses.size, 1);
 
@@ -1087,7 +1088,7 @@ suite('Review', () => {
     }
     const [reworded] = api.findings.all();
     assert.match(reworded!.title, /^Reworded/);
-    assert.notStrictEqual(reworded!.id, key);
+    assert.notStrictEqual(reworded!.id, id);
     assert.strictEqual(reworded!.status, 'dismissed');
 
     // Forgetting brings it back.
@@ -1831,7 +1832,7 @@ suite('Review', () => {
           revise = false;
         }
         assert.strictEqual(
-          api.findings.get(key)?.suggestion,
+          api.findings.all()[0]?.suggestion,
           'return b === 0 ? 0 : a / b; // revise',
         );
         return true;
@@ -1839,7 +1840,7 @@ suite('Review', () => {
       assert.strictEqual(outcome.ok, false);
       assert.match(outcome.message ?? '', /changed while the preview was open/);
       assert.strictEqual(doc.getText(), DIV('revise'));
-      assert.strictEqual(api.findings.get(key)?.status, 'open');
+      assert.strictEqual(api.findings.all()[0]?.status, 'open');
     } finally {
       if (doc.isDirty) {
         await vscode.window.showTextDocument(doc);
@@ -1919,6 +1920,7 @@ suite('Review', () => {
 
   test('a review of another repository with the same finding moves its comment thread there (A3)', async () => {
     const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const id = api.findings.get(key)!.id;
     const other = otherRepo('src/ux-lf.ts', DIV('lf'));
     try {
       const result = await vscode.commands.executeCommand<ReviewCommandResult>(
@@ -1926,11 +1928,13 @@ suite('Review', () => {
         { root: other, path: 'src/ux-lf.ts', silent: true },
       );
       assert.strictEqual(result.ok, true, result.message);
-      // Same file path, category and quote: the same key, in another file.
+      // Same file path, category and quote: the same fingerprint, in another file.
       const otherUri = vscode.Uri.file(path.join(other, 'src', 'ux-lf.ts')).toString();
-      assert.strictEqual(api.findings.get(key)?.uri.toString(), otherUri);
-      assert.strictEqual(api.threads.threadOf(key)?.uri.toString(), otherUri);
-      assert.strictEqual(api.threads.threadOf(key)?.range?.start.line, 3);
+      const [moved] = api.findings.all();
+      assert.strictEqual(moved?.id, id);
+      assert.strictEqual(moved.uri.toString(), otherUri);
+      assert.strictEqual(api.threads.threadOf(moved.key)?.uri.toString(), otherUri);
+      assert.strictEqual(api.threads.threadOf(moved.key)?.range?.start.line, 3);
       assert.strictEqual(ourDiagnostics('src/ux-lf.ts').length, 0);
     } finally {
       api.findings.clear();
@@ -1951,14 +1955,14 @@ suite('Review', () => {
           { root: other, path: 'src/ux-lf.ts', silent: true },
         );
         assert.strictEqual(result.ok, true, result.message);
-        assert.strictEqual(api.findings.get(key)?.uri.toString(), otherUri.toString());
+        assert.strictEqual(api.findings.all()[0]?.uri.toString(), otherUri.toString());
         return true;
       });
       assert.strictEqual(outcome.ok, false);
       assert.match(outcome.message ?? '', /changed while the preview was open/);
       assert.strictEqual(doc.getText(), DIV('lf'));
       assert.strictEqual((await vscode.workspace.openTextDocument(otherUri)).getText(), DIV('lf'));
-      assert.strictEqual(api.findings.get(key)?.status, 'open');
+      assert.strictEqual(api.findings.all()[0]?.status, 'open');
     } finally {
       for (const d of vscode.workspace.textDocuments.filter((d) => d.isDirty)) {
         await vscode.window.showTextDocument(d);
@@ -2008,5 +2012,176 @@ suite('Review', () => {
     assert.match(last.text, /^1 finding/);
     assert.deepStrictEqual(titles(), ['tracked bug']);
     assert.strictEqual(await isRunning(), false);
+  });
+
+  // ---------- Finding keys (A7) ----------
+
+  test('two findings sharing a fingerprint each get their own thread, diagnostic and actions (A7)', async () => {
+    await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const session = api.findings.session!;
+    write('src/ux-twin.ts', 'const a = 1; // one\nconst a = 1; // two\n');
+    // As for two secrets that look the same once redacted: one id, other code.
+    const twin = (line: number, quote: string): Finding => ({
+      id: 'twin',
+      file: 'src/ux-twin.ts',
+      startLine: line,
+      endLine: line,
+      anchor: 'line',
+      severity: 'major',
+      category: 'bug',
+      title: quote,
+      body: '',
+      quote,
+      confidence: 1,
+    });
+    await api.findings.set(session, [
+      twin(1, 'const a = 1; // one'),
+      twin(2, 'const a = 1; // two'),
+    ]);
+    const [one, two] = api.findings.all();
+    assert.ok(one && two);
+    assert.notStrictEqual(one.key, two.key);
+    const threadOne = api.threads.threadOf(one.key);
+    const threadTwo = api.threads.threadOf(two.key);
+    assert.ok(threadOne && threadTwo);
+    assert.notStrictEqual(threadOne, threadTwo);
+    assert.deepStrictEqual([threadOne.range?.start.line, threadTwo.range?.start.line], [0, 1]);
+    assert.strictEqual(ourDiagnostics('src/ux-twin.ts').length, 2);
+
+    await vscode.commands.executeCommand('aiReview.dismissFinding', threadTwo);
+    assert.deepStrictEqual(
+      api.findings.all().map((f) => f.status),
+      ['open', 'dismissed'],
+    );
+    assert.strictEqual(api.threads.threadOf(one.key), threadOne);
+    assert.strictEqual(api.threads.threadOf(two.key), undefined);
+    assert.deepStrictEqual(
+      ourDiagnostics('src/ux-twin.ts').map((d) => d.range.start.line),
+      [0],
+    );
+  });
+
+  test('a thread of a finding that a newer review replaced acts on nothing (A7)', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const thread = api.threads.threadOf(key)!;
+    const other = otherRepo('src/ux-lf.ts', DIV('lf'));
+    const otherUri = vscode.Uri.file(path.join(other, 'src', 'ux-lf.ts'));
+    try {
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root: other, path: 'src/ux-lf.ts', silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      const outcome = await vscode.commands.executeCommand<{ ok: boolean; message?: string }>(
+        'aiReview.applyFix',
+        thread,
+        { silent: true },
+      );
+      assert.deepStrictEqual(outcome, { ok: false, message: 'Finding not found.' });
+      await vscode.commands.executeCommand('aiReview.dismissFinding', thread);
+      assert.strictEqual((await vscode.workspace.openTextDocument(otherUri)).getText(), DIV('lf'));
+      assert.deepStrictEqual(
+        api.findings.all().map((f) => f.status),
+        ['open'],
+      );
+    } finally {
+      api.findings.clear();
+      removeRepo(other);
+    }
+  });
+
+  test('code actions and tree items of an earlier review never act on a newer review’s finding (A7)', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const uri = uriOf('src/ux-lf.ts');
+    const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>(
+      'vscode.executeCodeActionProvider',
+      uri,
+      new vscode.Range(3, 0, 3, 0),
+    );
+    const command = (id: string) => {
+      const found = actions.find((a) => a.command?.command === id)?.command;
+      assert.ok(found, id);
+      return found;
+    };
+    const apply = command('aiReview.applyFix');
+    const dismiss = command('aiReview.dismissFinding');
+    const file = api.tree.getChildren().find((n) => n.kind === 'file');
+    const node = api.tree.getChildren(file)[0]!;
+    const reveal = api.tree.getTreeItem(node).command!;
+
+    // A review of another repository reports the same finding (same fingerprint).
+    const other = otherRepo('src/ux-lf.ts', DIV('lf'));
+    const otherUri = vscode.Uri.file(path.join(other, 'src', 'ux-lf.ts'));
+    try {
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root: other, path: 'src/ux-lf.ts', silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      assert.strictEqual(api.findings.get(key), undefined);
+
+      const outcome = await vscode.commands.executeCommand<{ ok: boolean; message?: string }>(
+        apply.command,
+        ...(apply.arguments ?? []),
+        { silent: true },
+      );
+      assert.deepStrictEqual(outcome, { ok: false, message: 'Finding not found.' });
+      assert.strictEqual((await vscode.workspace.openTextDocument(otherUri)).getText(), DIV('lf'));
+      await vscode.commands.executeCommand(dismiss.command, ...(dismiss.arguments ?? []));
+      await vscode.commands.executeCommand('aiReview.resolveFinding', node);
+      assert.deepStrictEqual(
+        api.findings.all().map((f) => f.status),
+        ['open'],
+      );
+      const editor = await vscode.commands.executeCommand<vscode.TextEditor | undefined>(
+        reveal.command,
+        ...(reveal.arguments ?? []),
+      );
+      assert.strictEqual(editor, undefined);
+    } finally {
+      for (const d of vscode.workspace.textDocuments.filter((d) => d.isDirty)) {
+        await vscode.window.showTextDocument(d);
+        await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+      }
+      api.findings.clear();
+      removeRepo(other);
+    }
+  });
+
+  test('fix previews of the same finding in two repositories keep their own content (A7)', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const other = otherRepo('src/ux-lf.ts', `// other\n${DIV('lf')}`);
+    const previews = new FixPreviewProvider();
+    const shown: vscode.Uri[] = [];
+    const set = previews.set.bind(previews);
+    previews.set = (uri, content) => {
+      shown.push(uri);
+      set(uri, content);
+    };
+    try {
+      await previewFix(api.findings, previews, key, async () => {
+        const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+          'aiReview.reviewFile',
+          { root: other, path: 'src/ux-lf.ts', silent: true },
+        );
+        assert.strictEqual(result.ok, true, result.message);
+        const [moved] = api.findings.all();
+        await previewFix(api.findings, previews, moved!.key, async () => {
+          assert.strictEqual(shown.length, 2);
+          assert.notStrictEqual(shown[0]!.toString(), shown[1]!.toString());
+          assert.strictEqual(
+            previews.provideTextDocumentContent(shown[0]!),
+            DIV('lf').replace('a * b', 'a / b'),
+          );
+          return false;
+        });
+        return false;
+      });
+      assert.strictEqual(shown.length, 2);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      api.findings.clear();
+      removeRepo(other);
+    }
   });
 });

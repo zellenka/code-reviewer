@@ -14,7 +14,11 @@ export type FindingStatus = 'open' | 'resolved' | 'dismissed';
 
 /** A finding as shown: lines follow the working-tree document as it's edited. */
 export interface TrackedFinding extends Finding {
-  /** Unique within the store (the fingerprint, plus `#n` if two findings share one). */
+  /**
+   * Unique across reviews: the run's generation and the finding's place in its review
+   * (`3:1`). Commands, code actions, tree items and previews pass it, so one opened
+   * before a newer review finds nothing in it. `id` (the fingerprint) is what persists.
+   */
   key: string;
   uri: vscode.Uri;
   status: FindingStatus;
@@ -26,7 +30,7 @@ export interface ReviewSession {
   model: ModelInfo;
   result: ReviewResult;
   finishedAt: Date;
-  /** The run that produced it (`ReviewRun.generation`); one session per run. */
+  /** The run that produced it (`ReviewRun.generation`); one session per run (see `key`). */
   generation: number;
 }
 
@@ -125,8 +129,7 @@ export class FindingStore implements vscode.Disposable {
       // Read now, not when opened: the document may have been edited meanwhile.
       const lines = doc ? documentLines(doc) : undefined;
       for (const finding of list) {
-        let key = finding.id;
-        for (let n = 2; items.has(key); n++) key = `${finding.id}#${n}`;
+        const key = `${session.generation}:${items.size + 1}`;
         // A finding the user dismissed or resolved before keeps that status.
         const status = this.statuses?.lookup(session.root, finding) ?? 'open';
         items.set(key, { ...reanchor(finding, lines), key, uri, status });

@@ -140,6 +140,11 @@ export interface FixContent {
   newText: string;
 }
 
+const PREVIEW_CHANGED: FixOutcome = {
+  ok: false,
+  message: 'The fix changed while the preview was open, so it wasn’t applied. Preview it again.',
+};
+
 function rangeOf(edit: FixEdit): vscode.Range {
   return new vscode.Range(edit.startLine - 1, edit.startColumn, edit.endLine - 1, edit.endColumn);
 }
@@ -154,22 +159,18 @@ export async function applyFix(
   expected?: FixContent,
 ): Promise<FixOutcome> {
   const planned = await plan(store, key);
-  if (!planned.ok) return planned;
+  // A newer review (even of another repository) gives its findings new keys.
+  if (!planned.ok) return expected && !store.get(key) ? PREVIEW_CHANGED : planned;
   const { doc, edit, finding } = planned;
   const range = rangeOf(edit);
-  // E.g. a re-review changed the suggestion, or reported the same key in another
-  // repository's file, while the preview was open.
+  // E.g. the file was edited where the fix goes while the preview was open.
   if (
     expected &&
     (uriKey(doc.uri) !== uriKey(expected.uri) ||
       doc.getText(range) !== expected.oldText ||
       edit.newText !== expected.newText)
   ) {
-    return {
-      ok: false,
-      message:
-        'The fix changed while the preview was open, so it wasn’t applied. Preview it again.',
-    };
+    return PREVIEW_CHANGED;
   }
   const eol = doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
   const workspaceEdit = new vscode.WorkspaceEdit();
@@ -199,6 +200,7 @@ export async function previewFix(
   const planned = await plan(store, key);
   if (!planned.ok) return planned;
   const { doc, edit, finding } = planned;
+  // The key is this review's own: previews from two reviews (or repositories) never share content.
   const previewUri = vscode.Uri.from({
     scheme: PREVIEW_SCHEME,
     path: `/${finding.file}`,

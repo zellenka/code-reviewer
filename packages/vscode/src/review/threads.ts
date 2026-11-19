@@ -17,15 +17,22 @@ const BADGE: Record<Severity, string> = {
  * Inline comment threads, one per finding (CodeRabbit-style). Read-only: actions
  * (apply/preview fix, resolve, dismiss, reopen) are thread title buttons whose
  * visibility depends on the thread's contextValue words: `open`/`resolved`, `fixable`.
+ * Threads are kept by file and fingerprint, not by finding key (new with every review):
+ * a re-review that reports a finding again updates its thread in place.
  */
 export class FindingThreads implements vscode.Disposable {
   private readonly controller = vscode.comments.createCommentController(
     COMMENT_CONTROLLER_ID,
     'AI Review',
   );
+  /** By slot (see `slotsOf`). */
   private readonly threads = new Map<string, vscode.CommentThread>();
+  /** The key of the finding each thread shows now. */
   private readonly keys = new Map<vscode.CommentThread, string>();
+  /** By slot. */
   private readonly rendered = new Map<string, string>();
+  /** Finding key → slot, for the store's current findings. */
+  private slots = new Map<string, string>();
   private readonly subscription: vscode.Disposable;
 
   constructor(private readonly store: FindingStore) {
@@ -39,33 +46,33 @@ export class FindingThreads implements vscode.Disposable {
   }
 
   threadOf(key: string): vscode.CommentThread | undefined {
-    return this.threads.get(key);
+    const slot = this.slots.get(key);
+    return slot === undefined ? undefined : this.threads.get(slot);
   }
 
   private sync(change: StoreChange): void {
+    this.slots = slotsOf(this.store.all());
     const scope = change.uris ? new Set(change.uris.map(uriKey)) : undefined;
     const wanted = new Map(
       this.store
         .all()
         .filter((f) => f.status !== 'dismissed')
         .filter((f) => !scope || scope.has(uriKey(f.uri)))
-        .map((f) => [f.key, f]),
+        .map((f) => [this.slots.get(f.key)!, f]),
     );
     // Dispose threads of findings that are gone (or dismissed) within the changed scope.
-    for (const [key, thread] of this.threads) {
-      if (wanted.has(key)) continue;
-      const finding = this.store.get(key);
-      const inScope = !scope || !finding || scope.has(uriKey(finding.uri));
-      if (inScope) this.drop(key, thread);
+    for (const [slot, thread] of this.threads) {
+      if (wanted.has(slot)) continue;
+      if (!scope || scope.has(uriKey(thread.uri))) this.drop(slot, thread);
     }
-    for (const finding of wanted.values()) this.render(finding);
+    for (const [slot, finding] of wanted) this.render(slot, finding);
   }
 
-  private render(finding: TrackedFinding): void {
+  private render(slot: string, finding: TrackedFinding): void {
     const doc = vscode.workspace.textDocuments.find((d) => uriKey(d.uri) === uriKey(finding.uri));
     const range = findingRange(finding, doc);
-    // The text counts too: a re-review can report the same key with new wording or
-    // a new suggestion, and "Apply fix" uses the store's.
+    // The text counts too: a re-review can report the same finding (file and fingerprint)
+    // with new wording or a new suggestion, and "Apply fix" uses the store's.
     const signature = JSON.stringify([
       finding.startLine,
       finding.endLine,
@@ -79,24 +86,19 @@ export class FindingThreads implements vscode.Disposable {
       finding.body,
       finding.suggestion,
     ]);
-    let thread = this.threads.get(finding.key);
-    // A newer review can report the same key in another file (another repository):
-    // a thread can't move there.
-    if (thread && uriKey(thread.uri) !== uriKey(finding.uri)) {
-      this.drop(finding.key, thread);
-      thread = undefined;
-    }
-    if (thread && this.rendered.get(finding.key) === signature) return;
-
-    if (!thread) {
+    let thread = this.threads.get(slot);
+    if (thread) {
+      // Its buttons act on the finding it shows now, from the latest review.
+      this.keys.set(thread, finding.key);
+      if (this.rendered.get(slot) === signature) return;
+      thread.range = range;
+    } else {
       thread = this.controller.createCommentThread(finding.uri, range, []);
       thread.canReply = false;
-      this.threads.set(finding.key, thread);
+      this.threads.set(slot, thread);
       this.keys.set(thread, finding.key);
-    } else {
-      thread.range = range;
     }
-    this.rendered.set(finding.key, signature);
+    this.rendered.set(slot, signature);
 
     const fixable = finding.status === 'open' && !!finding.suggestion && !finding.stale;
     thread.contextValue = [finding.status, fixable ? 'fixable' : undefined]
@@ -122,18 +124,35 @@ export class FindingThreads implements vscode.Disposable {
     ];
   }
 
-  private drop(key: string, thread: vscode.CommentThread): void {
+  private drop(slot: string, thread: vscode.CommentThread): void {
     thread.dispose();
-    this.threads.delete(key);
+    this.threads.delete(slot);
     this.keys.delete(thread);
-    this.rendered.delete(key);
+    this.rendered.delete(slot);
   }
 
   dispose(): void {
     this.subscription.dispose();
-    for (const [key, thread] of this.threads) this.drop(key, thread);
+    for (const [slot, thread] of this.threads) this.drop(slot, thread);
     this.controller.dispose();
   }
+}
+
+/**
+ * Where each finding's thread is kept: its file (a thread can't move to another file,
+ * e.g. in another repository) and fingerprint, numbered when findings share both
+ * (two secrets that look the same once redacted).
+ */
+function slotsOf(findings: readonly TrackedFinding[]): Map<string, string> {
+  const slots = new Map<string, string>();
+  const seen = new Map<string, number>();
+  for (const f of findings) {
+    const base = `${uriKey(f.uri)}\n${f.id}`;
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    slots.set(f.key, `${base}\n${n}`);
+  }
+  return slots;
 }
 
 export function commentBody(finding: TrackedFinding): vscode.MarkdownString {
