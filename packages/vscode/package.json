@@ -46,11 +46,6 @@
   "contributes": {
     "commands": [
       {
-        "command": "aiReview.hello",
-        "title": "Hello",
-        "category": "AI Review"
-      },
-      {
         "command": "aiReview.showLog",
         "title": "Show Log",
         "category": "AI Review"

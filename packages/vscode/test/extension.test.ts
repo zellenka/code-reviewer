@@ -12,6 +12,7 @@ const manifest = JSON.parse(
   name: string;
   publisher: string;
   contributes: {
+    commands: { command: string }[];
     configuration: {
       properties: Record<string, { scope?: string; minimum?: number; maximum?: number }>;
     };
@@ -33,15 +34,13 @@ suite('Extension', () => {
     assert.strictEqual(extension.isActive, true);
   });
 
-  test('registers aiReview.* commands', async () => {
+  test('registers every contributed command', async () => {
     const commands = await vscode.commands.getCommands(true);
-    assert.ok(commands.includes('aiReview.hello'));
-    assert.ok(commands.includes('aiReview.showLog'));
-  });
-
-  test('"AI Review: Hello" runs', async () => {
-    const message = await vscode.commands.executeCommand<string>('aiReview.hello');
-    assert.match(message, /Hello/);
+    for (const { command } of manifest.contributes.commands) {
+      assert.ok(commands.includes(command), command);
+    }
+    // The scaffolding command is gone.
+    assert.ok(!commands.includes('aiReview.hello'));
   });
 
   test('settings that limit spending are user settings only (F23)', () => {

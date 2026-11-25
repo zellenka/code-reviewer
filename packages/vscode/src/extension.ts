@@ -76,12 +76,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   context.subscriptions.push(
     new ModelStatusBar(registry),
-    vscode.commands.registerCommand('aiReview.hello', () => {
-      const message = `${PRODUCT_NAME}: Hello! The extension is running.`;
-      logger.info('hello command invoked');
-      void vscode.window.showInformationMessage(message);
-      return message;
-    }),
     vscode.commands.registerCommand('aiReview.showLog', () => logger.show()),
     vscode.commands.registerCommand('aiReview.selectModel', (selection?: Partial<Selection>) =>
       selectModelCommand(registry, selection),
