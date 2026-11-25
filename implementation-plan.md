@@ -192,7 +192,20 @@ review:
   categories: [bug, security, performance, maintainability, test]   # style off by default
 ```
 
-**Precedence:** the repo file controls *what* is reviewed and reported (ignore, rules, thresholds, categories, language). User/VS Code settings control *how* it runs (provider, model, concurrency, cost threshold, log level). A user setting may make thresholds stricter, never looser. Invalid config → warning notification + defaults, never a crash.
+**Precedence:** the repo file controls *what* is reviewed and reported (ignore, rules, thresholds, categories, language), within the trust model below. User settings control *how* it runs (provider, model, mode, verify, cost threshold, …). A user setting may make thresholds stricter, never looser. Invalid config → warning notification + defaults, never a crash.
+
+### Trust model for repository input (A2)
+
+Anything a repository supplies can be written by the change under review, so none of it is trusted to lower the user's guard. Four inputs come from the repository:
+
+| Input | Treated as | Enforced in |
+|---|---|---|
+| The diff (code, file names, context, symbols) | Untrusted data. Sent inside tagged blocks the prompt calls untrusted; wrapper tags in code are escaped; file names are escaped so a line break can't add prompt lines; secret files are never sent and known secrets are redacted. | `review/prompt.ts` (`neutralizeTags`, `escapePath`, `escapeAttr`), `review/filter.ts`, `review/redact.ts`, `provider/redaction.ts` |
+| Rules files (`.codereview.md`, `AGENTS.md`, …) | Untrusted data that may add review criteria, never remove any. Tags escaped, secret paths refused, redacted, size-capped. A change that edits them gets a warning in the result. | `review/rules.ts` (`loadRepoRules`, `renderRules`, `reviewSettingsWarnings`) |
+| `.codereview.yml` | May add scrutiny freely; may remove it only visibly. Strings that reach a prompt are validated (`language`, `rules`) and `language` is quoted as a name. Higher thresholds and turned-off categories are applied and listed in the review result; no categories at all is refused; files that `ignore:` leaves out are named in the result. A change that edits the file gets a warning. | `config/trust.ts` (`resolveReviewConfig`, the one merge with the user's settings), `config/schema.ts`, `review/rules.ts` (`reviewSettingsWarnings`) |
+| `.vscode/settings.json` | Not trusted for anything that changes cost, scrutiny or where code is sent: those settings are `"scope": "application"` and read from user settings only. Only `aiReview.baseBranch` and `aiReview.concurrency` may come from the workspace. | `packages/vscode/src/settings.ts` (`USER_ONLY_SETTINGS`, `userSetting`), `package.json` |
+
+Workspace Trust is required before any review runs; the agent's tools are read-only and pass through core's secret gate (A1).
 
 ## Phases & tasks
 

@@ -9,6 +9,7 @@ import { estimateTokens, truncateToTokens } from '../provider/usage';
 import { isProtectedPath } from './filter';
 import { neutralizeTags } from './prompt';
 import { redactText } from './redact';
+import type { SkippedFile } from './types';
 
 /** Rules file read when `.codereview.yml` doesn't name one. */
 export const DEFAULT_RULES_FILE = '.codereview.md';
@@ -130,11 +131,13 @@ ${blocks.join('\n\n')}`;
 /**
  * The settings and rules are read from the working tree, so the change under review can
  * relax its own review (`ignore:`, thresholds, fewer categories, softer rules). Says so
- * when the diff touches any of those files, by path, ignored or not.
+ * when the diff touches any of those files, by path, ignored or not. Also names the files
+ * of the change that `ignore:` left out (A2): the repository may hide them, not unseen.
  */
 export function reviewSettingsWarnings(
   files: readonly Pick<FileDiff, 'path' | 'oldPath'>[],
   config: Pick<ReviewConfig, 'rules'>,
+  skipped: readonly SkippedFile[] = [],
 ): string[] {
   const touched = (target: string) => {
     const lower = target.toLowerCase();
@@ -155,6 +158,14 @@ export function reviewSettingsWarnings(
   if (rules.length) {
     warnings.push(
       `This change edits the review rules (${rules.join(', ')}), which this review used. Check those changes yourself.`,
+    );
+  }
+  const ignored = skipped.filter((s) => s.reason === 'configIgnore').map((s) => s.path);
+  if (ignored.length) {
+    const shown = ignored.slice(0, 3).join(', ');
+    const more = ignored.length > 3 ? ` (+${ignored.length - 3} more)` : '';
+    warnings.push(
+      `Not reviewed because the repository's ${CONFIG_FILE_NAME} ignores them: ${shown}${more}.`,
     );
   }
   return warnings;

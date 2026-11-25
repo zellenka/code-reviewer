@@ -77,7 +77,7 @@ review:
   verify: false # true: double-check each finding with one extra request per file
 ```
 
-The repository file decides _what_ is reviewed and reported. Your VS Code settings decide _how_ it runs (model, `aiReview.concurrency`, `aiReview.baseBranch`). The `aiReview.severityThreshold` and `aiReview.confidenceThreshold` settings can make the repository's thresholds stricter for you, never looser. An invalid file shows a warning and falls back to defaults for the invalid fields. The file and the rules files are read from your working tree, so a change that edits them also changes its own review: the review result then says so, and you should check those edits yourself.
+The repository file decides _what_ is reviewed and reported, but it can't make a review see less without you seeing it: it may add scrutiny freely, while higher thresholds, turned-off categories and files left out by `ignore:` are applied and named in the review result (a file that turns off every category is refused). Your VS Code settings decide _how_ it runs (model, mode, verify pass, …). The `aiReview.severityThreshold` and `aiReview.confidenceThreshold` settings can make the repository's thresholds stricter for you, never looser. An invalid file shows a warning and falls back to defaults for the invalid fields. The file and the rules files are read from your working tree, so a change that edits them also changes its own review: the review result then says so, and you should check those edits yourself.
 
 ## Privacy
 
@@ -107,7 +107,7 @@ Diff content is marked as untrusted data in the prompt, so instructions hidden i
 - Re-reviewing the same scope only sends what changed since the last review, so a review after a small fix is cheap.
 - The verify pass (off by default) adds up to one request per file with findings; the cost estimate includes it in the upper bound.
 - Agentic reviews cost more: each part can use several requests, up to `aiReview.agent.tokenBudget` input tokens (default 200k, at most 2M). The cost estimate shows the range. Prompt caching makes the repeated parts of those requests much cheaper on Anthropic.
-- The settings that limit spending (`aiReview.costConfirmationThreshold`, the prices in `aiReview.anthropic.models`, and `aiReview.agent.*`) are read from your user settings only, so a repository's `.vscode/settings.json` can't change them. A repository may still pick the provider and model; if a review with that model needs your confirmation, the question says the workspace chose it.
+- Settings that change what a review costs, how closely it looks or where your code is sent (`aiReview.provider`, `aiReview.model`, `aiReview.costConfirmationThreshold`, `aiReview.anthropic.*`, `aiReview.agent.*`, `aiReview.reviewMode`, `aiReview.verifyFindings`, `aiReview.summary`, the thresholds, …) are read from your user settings only, so a repository's `.vscode/settings.json` can't change them. Only `aiReview.baseBranch` and `aiReview.concurrency` may come from the workspace.
 - Narrow the scope (staged changes, one file, a selection) to keep reviews cheap and fast.
 
 ## Contributing

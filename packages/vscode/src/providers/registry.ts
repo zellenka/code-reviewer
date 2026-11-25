@@ -8,6 +8,7 @@ import {
   type ModelInfo,
 } from '@ai-review/core';
 import * as vscode from 'vscode';
+import { USER_ONLY_SETTINGS, userSetting } from '../settings';
 
 export const CONFIG_SECTION = 'aiReview';
 
@@ -93,11 +94,14 @@ export class ProviderRegistry implements vscode.Disposable {
     this.changed.fire();
   }
 
+  /** From user settings only: a repository doesn't choose where its code is sent (A2). */
   getSelection(): Selection {
     const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+    const provider = userSetting<unknown>(config, 'provider');
+    const model = userSetting<unknown>(config, 'model');
     return {
-      providerId: config.get<string>('provider') || 'copilot',
-      modelId: config.get<string>('model') ?? '',
+      providerId: (typeof provider === 'string' && provider) || 'copilot',
+      modelId: typeof model === 'string' ? model : '',
     };
   }
 
@@ -150,11 +154,17 @@ export class ProviderRegistry implements vscode.Disposable {
   }
 }
 
-/** Write where the value is currently defined, so a workspace setting isn't silently shadowed. */
+/**
+ * Write where the value is currently defined, so a workspace setting isn't silently shadowed.
+ * User-only settings always go to user settings: a workspace value of them doesn't count.
+ */
 export function targetFor(
-  config: vscode.WorkspaceConfiguration,
+  config: Pick<vscode.WorkspaceConfiguration, 'inspect'>,
   key: string,
 ): vscode.ConfigurationTarget {
+  if ((USER_ONLY_SETTINGS as readonly string[]).includes(key)) {
+    return vscode.ConfigurationTarget.Global;
+  }
   const inspected = config.inspect(key);
   if (inspected?.workspaceFolderValue !== undefined)
     return vscode.ConfigurationTarget.WorkspaceFolder;

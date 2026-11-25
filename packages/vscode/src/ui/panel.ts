@@ -14,6 +14,7 @@ import type { ReviewConfigService } from '../review/config';
 import { relativeToRepo, type RepoLocator } from '../review/repo';
 import type { ReviewRuns } from '../review/runs';
 import type { FindingStore } from '../review/store';
+import { reviewRunSettings, userSetting } from '../settings';
 import { panelHtml } from './panelHtml';
 
 export const SCOPES = ['unstaged', 'staged', 'branch', 'file', 'selection'] as const;
@@ -238,9 +239,9 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
       ...(file ? { file } : {}),
       ...(selection ? { selection } : {}),
       model: await (this.modelCache ??= this.model()),
-      reviewMode: settings.get<string>('reviewMode') ?? 'auto',
-      includeContext: settings.get<boolean>('includeContext') ?? true,
-      verifyFindings: await this.verifyOn(branchRoot, settings.get<string>('verifyFindings')),
+      reviewMode: userSetting<string>(settings, 'reviewMode') ?? 'auto',
+      includeContext: reviewRunSettings(settings).includeContext,
+      verifyFindings: await this.verifyOn(branchRoot, userSetting(settings, 'verifyFindings')),
       running: this.deps.runs.running,
       ...(last ? { last } : {}),
     };
@@ -252,12 +253,12 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
    */
   async verifyOn(
     root: string,
-    setting = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('verifyFindings'),
+    setting = userSetting(vscode.workspace.getConfiguration(CONFIG_SECTION), 'verifyFindings'),
   ): Promise<boolean> {
     if (setting === 'on') return true;
     if (setting === 'off' || !root || !this.deps.configs) return false;
     try {
-      return (await this.deps.configs.get(root)).review.verify;
+      return (await this.deps.configs.get(root)).config.review.verify;
     } catch {
       return false;
     }

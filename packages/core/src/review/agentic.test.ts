@@ -261,7 +261,45 @@ describe('repo rules', () => {
     expect(result.warnings).toEqual([
       'This change edits the review settings (.codereview.yml), which this review used. Check those changes yourself.',
       'This change edits the review rules (AGENTS.md, .github/copilot-instructions.md), which this review used. Check those changes yourself.',
+      "Not reviewed because the repository's .codereview.yml ignores them: .codereview.yml, AGENTS.md, docs/old.md.",
     ]);
+  });
+
+  it("name the files of the change that the repository's ignore: left out (A2)", async () => {
+    const provider = new MockProvider({
+      fallback: mockToolCall(REPORT_TOOL_NAME, { findings: [] }),
+    });
+    const files = ['a', 'b', 'c', 'd', 'e'].map((n) => addedFileDiff(`gen/${n}.ts`, 'x\n'));
+    const config = { ...DEFAULT_CONFIG, ignore: ['gen/'] };
+    const result = await runReview(
+      { files: [...DIFF.files, ...files] },
+      {
+        provider,
+        model: MODEL,
+        config,
+      },
+    );
+    expect(result.reviewedFiles).toEqual(['src/client.ts']);
+    expect(result.warnings).toEqual([
+      "Not reviewed because the repository's .codereview.yml ignores them: gen/a.ts, gen/b.ts, gen/c.ts (+2 more).",
+    ]);
+    // Patterns that match nothing in this change don't warn.
+    const none = await runReview(DIFF, { provider, model: MODEL, config });
+    expect(none.warnings).toBeUndefined();
+  });
+
+  it('show what the repository config turned down with the result (A2)', async () => {
+    const provider = new MockProvider({
+      fallback: mockToolCall(REPORT_TOOL_NAME, { findings: [] }),
+    });
+    const relaxed = ["The repository's .codereview.yml turns off the security category."];
+    const result = await runReview(DIFF, {
+      provider,
+      model: MODEL,
+      config: DEFAULT_CONFIG,
+      relaxed,
+    });
+    expect(result.warnings).toEqual(relaxed);
   });
 
   it('warn about the configured rules file, whatever its case in the diff (F11)', async () => {

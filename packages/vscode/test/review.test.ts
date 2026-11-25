@@ -1619,7 +1619,7 @@ suite('Review', () => {
       assert.strictEqual(result.ok, true, result.message);
       assert.match(
         result.message ?? '',
-        /This change edits the review settings \(\.codereview\.yml\), which this review used\. Check those changes yourself\. This change edits the review rules \(AGENTS\.md\), which this review used\. Check those changes yourself\.$/,
+        /This change edits the review settings \(\.codereview\.yml\), which this review used\. Check those changes yourself\. This change edits the review rules \(AGENTS\.md\), which this review used\. Check those changes yourself\. The repository's \.codereview\.yml hides findings below major severity \(instead of below minor\)\.$/,
       );
       const panel = await api.panel.snapshot();
       assert.strictEqual(panel.last?.level, 'warn');
@@ -1633,16 +1633,45 @@ suite('Review', () => {
         labels.join('\n'),
       );
 
-      // Staged changes don't touch them: no warning.
+      // Staged changes don't touch them: no warning about the edit.
       const staged = await vscode.commands.executeCommand<ReviewCommandResult>(
         'aiReview.reviewStaged',
         { root, silent: true },
       );
       assert.strictEqual(staged.ok, true, staged.message);
       assert.doesNotMatch(staged.message ?? '', /review settings|review rules/);
-      assert.strictEqual((await api.panel.snapshot()).last?.level, 'info');
     } finally {
       rmSync(path.join(root, 'AGENTS.md'), { force: true });
+    }
+  });
+
+  test('what the repository config turns down is shown with every review (A2)', async () => {
+    write('.codereview.yml', 'severityThreshold: major\n');
+    api.configs.forget(root);
+    const config = vscode.workspace.getConfiguration('aiReview');
+    try {
+      const staged = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewStaged',
+        { root, silent: true },
+      );
+      assert.strictEqual(staged.ok, true, staged.message);
+      assert.match(
+        staged.message ?? '',
+        /The repository's \.codereview\.yml hides findings below major severity \(instead of below minor\)\.$/,
+      );
+      assert.strictEqual((await api.panel.snapshot()).last?.level, 'warn');
+
+      // The user hides as much themselves: nothing is turned down for them.
+      await config.update('severityThreshold', 'major', vscode.ConfigurationTarget.Global);
+      const own = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewStaged',
+        { root, silent: true },
+      );
+      assert.strictEqual(own.ok, true, own.message);
+      assert.doesNotMatch(own.message ?? '', /hides findings/);
+      assert.strictEqual((await api.panel.snapshot()).last?.level, 'info');
+    } finally {
+      await config.update('severityThreshold', undefined, vscode.ConfigurationTarget.Global);
     }
   });
 

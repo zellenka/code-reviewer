@@ -82,6 +82,11 @@ export interface ReviewOptions {
   /** Model for the verify pass (same provider), e.g. a cheaper one. Default: `model`. */
   verifyModel?: ModelInfo;
   /**
+   * What the repository's config turned down (`resolveReviewConfig().relaxed`). Added to
+   * the result's warnings, so the user sees it with every review.
+   */
+  relaxed?: string[];
+  /**
    * The last review of the same scope (`ReviewResult.snapshot`). Hunks reviewed then are
    * not sent again and their findings are carried over. Ignored when the model, mode,
    * config, rules or prompts changed since.
@@ -159,7 +164,10 @@ export async function runReview(
     };
     if (options.rules?.sources.length) result.rules = options.rules.sources.map((s) => s.path);
     // The whole diff, not the incremental part: the warning holds for every re-review.
-    const warnings = reviewSettingsWarnings(diffPrepared.diff.files, config);
+    const warnings = [
+      ...reviewSettingsWarnings(diffPrepared.diff.files, config, skipped),
+      ...(options.relaxed ?? []),
+    ];
     if (warnings.length) result.warnings = warnings;
     if (agent) result.agent = { turns: 0, toolCalls: 0, limitStops: 0 };
     const progress = (findings: number, phase?: ReviewProgress['phase']) =>

@@ -12,7 +12,6 @@ import {
   type Finding,
   type Logger,
   type ModelInfo,
-  type ReviewConfig,
   type ReviewEstimate,
   type ReviewMode,
   type ReviewResult,
@@ -27,8 +26,8 @@ import {
   USER_ONLY_SETTINGS,
   agentLimitSettings,
   costThreshold,
+  reviewRunSettings,
   setInWorkspace,
-  workspaceChoiceNote,
 } from '../settings';
 import type { ReviewConfigService } from './config';
 import { relativeToRepo, unsavedFiles, type RepoLocator } from './repo';
@@ -143,10 +142,11 @@ export async function reviewCommand(
 
     const { provider, model } = await deps.registry.resolveActive();
     const settings = vscode.workspace.getConfiguration('aiReview');
-    const config = withModeSetting(await deps.configs.get(repo.root), settings);
+    // The repo's config with the user's settings; what the repo turned down goes in the result.
+    const { config, relaxed } = await deps.configs.get(repo.root);
+    const runSettings = reviewRunSettings(settings);
     // "Review Selection" sends only the selected lines, so no surrounding code.
-    const includeContext =
-      (settings.get<boolean>('includeContext') ?? true) && mode.kind !== 'selection';
+    const includeContext = runSettings.includeContext && mode.kind !== 'selection';
     const agentLimits = agentLimitSettings(settings);
     // VS Code already ignores these in workspace settings (scope "application"); say so in the log.
     const ignored = setInWorkspace(settings, USER_ONLY_SETTINGS);
@@ -155,16 +155,9 @@ export async function reviewCommand(
         `ignored in workspace settings, only user settings apply: ${ignored.map((k) => `aiReview.${k}`).join(', ')}`,
       );
     }
-    const chosenByWorkspace = setInWorkspace(settings, ['provider', 'model']);
     const concurrency = settings.get<number>('concurrency') || undefined;
-    const summary = settings.get<boolean>('summary') ?? true;
-    const redactHighEntropy = settings.get<boolean>('redactHighEntropyStrings') ?? false;
-    const verifySetting = settings.get<string>('verifyFindings');
-    const verify = verifySetting === 'on' ? true : verifySetting === 'off' ? false : undefined;
-    const previous =
-      (settings.get<boolean>('incrementalReview') ?? true)
-        ? deps.snapshots?.get(repo.root, mode)
-        : undefined;
+    const { summary, redactHighEntropy } = runSettings;
+    const previous = runSettings.incremental ? deps.snapshots?.get(repo.root, mode) : undefined;
     // File and selection reviews read unsaved editor text; git diffs only see saved files,
     // so say which edits are left out. Staged reviews the index: unsaved edits aren't in it,
     // just like saved but unstaged ones, so it doesn't warn.
@@ -216,7 +209,7 @@ export async function reviewCommand(
               repo.gitPath ? { gitPath: repo.gitPath } : {},
             ),
             agentLimits,
-            ...(verify !== undefined ? { verify } : {}),
+            ...(relaxed.length ? { relaxed } : {}),
             ...(previous ? { previous } : {}),
           };
           // Filtered, redacted and planned once: for the symbols, the estimate and the review.
@@ -244,12 +237,7 @@ export async function reviewCommand(
                 : `AI Review: this review sends about ${formatTokens(estimate.inputTokens)} tokens in ${estimate.requests} request(s) to ${model.name}. Estimated cost: ${formatUsd(estimate.costUsd.low)}–${formatUsd(estimate.costUsd.high)}.`,
               {
                 modal: true,
-                detail: [
-                  `That's above your confirmation threshold of ${formatUsd(threshold)} (setting aiReview.costConfirmationThreshold). Narrow the scope to make it cheaper.`,
-                  workspaceChoiceNote(chosenByWorkspace, model.name),
-                ]
-                  .filter(Boolean)
-                  .join(' '),
+                detail: `That's above your confirmation threshold of ${formatUsd(threshold)} (setting aiReview.costConfirmationThreshold). Narrow the scope to make it cheaper.`,
               },
               'Run Review',
             );
@@ -378,16 +366,6 @@ export async function reviewCommand(
   } finally {
     deps.runs.finish(run);
   }
-}
-
-/** `aiReview.reviewMode` overrides the repository's `review.mode` unless it is "auto". */
-function withModeSetting(
-  config: ReviewConfig,
-  settings: vscode.WorkspaceConfiguration,
-): ReviewConfig {
-  const mode = settings.get<string>('reviewMode');
-  if (mode !== 'single-pass' && mode !== 'agentic') return config;
-  return { ...config, review: { ...config.review, mode } };
 }
 
 function isTooLarge(err: unknown): boolean {

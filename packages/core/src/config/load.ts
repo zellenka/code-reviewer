@@ -1,14 +1,6 @@
 import { parseDocument } from 'yaml';
 import type { z } from 'zod';
-import {
-  DEFAULT_CONFIG,
-  SEVERITIES,
-  configFileSchema,
-  severityRank,
-  type ConfigFile,
-  type ReviewConfig,
-  type Severity,
-} from './schema';
+import { DEFAULT_CONFIG, configFileSchema, type ConfigFile, type ReviewConfig } from './schema';
 
 export const CONFIG_FILE_NAME = '.codereview.yml';
 
@@ -51,32 +43,6 @@ export function parseConfig(text: string | undefined, source = CONFIG_FILE_NAME)
   const retry = configFileSchema.safeParse(cleaned);
   const config = retry.success ? applyFile(retry.data) : cloneDefaults();
   return { config, warnings: [...warnings.map((w) => `${w} (ignored)`)] };
-}
-
-/**
- * User/VS Code settings that may tighten the repo config, never loosen it.
- * The repo decides what is reported; a user can only see less.
- */
-export interface UserThresholds {
-  severityThreshold?: Severity;
-  confidenceThreshold?: number;
-}
-
-export function applyUserThresholds(config: ReviewConfig, user: UserThresholds): ReviewConfig {
-  const result = structuredClone(config);
-  if (user.severityThreshold && SEVERITIES.includes(user.severityThreshold)) {
-    if (severityRank(user.severityThreshold) > severityRank(result.severityThreshold)) {
-      result.severityThreshold = user.severityThreshold;
-    }
-  }
-  if (
-    typeof user.confidenceThreshold === 'number' &&
-    Number.isFinite(user.confidenceThreshold) &&
-    user.confidenceThreshold <= 1
-  ) {
-    result.confidenceThreshold = Math.max(result.confidenceThreshold, user.confidenceThreshold);
-  }
-  return result;
 }
 
 function applyFile(file: ConfigFile): ReviewConfig {
