@@ -333,10 +333,9 @@ suite('Review', () => {
       'src/new.ts',
     ]);
     assert.deepStrictEqual(await paths({ kind: 'staged' }), ['src/staged.ts']);
+    // Committed and tracked working-tree changes; untracked files (.env, src/new.ts) aren't.
     assert.deepStrictEqual(await paths({ kind: 'branch' }), [
-      '.env',
       'src/calc.ts',
-      'src/new.ts',
       'src/notes.md',
       'src/staged.ts',
     ]);
@@ -1436,9 +1435,10 @@ suite('Review', () => {
   });
 
   test('re-review after a one-line edit sends one chunk and keeps the other findings', async () => {
+    // The edit below is to an untracked file, so the reviews include them.
     const first = await vscode.commands.executeCommand<ReviewCommandResult>(
       'aiReview.reviewUnstaged',
-      { root, silent: true },
+      { root, silent: true, includeUntracked: true },
     );
     assert.strictEqual(first.ok, true, first.message);
     // Earlier tests leave untracked files with bugs, so count rather than assume.
@@ -1450,7 +1450,7 @@ suite('Review', () => {
     try {
       const second = await vscode.commands.executeCommand<ReviewCommandResult>(
         'aiReview.reviewUnstaged',
-        { root, silent: true },
+        { root, silent: true, includeUntracked: true },
       );
       assert.strictEqual(second.ok, true, second.message);
       const reviews = stub.requests.slice(before).filter((r) => r.tools);
@@ -1473,7 +1473,7 @@ suite('Review', () => {
       const mark = stub.requests.length;
       const third = await vscode.commands.executeCommand<ReviewCommandResult>(
         'aiReview.reviewUnstaged',
-        { root, silent: true },
+        { root, silent: true, includeUntracked: true },
       );
       assert.strictEqual(third.result?.incremental, undefined);
       assert.ok(
@@ -2270,6 +2270,265 @@ suite('Review', () => {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       api.findings.clear();
       removeRepo(other);
+    }
+  });
+
+  // ---------- Untracked and git-ignored files (data-exposure audit) ----------
+
+  /**
+   * A repository with a commit on `feature`, an unstaged change to a tracked file, twelve
+   * untracked files that would be sent, an untracked `.env` (skipped as a secret anyway)
+   * and an ignored `private/` directory.
+   */
+  const exposureRepo = () => {
+    const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'air-ext-untracked-')));
+    const run = (...args: string[]) =>
+      execFileSync('git', args, { cwd: dir, env: GIT_ENV, encoding: 'utf8' });
+    const put = (rel: string, content: string) => {
+      mkdirSync(path.join(dir, path.dirname(rel)), { recursive: true });
+      writeFileSync(path.join(dir, rel), content);
+    };
+    run('init', '-q', '-b', 'main');
+    run('config', 'core.autocrlf', 'false');
+    put('src/app.ts', 'export const app = 1;\n');
+    run('add', '.');
+    run('commit', '-q', '-m', 'init');
+    run('checkout', '-q', '-b', 'feature');
+    put('src/branch.ts', 'export const b = "BRANCH_COMMIT";\n');
+    run('add', '.');
+    run('commit', '-q', '-m', 'branch');
+    put('src/app.ts', 'export const app = "TRACKED_CHANGE";\n');
+    put('dump.sql', "INSERT INTO users VALUES ('UNTRACKED_DUMP');\n");
+    put('notes.txt', 'UNTRACKED_NOTES\n');
+    for (let i = 1; i <= 10; i++) put(`scratch/f${String(i).padStart(2, '0')}.txt`, 'UNTRACKED\n');
+    put('.env', 'API_TOKEN=UNTRACKED_SECRET\n');
+    put('.git/info/exclude', 'private/\n');
+    put('private/local.json', '{ "token": "IGNORED_LOCAL" }\n');
+    return dir;
+  };
+  const UNTRACKED = [
+    'dump.sql',
+    'notes.txt',
+    ...Array.from({ length: 10 }, (_, i) => `scratch/f${String(i + 1).padStart(2, '0')}.txt`),
+  ];
+
+  type Asked = { message: string; detail?: string; buttons: string[] };
+  /**
+   * Answers modal warnings with `answers` in turn (undefined = Cancel) while `run` runs, and
+   * records them. Other warnings (notifications) are answered with nothing.
+   */
+  async function answering<T>(
+    answers: (string | undefined)[],
+    run: () => Thenable<T>,
+  ): Promise<{ result: T; asked: Asked[] }> {
+    const window = vscode.window as { showWarningMessage: unknown };
+    const original = window.showWarningMessage;
+    const asked: Asked[] = [];
+    window.showWarningMessage = async (message: string, ...rest: unknown[]) => {
+      const options = rest[0] as vscode.MessageOptions | undefined;
+      if (typeof options !== 'object' || !options.modal) return undefined;
+      asked.push({
+        message,
+        ...(options.detail !== undefined ? { detail: options.detail } : {}),
+        buttons: rest.slice(1) as string[],
+      });
+      return answers.shift();
+    };
+    try {
+      return { result: await run(), asked };
+    } finally {
+      window.showWarningMessage = original;
+    }
+  }
+
+  test('an unstaged review asks before sending untracked files: with them, without them or cancel', async () => {
+    const dir = exposureRepo();
+    const review = () =>
+      vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewUnstaged', {
+        root: dir,
+      });
+    try {
+      // Without them: only the tracked change is sent; they are listed as skipped.
+      let { result, asked } = await answering(['Review without Them'], review);
+      assert.strictEqual(result.ok, true, result.message);
+      assert.strictEqual(asked.length, 1);
+      assert.strictEqual(asked[0]!.message, 'AI Review: send 12 untracked files to Stub too?');
+      assert.deepStrictEqual(asked[0]!.buttons, ['Review with Them', 'Review without Them']);
+      const detail = asked[0]!.detail ?? '';
+      // The first ten, then a count.
+      for (const p of UNTRACKED.slice(0, 10)) assert.ok(detail.includes(p), p);
+      for (const p of UNTRACKED.slice(10)) assert.ok(!detail.includes(p), p);
+      assert.match(detail, /\n\+2 more\n/);
+      // Skipped anyway (a secret), so not asked about.
+      assert.ok(!detail.includes('.env'), detail);
+      let sent = sentForReview();
+      assert.ok(sent.includes('TRACKED_CHANGE'));
+      assert.ok(!/UNTRACKED/.test(JSON.stringify(stub.requests)), 'nothing untracked was sent');
+      // Not even their names: the summary request only counts them.
+      assert.ok(!/dump\.sql|notes\.txt|scratch\//.test(JSON.stringify(stub.requests)));
+      assert.ok(
+        stub.requests.some((r) =>
+          JSON.stringify(r.messages).includes('12 untracked files left out by the user'),
+        ),
+      );
+      assert.deepStrictEqual(result.result?.reviewedFiles, ['src/app.ts']);
+      const skipped = result.result?.skipped ?? [];
+      assert.deepStrictEqual(
+        skipped.filter((s) => s.reason === 'untracked').map((s) => s.path),
+        UNTRACKED,
+      );
+      assert.ok(skipped.some((s) => s.path === '.env' && s.reason === 'secret'));
+      assert.strictEqual(result.estimate?.files, 1);
+      // The Findings view says why they weren't reviewed.
+      const details = api.tree.getChildren().find((n) => n.kind === 'details');
+      const tooltips = api.tree
+        .getChildren(details)
+        .map((n) => String(api.tree.getTreeItem(n).tooltip ?? ''));
+      assert.ok(
+        tooltips.some((t) => t.includes('dump.sql (untracked)')),
+        tooltips.join('\n'),
+      );
+
+      // Asked again (nothing is remembered); with them, they are sent.
+      await api.snapshots.clear();
+      let mark = stub.requests.length;
+      ({ result, asked } = await answering(['Review with Them'], review));
+      assert.strictEqual(result.ok, true, result.message);
+      assert.strictEqual(asked.length, 1);
+      sent = sentForReview(mark);
+      assert.ok(sent.includes('TRACKED_CHANGE'));
+      assert.ok(sent.includes('UNTRACKED_DUMP'));
+      assert.ok(sent.includes('UNTRACKED_NOTES'));
+      assert.ok(!sent.includes('UNTRACKED_SECRET'));
+      assert.ok(!result.result?.skipped.some((s) => s.reason === 'untracked'));
+      assert.strictEqual(result.estimate?.files, 13);
+
+      // Cancel: nothing at all is sent, and the last review's findings stay.
+      await api.snapshots.clear();
+      mark = stub.requests.length;
+      const session = api.findings.session;
+      ({ result, asked } = await answering([undefined], review));
+      assert.strictEqual(asked.length, 1);
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(result.message, 'cancelled');
+      assert.strictEqual(stub.requests.length, mark);
+      assert.strictEqual(api.findings.session, session);
+    } finally {
+      api.findings.clear();
+      removeRepo(dir);
+    }
+  });
+
+  test('silent unstaged reviews leave untracked files out unless asked to; branch reviews never send them', async () => {
+    const dir = exposureRepo();
+    try {
+      // Silent: the safe default, without asking.
+      let { result, asked } = await answering([], () =>
+        vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewUnstaged', {
+          root: dir,
+          silent: true,
+        }),
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      assert.strictEqual(asked.length, 0);
+      assert.ok(sentForReview().includes('TRACKED_CHANGE'));
+      assert.ok(!/UNTRACKED|dump\.sql|notes\.txt|scratch\//.test(JSON.stringify(stub.requests)));
+      assert.strictEqual(result.result?.skipped.filter((s) => s.reason === 'untracked').length, 12);
+
+      // `includeUntracked` sends them.
+      await api.snapshots.clear();
+      let mark = stub.requests.length;
+      ({ result, asked } = await answering([], () =>
+        vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewUnstaged', {
+          root: dir,
+          silent: true,
+          includeUntracked: true,
+        }),
+      ));
+      assert.strictEqual(result.ok, true, result.message);
+      assert.strictEqual(asked.length, 0);
+      assert.ok(sentForReview(mark).includes('UNTRACKED_DUMP'));
+      assert.ok(!sentForReview(mark).includes('UNTRACKED_SECRET'));
+
+      // Branch: committed and tracked working-tree changes, never untracked files, never asked.
+      mark = stub.requests.length;
+      ({ result, asked } = await answering([], () =>
+        vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewBranch', {
+          root: dir,
+          base: 'main',
+        }),
+      ));
+      assert.strictEqual(result.ok, true, result.message);
+      assert.strictEqual(asked.length, 0);
+      const sent = sentForReview(mark);
+      assert.ok(sent.includes('BRANCH_COMMIT'));
+      assert.ok(sent.includes('TRACKED_CHANGE'));
+      assert.ok(!/UNTRACKED/.test(JSON.stringify(stub.requests.slice(mark))));
+      assert.deepStrictEqual(result.result?.reviewedFiles.sort(), ['src/app.ts', 'src/branch.ts']);
+      assert.deepStrictEqual(result.result?.skipped, []);
+    } finally {
+      api.findings.clear();
+      removeRepo(dir);
+    }
+  });
+
+  test('Review Current File and Review Selection refuse a file git ignores and send nothing', async () => {
+    const dir = exposureRepo();
+    const message = "private/local.json is ignored by git, so it isn't reviewed.";
+    try {
+      for (const command of ['aiReview.reviewFile', 'aiReview.reviewSelection']) {
+        const result = await vscode.commands.executeCommand<ReviewCommandResult>(command, {
+          root: dir,
+          path: 'private/local.json',
+          startLine: 1,
+          endLine: 1,
+          silent: true,
+        });
+        assert.strictEqual(result.ok, false, command);
+        assert.strictEqual(result.message, message, command);
+      }
+      // From the explorer or editor menu (a Uri, not silent): the same.
+      const { result, asked } = await answering([], () =>
+        vscode.commands.executeCommand<ReviewCommandResult>(
+          'aiReview.reviewFile',
+          vscode.Uri.file(path.join(dir, 'private', 'local.json')),
+        ),
+      );
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(result.message, message);
+      assert.strictEqual(asked.length, 0);
+      // Outside any repository there is no git to ask: refused too.
+      const outside = mkdtempSync(path.join(tmpdir(), 'air-norepo-'));
+      try {
+        writeFileSync(path.join(outside, 'loose.ts'), 'export const loose = "OUTSIDE";\n');
+        const loose = await vscode.commands.executeCommand<ReviewCommandResult>(
+          'aiReview.reviewFile',
+          { path: path.join(outside, 'loose.ts'), silent: true },
+        );
+        assert.strictEqual(loose.ok, false);
+        assert.match(loose.message ?? '', /No git repository/);
+      } finally {
+        removeRepo(outside);
+      }
+      assert.strictEqual(stub.requests.length, 0);
+
+      // A tracked file is reviewed; a secret file is still refused by name.
+      const tracked = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root: dir, path: 'src/app.ts', silent: true },
+      );
+      assert.strictEqual(tracked.ok, true, tracked.message);
+      assert.ok(sentForReview().includes('TRACKED_CHANGE'));
+      const secret = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root: dir, path: '.env', silent: true },
+      );
+      assert.strictEqual(secret.ok, true, secret.message);
+      assert.deepStrictEqual(secret.result?.skipped, [{ path: '.env', reason: 'secret' }]);
+      assert.ok(!/IGNORED_LOCAL|UNTRACKED_SECRET/.test(JSON.stringify(stub.requests)));
+    } finally {
+      api.findings.clear();
+      removeRepo(dir);
     }
   });
 });

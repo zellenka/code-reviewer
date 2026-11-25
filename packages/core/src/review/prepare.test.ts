@@ -106,6 +106,28 @@ describe('one prepared diff per review', () => {
     expect(calls()).toEqual({ filter: 1, redact: 1 });
   });
 
+  it('files the host left out are listed as skipped, and still count as settings edits', async () => {
+    const leftOut = [
+      { path: 'notes.txt', reason: 'untracked' as const },
+      { path: '.codereview.yml', reason: 'untracked' as const },
+    ];
+    const prepared = prepareDiff(diffOf('x = 1;'), { ...options, leftOut });
+    expect(prepared.skipped).toEqual([{ path: '.env', reason: 'secret' }, ...leftOut]);
+    expect(estimateReview(prepared, { ...options, leftOut }).skipped).toBe(3);
+    const p = provider();
+    const result = await runReview(prepared, { ...options, leftOut, provider: p });
+    expect(result.skipped).toEqual(prepared.skipped);
+    expect(result.reviewedFiles).toEqual(['src/a.ts']);
+    expect(result.warnings).toEqual([
+      'This change edits the review settings (.codereview.yml), which this review used. Check those changes yourself.',
+    ]);
+    // The model gets only their count: a file name can be sensitive too.
+    expect(JSON.stringify(p.requests.at(-1)!.messages)).toContain(
+      'Not reviewed: .env (secret), 2 untracked files left out by the user',
+    );
+    expect(JSON.stringify(p.requests)).not.toMatch(/notes\.txt|codereview\.yml/);
+  });
+
   it('sends the new hunk of a path the diff names twice', async () => {
     // The snapshot keeps the hunks of the path's last entry: change the first one.
     const twice = (first: string) =>

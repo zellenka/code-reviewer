@@ -243,6 +243,32 @@ describe('files ignored by git are not shown (F4)', () => {
     );
   });
 
+  it('untracked files are hidden when the review leaves them out', async () => {
+    const ws = new FsWorkspaceTools(root, { untracked: false });
+    const listed = await ws.listFiles();
+    expect(listed).toContain('src/app.ts');
+    expect(listed).toContain('forced.local.hcl');
+    expect(listed).not.toContain('src/fresh.ts');
+    const run = toolsOn(ws);
+    // The refusal names only the path the model asked for, and reads as for a missing file.
+    for (const asked of ['src/fresh.ts', './src/../src/fresh.ts']) {
+      const message = await errorOf(run('read_file', { path: asked }));
+      const shown = asked.replace(/^\.\//, '');
+      expect(message).toBe(`${shown} can't be read: it is ignored by git or missing.`);
+      expect(message.replace(shown, '<p>')).toBe(
+        (await errorOf(run('read_file', { path: 'src/gone.ts' }))).replace('src/gone.ts', '<p>'),
+      );
+    }
+    for (const [tool, input] of [
+      ['search_code', { pattern: 'HIDDEN_VALUE' }],
+      ['search_code', { pattern: 'fresh' }],
+      ['find_references', { path: 'src/app.ts', line: 2, symbol: 'HIDDEN_VALUE' }],
+    ] as const) {
+      const out = await run(tool, input).catch((e: unknown) => String(e));
+      expect(out, tool).not.toContain('src/fresh.ts');
+    }
+  });
+
   it('committed credential files are refused by name although git shows them', async () => {
     const ws = new FsWorkspaceTools(root);
     expect(await ws.listFiles(new AbortController().signal)).toEqual(

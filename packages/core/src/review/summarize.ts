@@ -87,9 +87,17 @@ export function buildSummaryUserPrompt(options: {
         `- ${s.oldPath ? `${escapePath(s.oldPath)} → ` : ''}${escapePath(s.path)} (${s.status}, +${s.added} −${s.removed})`,
     )
     .join('\n');
-  const skipped = options.skipped?.length
-    ? `\nNot reviewed: ${options.skipped.map((s) => `${escapePath(s.path)} (${s.reason})`).join(', ')}\n`
-    : '';
+  // Untracked files the user left out are only counted: a file name can be sensitive too.
+  const leftOut = options.skipped?.filter((s) => s.reason === 'untracked').length ?? 0;
+  const notReviewed = [
+    ...(options.skipped ?? [])
+      .filter((s) => s.reason !== 'untracked')
+      .map((s) => `${escapePath(s.path)} (${s.reason})`),
+    ...(leftOut
+      ? [`${leftOut} untracked file${leftOut === 1 ? '' : 's'} left out by the user`]
+      : []),
+  ];
+  const skipped = notReviewed.length ? `\nNot reviewed: ${notReviewed.join(', ')}\n` : '';
   const findings = options.findings.length
     ? options.findings
         .map(

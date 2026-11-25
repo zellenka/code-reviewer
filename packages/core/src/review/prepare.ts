@@ -33,6 +33,7 @@ export type PrepareOptions = Pick<
   | 'symbols'
   | 'rules'
   | 'agentLimits'
+  | 'leftOut'
 > & {
   /** Whether repo access is available (`ReviewOptions.workspace`). */
   workspace?: unknown;
@@ -121,7 +122,9 @@ function reviewKey(options: PrepareDiffOptions): string {
  */
 export function prepareDiff(diff: UnifiedDiff, options: PrepareDiffOptions): PreparedDiff {
   const key = reviewKey(options);
-  const { files, skipped, relaxedIgnore } = filterFiles(diff.files, options.config);
+  const filtered = filterFiles(diff.files, options.config);
+  const { files, relaxedIgnore } = filtered;
+  const skipped = [...filtered.skipped, ...(options.leftOut ?? [])];
   const redacted = redactFiles(files, { highEntropy: options.redactHighEntropy ?? false });
   const prepared: PreparedDiff = {
     diff,

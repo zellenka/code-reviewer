@@ -16,6 +16,11 @@ export interface FsWorkspaceToolsOptions {
   skipDirs?: string[];
   /** A grep whose regex takes longer than this on one batch of files fails. Default 3s. */
   grepTimeoutMs?: number;
+  /**
+   * Also show untracked files that aren't ignored. Default true; false when the review
+   * leaves untracked files out, so the model can't read them either.
+   */
+  untracked?: boolean;
 }
 
 const DEFAULT_SKIP = [
@@ -76,10 +81,12 @@ export class FsWorkspaceTools implements WorkspaceTools {
   private readonly skipDirs: Set<string>;
   private readonly grepTimeoutMs: number;
   private readonly gitPath: string | undefined;
+  private readonly untracked: boolean;
   private gitFiles?: Promise<string[]>;
 
   constructor(root: string, options: FsWorkspaceToolsOptions = {}) {
     this.root = path.resolve(root);
+    this.untracked = options.untracked ?? true;
     this.maxReadChars = options.maxReadChars ?? 100_000;
     this.maxGrepResults = options.maxGrepResults ?? 200;
     this.skipDirs = new Set(options.skipDirs ?? DEFAULT_SKIP);
@@ -117,7 +124,7 @@ export class FsWorkspaceTools implements WorkspaceTools {
   /** `git ls-files`, once per instance: a file created during the review is not shown. */
   listFiles(signal?: AbortSignal): Promise<string[]> {
     signal?.throwIfAborted();
-    this.gitFiles ??= gitFileList(this.root, this.gitPath);
+    this.gitFiles ??= gitFileList(this.root, this.gitPath, this.untracked);
     return this.gitFiles;
   }
 
@@ -277,15 +284,25 @@ export class FsWorkspaceTools implements WorkspaceTools {
 }
 
 /**
- * Tracked files plus untracked ones that aren't ignored (.gitignore at any depth,
- * .git/info/exclude, the user's excludes file). Submodules and nested repos are listed as
- * one entry, so their files aren't shown. Fails with a message that hides git's output.
+ * Tracked files plus (with `untracked`) untracked ones that aren't ignored (.gitignore at
+ * any depth, .git/info/exclude, the user's excludes file). Submodules and nested repos are
+ * listed as one entry, so their files aren't shown. Fails with a message that hides git's
+ * output.
  */
-async function gitFileList(root: string, gitPath?: string): Promise<string[]> {
+async function gitFileList(
+  root: string,
+  gitPath: string | undefined,
+  untracked: boolean,
+): Promise<string[]> {
   const git = createGitRunner(root, gitPath);
   let stdout: string;
   try {
-    ({ stdout } = await git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']));
+    ({ stdout } = await git([
+      'ls-files',
+      '-z',
+      '--cached',
+      ...(untracked ? ['--others', '--exclude-standard'] : []),
+    ]));
   } catch (err) {
     throw new Error("Files can't be read: git could not list the repository's files.", {
       cause: err,

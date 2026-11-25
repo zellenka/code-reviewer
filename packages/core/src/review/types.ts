@@ -84,7 +84,9 @@ export type SkipReason =
   | 'snapshot'
   | 'generated'
   | 'configIgnore'
-  | 'noChanges';
+  | 'noChanges'
+  /** A new file git doesn't track, left out by the host (the user chose not to send it). */
+  | 'untracked';
 
 export interface SkippedFile {
   path: string;

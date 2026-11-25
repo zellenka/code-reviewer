@@ -149,7 +149,10 @@ describe('GitCliDiffSource', () => {
     expect(byPath['untracked/u.ts']).toMatchObject({
       status: 'added',
       newContent: 'const u = 3;\n',
+      untracked: true,
     });
+    // The host decides whether to send untracked files, so they are marked; tracked ones aren't.
+    expect(files.filter((f) => f.untracked).map((f) => f.path)).toEqual(['untracked/u.ts']);
   });
 
   it('staged: delete, rename, add and binary, with content from the index', async () => {
@@ -165,12 +168,13 @@ describe('GitCliDiffSource', () => {
     expect(byPath['keep.txt']).toBeUndefined();
   });
 
-  it('branch: everything since the merge-base with main, plus the working tree', async () => {
+  it('branch: everything since the merge-base with main, plus tracked working-tree changes', async () => {
     const { files } = await source.getDiff({ kind: 'branch' });
     const paths = files.map((f) => f.path);
-    expect(paths).toEqual(
-      expect.arrayContaining(['feature.ts', 'staged.ts', 'keep.txt', 'untracked/u.ts']),
-    );
+    expect(paths).toEqual(expect.arrayContaining(['feature.ts', 'staged.ts', 'keep.txt']));
+    // Untracked files aren't part of the branch, so they are never sent.
+    expect(paths).not.toContain('untracked/u.ts');
+    expect(files.some((f) => f.untracked)).toBe(false);
     expect(await source.detectBase()).toBe('main');
     await expect(source.getDiff({ kind: 'branch', base: 'nope' })).rejects.toSatisfy(
       (e) => isDiffSourceError(e) && e.kind === 'noBase',
@@ -260,7 +264,9 @@ describe('GitCliDiffSource', () => {
     fsMock.reads.length = 0;
     try {
       const { files } = await r6Source.getDiff({ kind: 'unstaged' });
-      expect(files).toEqual([{ path: 'big.txt', status: 'added', binary: true, hunks: [] }]);
+      expect(files).toEqual([
+        { path: 'big.txt', status: 'added', binary: true, hunks: [], untracked: true },
+      ]);
       const file = await r6Source.getDiff({ kind: 'file', path: 'big.txt' });
       expect(file.files).toEqual([
         { path: 'big.txt', status: 'modified', binary: true, hunks: [] },
@@ -393,6 +399,58 @@ describe('GitCliDiffSource', () => {
     await expect(source.getDiff({ kind: 'file', path: '../etc/passwd' })).rejects.toSatisfy(
       (e) => isDiffSourceError(e) && e.kind === 'outsideRepo',
     );
+  });
+
+  it('file and selection modes refuse files git ignores; tracked and untracked ones work', async () => {
+    const { root: ri, git: gi } = makeRepo();
+    const put = (rel: string, content: string) => {
+      mkdirSync(path.dirname(path.join(ri, rel)), { recursive: true });
+      writeFileSync(path.join(ri, rel), content);
+    };
+    try {
+      put('.gitignore', '*.local.json\nprivate/\n');
+      put('app.ts', 'export const a = 1;\n');
+      put('forced.local.json', '{"tracked": true}\n');
+      gi('add', '.gitignore', 'app.ts');
+      gi('add', '-f', 'forced.local.json');
+      gi('commit', '-q', '-m', 'init');
+      put('settings.local.json', '{"password": "do-not-send"}\n');
+      put('private/notes.md', 'do-not-send\n');
+      put('-dash.local.json', 'do-not-send\n');
+      put('new.ts', 'export const n = 1;\n');
+      const asked: string[] = [];
+      const ignoring = new GitCliDiffSource({
+        root: ri,
+        unsavedText: (abs) => {
+          asked.push(abs);
+          return undefined;
+        },
+      });
+      for (const rel of ['settings.local.json', 'private/notes.md', '-dash.local.json']) {
+        for (const mode of [
+          { kind: 'file' as const, path: rel },
+          { kind: 'selection' as const, path: rel, startLine: 1, endLine: 1 },
+        ]) {
+          await expect(ignoring.getDiff(mode), `${mode.kind} ${rel}`).rejects.toSatisfy(
+            (e) =>
+              isDiffSourceError(e) &&
+              e.kind === 'ignored' &&
+              e.message === `${rel} is ignored by git, so it isn't reviewed.`,
+          );
+        }
+      }
+      // Refused before the file or the editor's text is read.
+      expect(asked).toEqual([]);
+      expect(fsMock.reads.some((r) => r.includes('settings.local.json'))).toBe(false);
+
+      // Tracked (even when it matches an ignore pattern) and untracked, not ignored files work.
+      for (const rel of ['app.ts', 'forced.local.json', 'new.ts']) {
+        const { files } = await ignoring.getDiff({ kind: 'file', path: rel });
+        expect(files.map((f) => f.path)).toEqual([rel]);
+      }
+    } finally {
+      rmSync(ri, { recursive: true, force: true });
+    }
   });
 
   it('file and selection modes: CRLF is normalized; binary, oversized and missing files', async () => {

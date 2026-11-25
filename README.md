@@ -27,10 +27,10 @@ Free and open source. **Bring your own model:** GitHub Copilot (no key needed) o
 
 2. Or use the commands:
    - **AI Review: Run Review** (uses the panel's choices) / **AI Review: Open Review Panel**
-   - **AI Review: Review Unstaged Changes** (includes new, untracked files)
+   - **AI Review: Review Unstaged Changes** (new, untracked files only if you say so: before anything is sent, it lists them and asks whether to review with or without them, every time)
    - **AI Review: Review Staged Changes**
-   - **AI Review: Review Branch Changes** (everything since the branch left `main`; set `aiReview.baseBranch` to change the base)
-   - **AI Review: Review Current File** / **Review Selection** (also in the editor's right-click menu)
+   - **AI Review: Review Branch Changes** (everything since the branch left `main`, committed or not, in files git tracks; untracked files are never included; set `aiReview.baseBranch` to change the base)
+   - **AI Review: Review Current File** / **Review Selection** (also in the editor's right-click menu; a file git ignores, or one outside a git repository, is refused)
 3. Look at the findings:
    - **Inline comment threads** on the code, with buttons to apply or preview the fix, mark resolved, or dismiss.
    - The **Findings** view in the AI Review sidebar, below the panel: a summary of the change (walkthrough + top risks), findings grouped by file (click to jump to the code), and review details (model, tokens, cost, dropped findings).
@@ -84,14 +84,14 @@ The repository file decides _what_ is reviewed and reported, but it can only tig
 - **Your code goes only to the provider you pick** — GitHub Copilot or Anthropic — and is covered by that provider's data terms. There is no server of ours in between.
 - **No telemetry.**
 - Your Anthropic API key is stored in VS Code's encrypted Secret Storage, never in `settings.json`.
-- Files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_rsa*`, …), lockfiles and build output are never sent.
+- Files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_rsa*`, …), lockfiles and build output are never sent. Neither are files git ignores, nor untracked files unless you confirm them for an unstaged review.
 - Repository content is treated as untrusted. The reviewer can only read files inside the repository; it can't write files or run commands. In agentic mode the model chooses which files to read, but secret files and `.git/` are refused, and everything it reads is redacted like the diff.
 
 ### Data flow
 
 When you run a review, this is exactly what happens:
 
-1. The extension asks git for the diff of the scope you chose (in your repository, on your machine).
+1. The extension asks git for the diff of the scope you chose (in your repository, on your machine). Untracked files (new files git doesn't track yet, such as notes or a database dump) are only part of an unstaged review, and only when you choose **Review with Them** in the question that lists them; otherwise they are listed as skipped (`untracked`) for you, while the model isn't even told their names (the summary request only counts them), and in agentic mode it can't read them either. Branch reviews never include them. **Review Current File** and **Review Selection** refuse a file git ignores (a local config, say) and send nothing.
 2. Files are filtered out **before anything leaves your machine**: secrets (`.env*`, `*.pem`, `*.key`, `*.p12`, `id_rsa*`, and credential files such as `.aws/credentials`, kubeconfig, `credentials.json`, Terraform `*.tfvars` and state, `appsettings.<Environment>.json` and `local.settings.json`, …), lockfiles, build output (`dist/`, `build/`, …), minified files, snapshots, generated files, binaries, deleted files, and the generated, vendored and lock files your `.codereview.yml` `ignore:` list names (any file it names, with `aiReview.allowRepoConfigToRelax`).
 3. In the remaining changes, known secret formats are replaced with `[REDACTED]`: cloud and API keys (AWS, GitHub, Anthropic, OpenAI, Slack, Google, Stripe, npm), private key blocks, JWTs, passwords in connection strings, and values assigned to names like `password`, `secret`, `token` or `api_key` (also in XML elements and attributes, .NET `<add key=… value=…>` settings and PHP `define(…)` and arrays). Turn on `aiReview.redactHighEntropyStrings` to also redact long random-looking strings.
 4. The changed lines, the enclosing function or class of each change (redacted the same way), your repository rules files, and the review instructions are sent to the provider you selected — and nowhere else. In agentic mode, the files the model asks to read (same filtering and redaction) are sent too.
