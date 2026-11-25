@@ -122,6 +122,99 @@ describe('filterFiles', () => {
     expect(isSecretPath('src/env.ts')).toBe(false);
   });
 
+  // Where cloud, infra and app tooling keep credentials: never sent, at any depth, in any case.
+  const CREDENTIAL_FILES = [
+    'credentials.json',
+    'config/gcloud/application_default_credentials.json',
+    'keys/service-account-prod.json',
+    'firebase/serviceAccountKey.json',
+    '.aws/credentials',
+    'infra/.aws/config',
+    '.kube/config',
+    'infra/.kube/config',
+    'kubeconfig',
+    'clusters/kubeconfig.yaml',
+    'clusters/prod.kubeconfig',
+    '.docker/config.json',
+    'ci/.dockercfg',
+    '.m2/settings.xml',
+    'ci/.m2/settings.xml',
+    'settings-security.xml',
+    'terraform.tfvars',
+    'deploy/prod.tfvars',
+    'deploy/prod.auto.tfvars.json',
+    'terraform.tfstate',
+    'infra/terraform.tfstate.backup',
+    'credentials.tfrc.json',
+    'local.settings.json',
+    'src/Functions/local.settings.json',
+    'appsettings.Development.json',
+    'src/Api/appsettings.Production.json',
+    'secrets.yaml',
+    'config/secrets.yml',
+    'secrets.json',
+    '.streamlit/secrets.toml',
+    '_netrc',
+    '.pgpass',
+    'web/.htpasswd',
+    'public/wp-config.php',
+    'Deploy/prod.PublishSettings',
+    'vpn/office.ovpn',
+    'ios/AuthKey_ABC123.p8',
+  ];
+  const upper = (p: string) => p.toUpperCase();
+
+  it('skips the credential files of cloud, infra and app tooling, in any letter case', async () => {
+    const paths = [...CREDENTIAL_FILES, ...CREDENTIAL_FILES.map(upper)];
+    const { files, skipped } = filterFiles(paths.map((p) => file(p)));
+    expect(files.map((f) => f.path)).toEqual([]);
+    expect(skipped).toEqual(paths.map((path) => ({ path, reason: 'secret' })));
+    for (const p of paths) expect(isProtectedPath(p), p).toBe(true);
+    // Other names Windows opens them by.
+    for (const p of [
+      'deploy/prod.tfvars.',
+      'infra\\.kube.\\config',
+      'local.settings.json::$DATA',
+    ]) {
+      expect(isProtectedPath(p), p).toBe(true);
+    }
+    // The rules loader refuses them too.
+    const read = async (p: string) =>
+      p === 'deploy/prod.tfvars' ? 'region = "LEAKED_TFVARS_VALUE"' : undefined;
+    const loaded = await loadRepoRules(read, { rules: 'deploy/prod.tfvars' });
+    expect(JSON.stringify(loaded)).not.toContain('LEAKED');
+  });
+
+  it('still reviews files that only look like credential files', () => {
+    const lookalikes = [
+      'src/credentials.ts',
+      'src/aws/credentials.ts',
+      'credentials.example.json',
+      'docs/kubeconfig.md',
+      'src/kube/config.ts',
+      '.kube/config.example',
+      'docs/aws/config.md',
+      'settings.xml',
+      'app/src/main/res/xml/settings.xml',
+      'settings.xml.example',
+      'pom.xml',
+      'appsettings.json',
+      'src/Api/appsettings.json',
+      'variables.tf',
+      'terraform.tfvars.example',
+      'src/secrets.ts',
+      'charts/app/templates/secret.yaml',
+      'local.settings.example.json',
+      'wp-config-sample.php',
+      'src/service-account.ts',
+      '.docker/daemon.json',
+    ];
+    const { files, skipped } = filterFiles(lookalikes.map((p) => file(p)));
+    expect(skipped).toEqual([]);
+    expect(files.map((f) => f.path)).toEqual(lookalikes);
+    for (const p of lookalikes) expect(isProtectedPath(p), p).toBe(false);
+  });
+
   // One predicate for every sender (A1): the diff filter, the agent tools and the rules loader.
   it('knows the other names Windows opens a secret file or .git/ by', async () => {
     const blocked = [
