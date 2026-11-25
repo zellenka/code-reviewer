@@ -1,4 +1,5 @@
 import picomatch from 'picomatch';
+import type { ReviewConfig } from '../config/schema';
 import type { FileDiff } from '../diff/types';
 import type { SkipReason, SkippedFile } from './types';
 
@@ -73,6 +74,24 @@ const BUILT_IN: { reason: SkipReason; globs: string[] }[] = [
 ];
 
 /**
+ * Generated and vendored code by convention, reviewed unless the repository's `ignore:`
+ * skips it. With the built-in noise above and files whose header says they are generated,
+ * these are the only files `ignore:` may skip (A2): leaving them out only keeps reviews
+ * quiet, while the repository can't hide its own source from a review.
+ */
+const GENERATED_OR_VENDORED = [
+  '**/vendor/**',
+  '**/generated/**',
+  '**/__generated__/**',
+  '*.generated.*',
+  '*.pb.go',
+  '*.pb.cc',
+  '*.pb.h',
+  '*_pb2.py',
+  '*_pb2_grpc.py',
+];
+
+/**
  * gitignore-like matching: a pattern without `/` matches the file name at any depth,
  * a trailing `/` means "everything in this directory".
  */
@@ -89,6 +108,11 @@ const builtInMatchers = BUILT_IN.map(({ reason, globs }) => ({
   // Secrets are matched case-insensitively (`.ENV`, `KEY.PEM`).
   match: compileGlobs(globs, reason === 'secret'),
 }));
+
+const generatedOrVendoredPath = compileGlobs([
+  ...BUILT_IN.filter((b) => b.reason !== 'secret').flatMap((b) => b.globs),
+  ...GENERATED_OR_VENDORED,
+]);
 
 /**
  * The file Windows opens for `path` (with `/`): `.` and `..` steps resolved, and in each name
@@ -128,32 +152,74 @@ const GENERATED_RE = /@generated\b|^\W*Code generated .* DO NOT EDIT\.?$|<auto-g
 /** Lines this long mean minified or machine-written content. */
 const MINIFIED_LINE_LENGTH = 3000;
 
+/**
+ * A generated, vendored or lock file: by path (build output, minified files, snapshots,
+ * `vendor/`, `generated/`, `*.pb.go`, …) or, for a file of the diff, by a generated-code
+ * header. The only kind of file the repository's `ignore:` may skip (A2).
+ */
+export function isGeneratedOrVendored(file: string | FileDiff): boolean {
+  const path = (typeof file === 'string' ? file : file.path).replace(/\\/g, '/');
+  return generatedOrVendoredPath(path) || (typeof file !== 'string' && isGenerated(file));
+}
+
+/** The repository's `ignore:` and whether it may skip any file (`ReviewConfig`). */
+export type RepoIgnore = Pick<ReviewConfig, 'ignore' | 'ignoreAnyFile'>;
+
+/**
+ * Paths the repository's `ignore:` hides from the agent tools, as from the diff: generated
+ * and vendored ones (by path), others only with `ignoreAnyFile`. Undefined when none.
+ */
+export function repoIgnoreBlocks(config: RepoIgnore): ((path: string) => boolean) | undefined {
+  if (!config.ignore.length) return undefined;
+  const match = compileGlobs(config.ignore);
+  return (path) => match(path) && (!!config.ignoreAnyFile || isGeneratedOrVendored(path));
+}
+
+/** A file `ignore:` matched although it isn't generated, vendored or a lock file. */
+export interface RelaxedIgnore {
+  path: string;
+  /** The first pattern of `ignore:` that matched it. */
+  pattern: string;
+}
+
 export interface FilterResult {
   files: FileDiff[];
   skipped: SkippedFile[];
+  /**
+   * Files that would be reviewed but for the repository's `ignore:`, and aren't generated,
+   * vendored or lock files: skipped with `ignoreAnyFile`, else reviewed (A2). Either way
+   * the review says so (`reviewSettingsWarnings`).
+   */
+  relaxedIgnore: RelaxedIgnore[];
 }
 
 /**
- * Splits a diff into files to review and files to skip (with the reason).
- * `ignore` globs come from `.codereview.yml`. A trailing `/` means "this directory".
+ * Splits a diff into files to review and files to skip (with the reason). `ignore` globs
+ * come from `.codereview.yml` (a trailing `/` means "this directory"); they skip generated,
+ * vendored and lock files, and other files only with `ignoreAnyFile` (A2).
  */
-export function filterFiles(files: FileDiff[], ignore: string[] = []): FilterResult {
-  const configMatch = ignore.length ? compileGlobs(ignore) : undefined;
+export function filterFiles(files: FileDiff[], config: RepoIgnore = { ignore: [] }): FilterResult {
+  const patterns = config.ignore.map((g) => ({ pattern: g, match: compileGlobs([g]) }));
   const kept: FileDiff[] = [];
   const skipped: SkippedFile[] = [];
+  const relaxedIgnore: RelaxedIgnore[] = [];
 
   for (const file of files) {
-    const reason = skipReason(file, configMatch);
+    const pattern = patterns.find((p) => p.match(file.path))?.pattern;
+    let ignored = false;
+    if (pattern !== undefined) {
+      const permitted = isGeneratedOrVendored(file);
+      ignored = permitted || !!config.ignoreAnyFile;
+      if (!permitted && !skipReason(file, false)) relaxedIgnore.push({ path: file.path, pattern });
+    }
+    const reason = skipReason(file, ignored);
     if (reason) skipped.push({ path: file.path, reason });
     else kept.push(file);
   }
-  return { files: kept, skipped };
+  return { files: kept, skipped, relaxedIgnore };
 }
 
-function skipReason(
-  file: FileDiff,
-  configMatch: ((path: string) => boolean) | undefined,
-): SkipReason | undefined {
+function skipReason(file: FileDiff, ignored: boolean): SkipReason | undefined {
   // Secrets first, so a deleted .env isn't even listed as "deleted".
   if (isSecretPath(file.path) || (file.oldPath && isSecretPath(file.oldPath))) return 'secret';
   if (file.status === 'deleted') return 'deleted';
@@ -162,7 +228,7 @@ function skipReason(
   for (const { reason, match } of builtInMatchers.slice(1)) {
     if (match(file.path)) return reason;
   }
-  if (configMatch?.(file.path)) return 'configIgnore';
+  if (ignored) return 'configIgnore';
   // Pure deletions are kept: removing a guard can be a bug worth reporting.
   if (!file.hunks.some((h) => h.lines.some((l) => l.kind !== 'ctx'))) return 'noChanges';
   if (isGenerated(file)) return 'generated';

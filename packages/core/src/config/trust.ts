@@ -21,34 +21,51 @@ export interface UserReviewSettings {
   mode?: ReviewConfig['review']['mode'];
   /** Overrides `review.verify`. */
   verify?: boolean;
+  /**
+   * The repository's file may also make the review see less (for repositories the user
+   * trusts). It is then applied, with a warning, instead of refused.
+   */
+  allowRepoConfigToRelax?: boolean;
 }
 
 export interface ResolvedReviewConfig {
   config: ReviewConfig;
   /**
-   * How the repository's file makes the review see less than the defaults and the user's
-   * own settings would, as user-facing warnings. Pass them as `ReviewOptions.relaxed` so
-   * every review result says so.
+   * How the repository's file would make the review see less than the defaults and the
+   * user's own settings, and whether that was applied, as user-facing warnings. Pass them
+   * as `ReviewOptions.relaxed` so every review result says so.
    */
   relaxed: string[];
 }
 
 /**
  * The one place where `.codereview.yml` meets the user's settings (A2). The file comes from
- * the repository, and the change under review can edit it, so it may add scrutiny freely
- * (stricter thresholds, more categories, agentic mode, the verify pass) but not remove it
- * unseen:
- * - higher thresholds and turned-off categories are applied and listed in `relaxed`;
- * - no categories at all is refused (the defaults are used), as no review could report anything;
- * - `ignore:` is reported per review, for the files it left out (`reviewSettingsWarnings`).
- * The user's thresholds can only tighten the result; their mode and verify choices win.
+ * the repository, and the change under review can edit it, so it can only tighten the
+ * review: it may add scrutiny freely (stricter thresholds, more categories, agentic mode,
+ * the verify pass), but what would remove some is not applied, and `relaxed` says so:
+ * - higher thresholds than the defaults and the user's own: the baseline is kept;
+ * - turned-off default categories: they are reviewed (added ones are kept);
+ * - `ignore:` skips only generated, vendored and lock files (`filterFiles`); the other
+ *   files it matches are reviewed and named per review (`reviewSettingsWarnings`);
+ * - no categories at all: refused (the defaults are used).
+ * With `user.allowRepoConfigToRelax` all of it is applied instead (but no categories at
+ * all), still with the warnings. The user's thresholds can only tighten the result; their
+ * mode and verify choices win.
  */
 export function resolveReviewConfig(
   repo: ReviewConfig,
   user: UserReviewSettings = {},
 ): ResolvedReviewConfig {
+  const allow = user.allowRepoConfigToRelax === true;
   const config = applyUserSettings(repo, user);
   const relaxed: string[] = [];
+  /** One warning: `applied` when it is, else `refused` ("would …"). */
+  const warn = (applied: string, refused: string) =>
+    relaxed.push(
+      allow
+        ? `The repository's ${CONFIG_FILE_NAME} ${applied}.`
+        : `Not applied: the repository's ${CONFIG_FILE_NAME} ${refused}.`,
+    );
 
   if (!config.review.categories.length) {
     config.review.categories = [...DEFAULT_CONFIG.review.categories];
@@ -58,23 +75,27 @@ export function resolveReviewConfig(
   }
   const off = DEFAULT_CONFIG.review.categories.filter((c) => !config.review.categories.includes(c));
   if (off.length) {
-    relaxed.push(
-      `The repository's ${CONFIG_FILE_NAME} turns off the ${off.join(', ')} ${off.length === 1 ? 'category' : 'categories'}.`,
-    );
+    const categories = `the ${off.join(', ')} ${off.length === 1 ? 'category' : 'categories'}`;
+    warn(`turns off ${categories}`, `would turn off ${categories}`);
+    if (!allow) config.review.categories.push(...off);
   }
 
   // What the user would see without the repository's file.
   const baseline = applyUserSettings(DEFAULT_CONFIG, user);
   if (severityRank(config.severityThreshold) > severityRank(baseline.severityThreshold)) {
-    relaxed.push(
-      `The repository's ${CONFIG_FILE_NAME} hides findings below ${config.severityThreshold} severity (instead of below ${baseline.severityThreshold}).`,
-    );
+    const what = `findings below ${config.severityThreshold} severity (instead of below ${baseline.severityThreshold})`;
+    warn(`hides ${what}`, `would hide ${what}`);
+    if (!allow) config.severityThreshold = baseline.severityThreshold;
   }
   if (config.confidenceThreshold > baseline.confidenceThreshold) {
-    relaxed.push(
-      `The repository's ${CONFIG_FILE_NAME} hides findings with confidence below ${config.confidenceThreshold} (instead of ${baseline.confidenceThreshold}).`,
-    );
+    const what = `findings with confidence below ${config.confidenceThreshold} (instead of ${baseline.confidenceThreshold})`;
+    warn(`hides ${what}`, `would hide ${what}`);
+    if (!allow) config.confidenceThreshold = baseline.confidenceThreshold;
   }
+
+  // Only set when it changes something, so the setting alone keeps the snapshot key.
+  delete config.ignoreAnyFile;
+  if (allow && config.ignore.length) config.ignoreAnyFile = true;
   return { config, relaxed };
 }
 

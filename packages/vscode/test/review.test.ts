@@ -416,26 +416,34 @@ suite('Review', () => {
     }
   });
 
-  test('.codereview.yml thresholds apply, and invalid config falls back to defaults', async () => {
+  test('.codereview.yml thresholds apply when allowed, and invalid config falls back to defaults', async () => {
     write('.codereview.yml', 'severityThreshold: critical\n');
     api.configs.forget(root);
-    let result = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
-      root,
-      path: 'src/calc.ts',
-      silent: true,
-    });
-    assert.strictEqual(result.findings?.length, 0);
-    assert.deepStrictEqual(result.result?.dropped, [{ reason: 'belowSeverity', count: 1 }]);
-
-    write('.codereview.yml', 'severityThreshold: [broken\n');
-    api.configs.forget(root);
-    result = await vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
-      root,
-      path: 'src/calc.ts',
-      silent: true,
-    });
-    assert.strictEqual(result.ok, true);
+    const config = vscode.workspace.getConfiguration('aiReview');
+    const review = () =>
+      vscode.commands.executeCommand<ReviewCommandResult>('aiReview.reviewFile', {
+        root,
+        path: 'src/calc.ts',
+        silent: true,
+      });
+    // The repository can only tighten the review: a higher threshold is not applied (A2).
+    let result = await review();
     assert.strictEqual(result.findings?.length, 1);
+    assert.match(result.message ?? '', /Not applied: .* would hide findings below critical/);
+    try {
+      await config.update('allowRepoConfigToRelax', true, vscode.ConfigurationTarget.Global);
+      result = await review();
+      assert.strictEqual(result.findings?.length, 0);
+      assert.deepStrictEqual(result.result?.dropped, [{ reason: 'belowSeverity', count: 1 }]);
+
+      write('.codereview.yml', 'severityThreshold: [broken\n');
+      api.configs.forget(root);
+      result = await review();
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.findings?.length, 1);
+    } finally {
+      await config.update('allowRepoConfigToRelax', undefined, vscode.ConfigurationTarget.Global);
+    }
   });
 
   test('review current file finds the repo from the file path alone', async () => {
@@ -1660,7 +1668,7 @@ suite('Review', () => {
       assert.strictEqual(result.ok, true, result.message);
       assert.match(
         result.message ?? '',
-        /This change edits the review settings \(\.codereview\.yml\), which this review used\. Check those changes yourself\. This change edits the review rules \(AGENTS\.md\), which this review used\. Check those changes yourself\. The repository's \.codereview\.yml hides findings below major severity \(instead of below minor\)\.$/,
+        /This change edits the review settings \(\.codereview\.yml\), which this review used\. Check those changes yourself\. This change edits the review rules \(AGENTS\.md\), which this review used\. Check those changes yourself\. Not applied: the repository's \.codereview\.yml would hide findings below major severity \(instead of below minor\)\.$/,
       );
       const panel = await api.panel.snapshot();
       assert.strictEqual(panel.last?.level, 'warn');
@@ -1686,32 +1694,42 @@ suite('Review', () => {
     }
   });
 
-  test('what the repository config turns down is shown with every review (A2)', async () => {
+  test('what the repository config would turn down is shown with every review (A2)', async () => {
     write('.codereview.yml', 'severityThreshold: major\n');
     api.configs.forget(root);
     const config = vscode.workspace.getConfiguration('aiReview');
-    try {
-      const staged = await vscode.commands.executeCommand<ReviewCommandResult>(
+    const review = async () => {
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
         'aiReview.reviewStaged',
         { root, silent: true },
       );
-      assert.strictEqual(staged.ok, true, staged.message);
+      assert.strictEqual(result.ok, true, result.message);
+      return result.message ?? '';
+    };
+    try {
+      // The repository can only tighten the review: not applied, and said so.
       assert.match(
-        staged.message ?? '',
-        /The repository's \.codereview\.yml hides findings below major severity \(instead of below minor\)\.$/,
+        await review(),
+        /Not applied: the repository's \.codereview\.yml would hide findings below major severity \(instead of below minor\)\.$/,
       );
       assert.strictEqual((await api.panel.snapshot()).last?.level, 'warn');
 
+      // Unless the user lets it relax the review: applied, and said so.
+      await config.update('allowRepoConfigToRelax', true, vscode.ConfigurationTarget.Global);
+      const relaxed = await review();
+      assert.match(
+        relaxed,
+        /The repository's \.codereview\.yml hides findings below major severity \(instead of below minor\)\.$/,
+      );
+      assert.doesNotMatch(relaxed, /Not applied/);
+
       // The user hides as much themselves: nothing is turned down for them.
       await config.update('severityThreshold', 'major', vscode.ConfigurationTarget.Global);
-      const own = await vscode.commands.executeCommand<ReviewCommandResult>(
-        'aiReview.reviewStaged',
-        { root, silent: true },
-      );
-      assert.strictEqual(own.ok, true, own.message);
-      assert.doesNotMatch(own.message ?? '', /hides findings/);
+      const own = await review();
+      assert.doesNotMatch(own, /hides findings|would hide/);
       assert.strictEqual((await api.panel.snapshot()).last?.level, 'info');
     } finally {
+      await config.update('allowRepoConfigToRelax', undefined, vscode.ConfigurationTarget.Global);
       await config.update('severityThreshold', undefined, vscode.ConfigurationTarget.Global);
     }
   });

@@ -5,7 +5,7 @@ import type { UnifiedDiff, WorkspaceTools } from '../diff/types';
 import { noopLogger, type Logger } from '../logger';
 import type { LLMProvider, ModelInfo } from '../provider/types';
 import { emptyUsage } from '../provider/usage';
-import { compileGlobs } from './filter';
+import { repoIgnoreBlocks } from './filter';
 import type { ReviewSnapshot } from './incremental';
 import { addSnapshot, addSummary, checkFindings, mergeCarried } from './postprocess';
 import { prepareParts, toPreparedDiff, type PreparedDiff } from './prepare';
@@ -138,13 +138,14 @@ export async function runReview(
     logger.info(
       `reviewing ${files.length} file(s) in ${chunks.length} request(s) with ${model.id} (${mode}); skipped ${skipped.length}`,
     );
+    const isBlocked = repoIgnoreBlocks(config);
     const agent =
       mode === 'agentic'
         ? {
             tools: createReviewTools(options.workspace!, {
               redactHighEntropy: options.redactHighEntropy ?? false,
               // Files the repo's `ignore:` hides from the diff stay hidden from the tools.
-              ...(config.ignore.length ? { isBlocked: compileGlobs(config.ignore) } : {}),
+              ...(isBlocked ? { isBlocked } : {}),
             }) as AgentTool<never>[],
             limits: prepared.agentLimits,
           }
@@ -165,7 +166,7 @@ export async function runReview(
     if (options.rules?.sources.length) result.rules = options.rules.sources.map((s) => s.path);
     // The whole diff, not the incremental part: the warning holds for every re-review.
     const warnings = [
-      ...reviewSettingsWarnings(diffPrepared.diff.files, config, skipped),
+      ...reviewSettingsWarnings(diffPrepared.diff.files, config, diffPrepared.relaxedIgnore),
       ...(options.relaxed ?? []),
     ];
     if (warnings.length) result.warnings = warnings;

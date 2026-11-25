@@ -91,22 +91,41 @@ describe('agentic review', () => {
     ]);
   });
 
-  it('keeps files in the ignore list unreadable for the agent', async () => {
-    const provider = new MockProvider({
-      script: [
-        mockToolCall('read_file', { path: 'src/config.ts' }),
-        mockToolCall(REPORT_TOOL_NAME, { findings: [] }),
-      ],
-    });
-    await runReview(DIFF, {
-      provider,
-      model: MODEL,
-      config: { ...AGENTIC, ignore: ['src/config.ts'] },
-      workspace: ws,
-    });
-    const second = JSON.stringify(provider.requests[1]!.messages);
-    expect(second).not.toContain('Request timeout in seconds');
-    expect(second).toMatch(/can't be read/);
+  it('keeps files the ignore list skips unreadable for the agent', async () => {
+    const read = async (config: ReviewConfig, path: string) => {
+      const provider = new MockProvider({
+        script: [
+          mockToolCall('read_file', { path }),
+          mockToolCall(REPORT_TOOL_NAME, { findings: [] }),
+        ],
+      });
+      const files = { ...repo, 'vendor/lib.ts': '// Vendored helper.\nexport {}\n' };
+      await runReview(DIFF, {
+        provider,
+        model: MODEL,
+        config,
+        workspace: {
+          ...ws,
+          listFiles: async () => Object.keys(files),
+          realPath: async (p) => p,
+          readFile: async (p) => files[p as keyof typeof files] ?? '',
+        },
+      });
+      return JSON.stringify(provider.requests[1]!.messages);
+    };
+    // Vendored code may be ignored; other files only when the user allows it (A2).
+    expect(await read({ ...AGENTIC, ignore: ['vendor/'] }, 'vendor/lib.ts')).toMatch(
+      /can't be read/,
+    );
+    expect(await read({ ...AGENTIC, ignore: ['src/config.ts'] }, 'src/config.ts')).toContain(
+      'Request timeout in seconds',
+    );
+    const trusted = await read(
+      { ...AGENTIC, ignore: ['src/config.ts'], ignoreAnyFile: true },
+      'src/config.ts',
+    );
+    expect(trusted).not.toContain('Request timeout in seconds');
+    expect(trusted).toMatch(/can't be read/);
   });
 
   it('counts parts stopped by a limit and keeps their findings', async () => {
@@ -256,21 +275,66 @@ describe('repo rules', () => {
       ],
     };
     // Warned about even when `ignore:` keeps them out of the review itself.
-    const config = { ...DEFAULT_CONFIG, ignore: ['.codereview.yml', '*.md'] };
+    const config = { ...DEFAULT_CONFIG, ignore: ['.codereview.yml', '*.md'], ignoreAnyFile: true };
     const result = await runReview(diff, { provider, model: MODEL, config });
     expect(result.warnings).toEqual([
       'This change edits the review settings (.codereview.yml), which this review used. Check those changes yourself.',
       'This change edits the review rules (AGENTS.md, .github/copilot-instructions.md), which this review used. Check those changes yourself.',
-      "Not reviewed because the repository's .codereview.yml ignores them: .codereview.yml, AGENTS.md, docs/old.md.",
+      // docs/old.md is only renamed: it would not be reviewed anyway.
+      "Not reviewed because the repository's .codereview.yml ignores them: .codereview.yml, AGENTS.md.",
     ]);
   });
 
-  it("name the files of the change that the repository's ignore: left out (A2)", async () => {
+  it("review the files the repository's ignore: may not skip, and say so (A2)", async () => {
+    const provider = new MockProvider({
+      fallback: mockToolCall(REPORT_TOOL_NAME, { findings: [] }),
+    });
+    const files = [
+      ...['login', 'token', 'session', 'keys'].map((n) => addedFileDiff(`src/auth/${n}.ts`, 'x\n')),
+      addedFileDiff('docs/a.ts', 'x\n'),
+      addedFileDiff('vendor/lib.ts', 'x\n'),
+    ];
+    const config = { ...DEFAULT_CONFIG, ignore: ['src/auth/**', 'vendor/', 'docs/'] };
+    const result = await runReview(
+      { files: [...DIFF.files, ...files] },
+      {
+        provider,
+        model: MODEL,
+        config,
+      },
+    );
+    expect(result.reviewedFiles).toEqual([
+      'src/client.ts',
+      'src/auth/login.ts',
+      'src/auth/token.ts',
+      'src/auth/session.ts',
+      'src/auth/keys.ts',
+      'docs/a.ts',
+    ]);
+    expect(result.skipped).toEqual([{ path: 'vendor/lib.ts', reason: 'configIgnore' }]);
+    expect(result.warnings).toEqual([
+      "Not applied: the repository's .codereview.yml ignores src/auth/**, docs/, which would skip src/auth/login.ts, src/auth/token.ts, src/auth/session.ts (+2 more). It may only ignore generated, vendored and lock files.",
+    ]);
+    // Generated, vendored and lock files alone: skipped without a warning.
+    const vendored = await runReview(
+      { files: [...DIFF.files, addedFileDiff('vendor/lib.ts', 'x\n')] },
+      { provider, model: MODEL, config },
+    );
+    expect(vendored.reviewedFiles).toEqual(['src/client.ts']);
+    expect(vendored.warnings).toBeUndefined();
+  });
+
+  it("name the files of the change that the repository's ignore: left out, when allowed (A2)", async () => {
     const provider = new MockProvider({
       fallback: mockToolCall(REPORT_TOOL_NAME, { findings: [] }),
     });
     const files = ['a', 'b', 'c', 'd', 'e'].map((n) => addedFileDiff(`gen/${n}.ts`, 'x\n'));
-    const config = { ...DEFAULT_CONFIG, ignore: ['gen/'] };
+    const config = {
+      ...DEFAULT_CONFIG,
+      ignore: ['gen/', 'vendor/'],
+      ignoreAnyFile: true,
+    };
+    files.push(addedFileDiff('vendor/lib.ts', 'x\n'));
     const result = await runReview(
       { files: [...DIFF.files, ...files] },
       {

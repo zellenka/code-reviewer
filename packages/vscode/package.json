@@ -305,6 +305,12 @@
           "scope": "application",
           "markdownDescription": "Hide findings below this confidence (0–1). Can only make the repository's threshold stricter. `0` = use the repository setting (default 0.6). User settings only."
         },
+        "aiReview.allowRepoConfigToRelax": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "markdownDescription": "Let a repository's `.codereview.yml` make reviews see less: higher thresholds than the defaults and yours, fewer categories, and `ignore:` for any file. Off: it can only add scrutiny, and the review says what was not applied (`ignore:` still skips generated, vendored and lock files). Turn on only for repositories you trust; applies to every repository. User settings only."
+        },
         "aiReview.redactHighEntropyStrings": {
           "type": "boolean",
           "default": false,

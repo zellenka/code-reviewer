@@ -143,6 +143,7 @@ describe('settings a repository cannot change (A2)', () => {
         'anthropic.refusalFallback',
         'severityThreshold',
         'confidenceThreshold',
+        'allowRepoConfigToRelax',
         'redactHighEntropyStrings',
         'verifyFindings',
         'incrementalReview',
@@ -187,6 +188,28 @@ describe('settings a repository cannot change (A2)', () => {
       severityThreshold: 'major',
       confidenceThreshold: 0.7,
     });
+  });
+
+  it('only the user can let the repository config relax the review', () => {
+    expect(
+      userReviewSettings(
+        settings({
+          allowRepoConfigToRelax: {
+            defaultValue: false,
+            workspaceValue: true,
+            workspaceFolderValue: true,
+          },
+        }),
+      ),
+    ).toEqual({});
+    expect(
+      userReviewSettings(
+        settings({ allowRepoConfigToRelax: { defaultValue: false, globalValue: true } }),
+      ),
+    ).toEqual({ allowRepoConfigToRelax: true });
+    expect(
+      userReviewSettings(settings({ allowRepoConfigToRelax: { globalValue: 'yes' } })),
+    ).toEqual({});
   });
 
   it('"auto" and junk leave mode and verify to the repository', () => {

@@ -270,14 +270,14 @@ describe('runReview', () => {
         addedFileDiff('.env', 'DB_PASSWORD=supersecretvalue\n'),
         addedFileDiff('config/prod.pem', '-----BEGIN PRIVATE KEY-----\nMIIabc\n'),
         addedFileDiff('pnpm-lock.yaml', 'lockfileVersion: 9\nUNIQUE_LOCK_MARKER\n'),
-        addedFileDiff('gen/api.ts', 'UNIQUE_IGNORED_MARKER\n'),
+        addedFileDiff('generated/api.ts', 'UNIQUE_IGNORED_MARKER\n'),
         addedFileDiff(
           'src/aws.ts',
           'export const key = "AKIAIOSFODNN7EXAMPLE";\nexport const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";\n',
         ),
       ],
     };
-    const config = { ...DEFAULT_CONFIG, ignore: ['gen/'] };
+    const config = { ...DEFAULT_CONFIG, ignore: ['generated/'] };
     const provider = new MockProvider({ fallback: report([]) });
     const result = await runReview(diff, { provider, model: MODEL, config });
     const payload = sent(provider);

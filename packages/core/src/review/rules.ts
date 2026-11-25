@@ -6,10 +6,9 @@ import { normalizeEol } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
 import { noopLogger, type Logger } from '../logger';
 import { estimateTokens, truncateToTokens } from '../provider/usage';
-import { isProtectedPath } from './filter';
+import { isProtectedPath, type RelaxedIgnore } from './filter';
 import { neutralizeTags } from './prompt';
 import { redactText } from './redact';
-import type { SkippedFile } from './types';
 
 /** Rules file read when `.codereview.yml` doesn't name one. */
 export const DEFAULT_RULES_FILE = '.codereview.md';
@@ -130,14 +129,15 @@ ${blocks.join('\n\n')}`;
 
 /**
  * The settings and rules are read from the working tree, so the change under review can
- * relax its own review (`ignore:`, thresholds, fewer categories, softer rules). Says so
- * when the diff touches any of those files, by path, ignored or not. Also names the files
- * of the change that `ignore:` left out (A2): the repository may hide them, not unseen.
+ * edit its own review settings and rules. Says so when the diff touches any of those
+ * files, by path, ignored or not. Also names the files of the change that `ignore:` would
+ * leave out although they aren't generated, vendored or lock files (`relaxedIgnore` from
+ * `filterFiles`, A2): reviewed anyway, or with `ignoreAnyFile` left out, never unseen.
  */
 export function reviewSettingsWarnings(
   files: readonly Pick<FileDiff, 'path' | 'oldPath'>[],
-  config: Pick<ReviewConfig, 'rules'>,
-  skipped: readonly SkippedFile[] = [],
+  config: Pick<ReviewConfig, 'rules' | 'ignoreAnyFile'>,
+  relaxedIgnore: readonly RelaxedIgnore[] = [],
 ): string[] {
   const touched = (target: string) => {
     const lower = target.toLowerCase();
@@ -160,12 +160,14 @@ export function reviewSettingsWarnings(
       `This change edits the review rules (${rules.join(', ')}), which this review used. Check those changes yourself.`,
     );
   }
-  const ignored = skipped.filter((s) => s.reason === 'configIgnore').map((s) => s.path);
-  if (ignored.length) {
-    const shown = ignored.slice(0, 3).join(', ');
-    const more = ignored.length > 3 ? ` (+${ignored.length - 3} more)` : '';
+  if (relaxedIgnore.length) {
+    const list = (items: string[]) =>
+      `${items.slice(0, 3).join(', ')}${items.length > 3 ? ` (+${items.length - 3} more)` : ''}`;
+    const paths = list(relaxedIgnore.map((r) => r.path));
     warnings.push(
-      `Not reviewed because the repository's ${CONFIG_FILE_NAME} ignores them: ${shown}${more}.`,
+      config.ignoreAnyFile
+        ? `Not reviewed because the repository's ${CONFIG_FILE_NAME} ignores them: ${paths}.`
+        : `Not applied: the repository's ${CONFIG_FILE_NAME} ignores ${list([...new Set(relaxedIgnore.map((r) => r.pattern))])}, which would skip ${paths}. It may only ignore generated, vendored and lock files.`,
     );
   }
   return warnings;

@@ -66,9 +66,9 @@ version: 1
 severityThreshold: minor # critical|major|minor|nit — findings below are hidden
 confidenceThreshold: 0.6 # 0..1
 onlyChangedLines: true # drop findings outside changed lines
-ignore: # globs, added to the built-in ignores
+ignore: # globs for generated, vendored and lock files, added to the built-in ignores
   - '**/*.generated.ts'
-  - 'docs/'
+  - 'vendor/'
 language: en # language of the review comments: a name or tag such as en, pt-BR or Simplified Chinese
 rules: .codereview.md # review guidelines (AGENTS.md and .github/copilot-instructions.md are also read)
 review:
@@ -77,7 +77,7 @@ review:
   verify: false # true: double-check each finding with one extra request per file
 ```
 
-The repository file decides _what_ is reviewed and reported, but it can't make a review see less without you seeing it: it may add scrutiny freely, while higher thresholds, turned-off categories and files left out by `ignore:` are applied and named in the review result (a file that turns off every category is refused). Your VS Code settings decide _how_ it runs (model, mode, verify pass, …). The `aiReview.severityThreshold` and `aiReview.confidenceThreshold` settings can make the repository's thresholds stricter for you, never looser. An invalid file shows a warning and falls back to defaults for the invalid fields. The file and the rules files are read from your working tree, so a change that edits them also changes its own review: the review result then says so, and you should check those edits yourself.
+The repository file decides _what_ is reviewed and reported, but it can only tighten a review: it may add scrutiny freely (lower thresholds, more categories, agentic mode, the verify pass), while what would make the review see less is not applied, and the review result says what wasn't: thresholds higher than the defaults (or your own), turned-off default categories, and `ignore:` patterns that match ordinary source files. `ignore:` does skip generated, vendored and lock files: build output, minified files, snapshots, `vendor/`, `generated/` and `__generated__/` directories, `*.generated.*`, protobuf output (`*.pb.go`, `*_pb2.py`, …) and files marked generated in their header. For repositories you trust, turn on `aiReview.allowRepoConfigToRelax` (user settings only, for every repository): the file is then applied in full, and the review result still names what it turned down. A file that turns off every category is always refused. Your VS Code settings decide _how_ it runs (model, mode, verify pass, …). The `aiReview.severityThreshold` and `aiReview.confidenceThreshold` settings can make the repository's thresholds stricter for you, never looser. An invalid file shows a warning and falls back to defaults for the invalid fields. The file and the rules files are read from your working tree, so a change that edits them also changes its own review: the review result then says so, and you should check those edits yourself. Since the file can only add scrutiny, a branch that edits it can't weaken its own review, so it isn't read from the base branch.
 
 ## Privacy
 
@@ -92,7 +92,7 @@ The repository file decides _what_ is reviewed and reported, but it can't make a
 When you run a review, this is exactly what happens:
 
 1. The extension asks git for the diff of the scope you chose (in your repository, on your machine).
-2. Files are filtered out **before anything leaves your machine**: secrets (`.env*`, `*.pem`, `*.key`, `*.p12`, `id_rsa*`, …), lockfiles, build output (`dist/`, `build/`, …), minified files, snapshots, generated files, binaries, deleted files, and anything in your `.codereview.yml` `ignore:` list.
+2. Files are filtered out **before anything leaves your machine**: secrets (`.env*`, `*.pem`, `*.key`, `*.p12`, `id_rsa*`, …), lockfiles, build output (`dist/`, `build/`, …), minified files, snapshots, generated files, binaries, deleted files, and the generated, vendored and lock files your `.codereview.yml` `ignore:` list names (any file it names, with `aiReview.allowRepoConfigToRelax`).
 3. In the remaining changes, known secret formats are replaced with `[REDACTED]`: cloud and API keys (AWS, GitHub, Anthropic, OpenAI, Slack, Google, Stripe, npm), private key blocks, JWTs, passwords in connection strings, and values assigned to names like `password`, `secret`, `token` or `api_key`. Turn on `aiReview.redactHighEntropyStrings` to also redact long random-looking strings.
 4. The changed lines, the enclosing function or class of each change (redacted the same way), your repository rules files, and the review instructions are sent to the provider you selected — and nowhere else. In agentic mode, the files the model asks to read (same filtering and redaction) are sent too.
 5. The model's findings come back and are shown in VS Code. Nothing is stored outside your machine by the extension. In VS Code's local workspace storage it keeps the last review per scope (findings and hashes of the reviewed changes, for incremental re-reviews) and which findings you dismissed or resolved. Code with secrets in it is stored there redacted, as it was sent.

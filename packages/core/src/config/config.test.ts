@@ -127,7 +127,7 @@ colour: blue
 });
 
 describe('resolveReviewConfig: user settings (precedence)', () => {
-  const repo = parseConfig('severityThreshold: minor\nconfidenceThreshold: 0.7\n').config;
+  const repo = parseConfig('severityThreshold: minor\nconfidenceThreshold: 0.5\n').config;
 
   it('a user setting can make thresholds stricter', () => {
     const { config } = resolveReviewConfig(repo, {
@@ -144,7 +144,7 @@ describe('resolveReviewConfig: user settings (precedence)', () => {
       confidenceThreshold: 0.1,
     });
     expect(config.severityThreshold).toBe('minor');
-    expect(config.confidenceThreshold).toBe(0.7);
+    expect(config.confidenceThreshold).toBe(0.5);
   });
 
   it('ignores missing or junk user values and does not mutate the input', () => {
@@ -175,7 +175,7 @@ describe('resolveReviewConfig: user settings (precedence)', () => {
   });
 });
 
-describe('resolveReviewConfig: what the repository may turn down (A2)', () => {
+describe('resolveReviewConfig: the repository can only tighten the review (A2)', () => {
   const resolve = (yaml: string, user = {}) => resolveReviewConfig(parseConfig(yaml).config, user);
 
   it('adding scrutiny is applied without a warning', () => {
@@ -197,6 +197,68 @@ describe('resolveReviewConfig: what the repository may turn down (A2)', () => {
     expect(resolve('').relaxed).toEqual([]);
   });
 
+  it('higher thresholds are not applied, and say so', () => {
+    const { config, relaxed } = resolve('severityThreshold: critical\nconfidenceThreshold: 0.95\n');
+    expect(config.severityThreshold).toBe('minor');
+    expect(config.confidenceThreshold).toBe(0.6);
+    expect(relaxed).toEqual([
+      "Not applied: the repository's .codereview.yml would hide findings below critical severity (instead of below minor).",
+      "Not applied: the repository's .codereview.yml would hide findings with confidence below 0.95 (instead of 0.6).",
+    ]);
+  });
+
+  it("measures thresholds against the user's own, not only the defaults", () => {
+    const yaml = 'severityThreshold: major\nconfidenceThreshold: 0.8\n';
+    // The user hides as much themselves: nothing is turned down for them.
+    const own = resolve(yaml, { severityThreshold: 'major', confidenceThreshold: 0.9 });
+    expect(own.relaxed).toEqual([]);
+    expect(own.config).toMatchObject({ severityThreshold: 'major', confidenceThreshold: 0.9 });
+    const looser = resolve(yaml, { severityThreshold: 'minor', confidenceThreshold: 0.7 });
+    expect(looser.config).toMatchObject({ severityThreshold: 'minor', confidenceThreshold: 0.7 });
+    expect(looser.relaxed).toEqual([
+      "Not applied: the repository's .codereview.yml would hide findings below major severity (instead of below minor).",
+      "Not applied: the repository's .codereview.yml would hide findings with confidence below 0.8 (instead of 0.7).",
+    ]);
+  });
+
+  it('turned-off default categories are still reviewed, and say so; added ones are kept', () => {
+    const { config, relaxed } = resolve('review:\n  categories: [bug, performance, style]\n');
+    expect([...config.review.categories].sort()).toEqual(
+      [...DEFAULT_CONFIG.review.categories, 'style'].sort(),
+    );
+    expect(relaxed).toEqual([
+      "Not applied: the repository's .codereview.yml would turn off the security, maintainability, test categories.",
+    ]);
+    expect(
+      resolve('review:\n  categories: [bug, security, performance, maintainability]\n').relaxed,
+    ).toEqual(["Not applied: the repository's .codereview.yml would turn off the test category."]);
+  });
+
+  it('no categories at all is refused', () => {
+    const { config, relaxed } = resolve('review:\n  categories: []\n');
+    expect(config.review.categories).toEqual(DEFAULT_CONFIG.review.categories);
+    expect(relaxed).toEqual([
+      "The repository's .codereview.yml turns off every category; the default categories are reviewed instead.",
+    ]);
+  });
+
+  it('ignore: is kept for generated, vendored and lock files only (filterFiles)', () => {
+    const { config, relaxed } = resolve('ignore: ["src/auth/**", "vendor/"]\n');
+    expect(config.ignore).toEqual(['src/auth/**', 'vendor/']);
+    expect(config.ignoreAnyFile).toBeUndefined();
+    // Named per review, for the files it matches.
+    expect(relaxed).toEqual([]);
+    // Not something the repository can set itself.
+    const forged = { ...parseConfig('ignore: ["src/**"]\n').config, ignoreAnyFile: true };
+    expect(resolveReviewConfig(forged).config.ignoreAnyFile).toBeUndefined();
+  });
+});
+
+describe('resolveReviewConfig: when the user lets the repository relax the review', () => {
+  const TRUSTED = { allowRepoConfigToRelax: true };
+  const resolve = (yaml: string, user = {}) =>
+    resolveReviewConfig(parseConfig(yaml).config, { ...TRUSTED, ...user });
+
   it('higher thresholds are applied, and say so', () => {
     const { config, relaxed } = resolve('severityThreshold: critical\nconfidenceThreshold: 0.95\n');
     expect(config.severityThreshold).toBe('critical');
@@ -205,19 +267,8 @@ describe('resolveReviewConfig: what the repository may turn down (A2)', () => {
       "The repository's .codereview.yml hides findings below critical severity (instead of below minor).",
       "The repository's .codereview.yml hides findings with confidence below 0.95 (instead of 0.6).",
     ]);
-  });
-
-  it("measures thresholds against the user's own, not only the defaults", () => {
-    const yaml = 'severityThreshold: major\nconfidenceThreshold: 0.8\n';
-    // The user hides as much themselves: nothing is turned down for them.
-    expect(resolve(yaml, { severityThreshold: 'major', confidenceThreshold: 0.9 }).relaxed).toEqual(
+    expect(resolve('severityThreshold: major\n', { severityThreshold: 'major' }).relaxed).toEqual(
       [],
-    );
-    expect(resolve(yaml, { severityThreshold: 'minor', confidenceThreshold: 0.7 }).relaxed).toEqual(
-      [
-        "The repository's .codereview.yml hides findings below major severity (instead of below minor).",
-        "The repository's .codereview.yml hides findings with confidence below 0.8 (instead of 0.7).",
-      ],
     );
   });
 
@@ -227,16 +278,20 @@ describe('resolveReviewConfig: what the repository may turn down (A2)', () => {
     expect(relaxed).toEqual([
       "The repository's .codereview.yml turns off the security, maintainability, test categories.",
     ]);
-    expect(
-      resolve('review:\n  categories: [bug, security, performance, maintainability]\n').relaxed,
-    ).toEqual(["The repository's .codereview.yml turns off the test category."]);
   });
 
-  it('no categories at all is refused', () => {
+  it('no categories at all is still refused', () => {
     const { config, relaxed } = resolve('review:\n  categories: []\n');
     expect(config.review.categories).toEqual(DEFAULT_CONFIG.review.categories);
     expect(relaxed).toEqual([
       "The repository's .codereview.yml turns off every category; the default categories are reviewed instead.",
     ]);
+  });
+
+  it('ignore: may skip any file; the setting alone changes nothing (same snapshot key)', () => {
+    expect(resolve('ignore: ["src/auth/**"]\n').config.ignoreAnyFile).toBe(true);
+    expect(resolve('severityThreshold: nit\n').config).toEqual(
+      resolveReviewConfig(parseConfig('severityThreshold: nit\n').config).config,
+    );
   });
 });

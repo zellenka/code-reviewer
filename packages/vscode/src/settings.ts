@@ -12,7 +12,8 @@ type Settings = Pick<vscode.WorkspaceConfiguration, 'inspect'>;
  * Settings a repository's `.vscode/settings.json` must not change (F23, A2): those that
  * decide how much a review may spend (cost threshold, prices, agent limits, the summary,
  * verify and refusal-fallback requests, full re-reviews), how closely it looks (thresholds,
- * mode, context, the verify pass that drops findings) and where the code goes (provider,
+ * mode, context, the verify pass that drops findings, whether `.codereview.yml` may relax
+ * the review) and where the code goes (provider,
  * model, fallback model, what is redacted). Opening a repository must not, for example,
  * turn off the cost confirmation or pick an expensive model on the user's API key. They are
  * declared `"scope": "application"` in package.json, and read here from user settings only.
@@ -25,6 +26,7 @@ export const USER_ONLY_SETTINGS = [
   'anthropic.refusalFallback',
   'severityThreshold',
   'confidenceThreshold',
+  'allowRepoConfigToRelax',
   'redactHighEntropyStrings',
   'verifyFindings',
   'incrementalReview',
@@ -76,6 +78,7 @@ export function userReviewSettings(settings: Settings): UserReviewSettings {
   const confidence = userSetting<unknown>(settings, 'confidenceThreshold');
   const mode = userSetting<unknown>(settings, 'reviewMode');
   const verify = userSetting<unknown>(settings, 'verifyFindings');
+  const relax = userSetting<unknown>(settings, 'allowRepoConfigToRelax');
   return {
     ...(SEVERITIES.includes(severity as Severity)
       ? { severityThreshold: severity as Severity }
@@ -84,6 +87,7 @@ export function userReviewSettings(settings: Settings): UserReviewSettings {
     // "auto" leaves `review.mode` and `review.verify` to the repository.
     ...(mode === 'single-pass' || mode === 'agentic' ? { mode } : {}),
     ...(verify === 'on' || verify === 'off' ? { verify: verify === 'on' } : {}),
+    ...(relax === true ? { allowRepoConfigToRelax: true } : {}),
   };
 }
 
