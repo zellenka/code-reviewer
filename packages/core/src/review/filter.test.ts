@@ -667,6 +667,40 @@ const NOT_SECRETS = [
   "type Opts = { secret: 'hmac' | 'rsa' };",
   'if (token === "abcd") return;',
   "if (password == 'abcd') return;",
+  // XML and PHP that only name a credential.
+  '<password/>',
+  '<password />',
+  '<password></password>',
+  '<password>${env.DB_PASSWORD}</password>',
+  '<password>#{dbPassword}</password>',
+  '<password>$(DbPassword)</password>',
+  '<password>changeme</password>',
+  '<password>********</password>',
+  '<Password>Password</Password>',
+  '<password>Passwort</password>',
+  '<token>{tokenValue}</token>',
+  '<input type="password" name="password" />',
+  '<input type="password" name="password" value="" />',
+  '<label for="password">Password</label>',
+  '<passwordLabel>Enter password</passwordLabel>',
+  '<passwordHint>Ask the team1</passwordHint>',
+  '<tokenExpiry>3600</tokenExpiry>',
+  '<secretName>tls-cert-2024</secretName>',
+  '<string name="password">Password</string>',
+  '<add key="PasswordMinLength" value="12345" />',
+  '<add key="TokenLifetimeMinutes" value="3600" />',
+  '<add key="DbPassword" value="${DB_PASSWORD}" />',
+  '<add key="ApiKey" value="" />',
+  '<property name="password" value="#{systemProperties.dbPassword}" />',
+  "define('DB_PASSWORD', getenv('DB_PASSWORD'));",
+  "define('DB_PASSWORD', '');",
+  "define('AUTH_KEY', 'put your unique phrase here');",
+  "define('TOKEN_TTL', '3600');",
+  "define('PASSWORD_HASH_ALGO', 'argon2id');",
+  "'password' => env('DB_PASSWORD'),",
+  "'password' => '',",
+  "'password' => 'Password',",
+  "'passwordLabel' => 'Enter your password',",
 ];
 
 describe('redaction patterns (characterization)', () => {
@@ -1134,6 +1168,106 @@ describe('short quoted secrets', () => {
   });
 });
 
+describe('XML and PHP credentials', () => {
+  // Built from parts so that secret scanners do not flag this file.
+  const salt = 'x8#kP!2q L$9z@Wm4|N)7v{Rt;3';
+  const maven = `{${'COQLCE6DU6Gt'}cS5P=}`;
+  const s = '[REDACTED:secret]';
+  const cases: [string, string][] = [
+    // Elements named after a credential (Maven, Spring, .NET, SOAP).
+    ['<password>hunter2xyz</password>', `<password>${s}</password>`],
+    ['<password>hunter2</password>', `<password>${s}</password>`],
+    ['      <Password>S3cr3t!</Password>', `      <Password>${s}</Password>`],
+    ['<client-secret>abc123def456</client-secret>', `<client-secret>${s}</client-secret>`],
+    ['<clientSecret>abc123</clientSecret>', `<clientSecret>${s}</clientSecret>`],
+    ['<apiKey>k3y-12345</apiKey>', `<apiKey>${s}</apiKey>`],
+    ['<ns:Password>hunter2</ns:Password>', `<ns:Password>${s}</ns:Password>`],
+    ['<db.password>hunter2</db.password>', `<db.password>${s}</db.password>`],
+    [
+      '<password encrypted="false">hunter2</password>',
+      `<password encrypted="false">${s}</password>`,
+    ],
+    [
+      '<server><id>repo</id><password>hunter2</password></server>',
+      `<server><id>repo</id><password>${s}</password></server>`,
+    ],
+    // A Maven-encrypted password is only as safe as settings-security.xml.
+    [`<password>${maven}</password>`, `<password>${s}</password>`],
+    // .NET appSettings and Spring properties: the key or name attribute names the credential.
+    ['<add key="DbPassword" value="hunter2" />', `<add key="DbPassword" value="${s}" />`],
+    ['<add key="ApiKey" value="abcdef123456" />', `<add key="ApiKey" value="${s}" />`],
+    ["<add key='Smtp:Password' value='m4il'/>", `<add key='Smtp:Password' value='${s}'/>`],
+    ['<property name="password" value="hunter2"/>', `<property name="password" value="${s}"/>`],
+    [
+      '<setting name="ClientSecret" value="tok3n123" />',
+      `<setting name="ClientSecret" value="${s}" />`,
+    ],
+    // PHP constants and arrays.
+    ["define('DB_PASSWORD', 'hunter2');", `define('DB_PASSWORD', '${s}');`],
+    ["define( 'DB_PASSWORD', 'hunter2xyz99' );", `define( 'DB_PASSWORD', '${s}' );`],
+    ['define("API_KEY", "abcd1234");', `define("API_KEY", "${s}");`],
+    [`define('AUTH_KEY', '${salt}');`, `define('AUTH_KEY', '${s}');`],
+    [`define('SECURE_AUTH_SALT', '${salt}');`, `define('SECURE_AUTH_SALT', '${s}');`],
+    [`define('NONCE_KEY', '${salt}');`, `define('NONCE_KEY', '${s}');`],
+    ["'password' => 'hunter2',", `'password' => '${s}',`],
+    ["'password' => 'hunter2xyz99',", `'password' => '${s}',`],
+    ['"api_key" => "abcd1234",', `"api_key" => "${s}",`],
+    [":password => 'hunter2'", `:password => '${s}'`],
+  ];
+  it.each(cases)('redacts %s', (input, expected) => {
+    const { text, count } = redactText(input);
+    expect(text).toBe(expected);
+    expect(count).toBe(1);
+  });
+
+  it('keeps what is already redacted: attributes and connection strings in XML', () => {
+    expect(redactText('<user name="deploy" password="hunter2xyz" />').text).toBe(
+      `<user name="deploy" password="${s}" />`,
+    );
+    expect(redactText("$password = 'hunter2';").text).toBe(`$password = '${s}';`);
+    expect(
+      redactText('<add name="X" connectionString="Server=db;User Id=sa;Password=hunter2;" />'),
+    ).toEqual({
+      text: '<add name="X" connectionString="Server=db;User Id=sa;Password=[REDACTED:connection-string-password];" />',
+      count: 1,
+    });
+  });
+
+  it('redacts a Maven settings.xml and a wp-config.php and keeps their lines', () => {
+    const settings = [
+      '<servers>',
+      '  <server>',
+      '    <id>internal</id>',
+      '    <username>deploy</username>',
+      '    <password>hunter2</password>',
+      '  </server>',
+      '  <server>',
+      '    <id>ci</id>',
+      '    <password>${env.CI_PASSWORD}</password>',
+      '  </server>',
+      '</servers>',
+    ].join('\n');
+    const xml = redactText(settings);
+    expect(xml.count).toBe(1);
+    expect(xml.text.split('\n')).toHaveLength(11);
+    expect(xml.text).not.toContain('hunter2');
+    expect(xml.text).toContain('${env.CI_PASSWORD}');
+    const php = redactText(
+      [
+        "define( 'DB_NAME', 'wordpress' );",
+        "define( 'DB_USER', 'wp' );",
+        "define( 'DB_PASSWORD', 'hunter2' );",
+        `define( 'LOGGED_IN_SALT', '${salt}' );`,
+        "$table_prefix = 'wp_';",
+      ].join('\n'),
+    );
+    expect(php.count).toBe(2);
+    expect(php.text).not.toContain('hunter2');
+    expect(php.text).not.toContain(salt);
+    expect(php.text).toContain("define( 'DB_NAME', 'wordpress' );");
+  });
+});
+
 describe('redaction of hostile lines', () => {
   // Lines an author of a reviewed change controls. A pattern that backtracks on them would
   // freeze the review, so each must come back quickly (the bound is generous for slow CI).
@@ -1195,6 +1329,28 @@ describe('redaction of hostile lines', () => {
     ["'password=\"' x9000", 'password="'.repeat(9000), 0],
     ['"secret": " + 90,000 a', '"secret": "' + 'a'.repeat(90000), 0],
     ['"a_" x45000 + password="abcd"', 'a_'.repeat(45000) + 'password="abcd"', 1],
+    // XML elements and attributes, PHP constants and arrays.
+    ['"<password>" x9000', '<password>'.repeat(9000), 0],
+    ['"<password>abcd" x6500', '<password>abcd'.repeat(6500), 0],
+    ['"<password>a</" x6000', '<password>a</'.repeat(6000), 0],
+    ['"<password " x9000', '<password '.repeat(9000), 0],
+    ['< + "password" x11000 + >', '<' + 'password'.repeat(11000) + '>', 0],
+    ['< + "a." x45000 + password>', '<' + 'a.'.repeat(45000) + 'password>', 0],
+    ['<password> + 90,000 a', '<password>' + 'a'.repeat(90000), 0],
+    ['<password + 90,000 spaces', '<password' + ' '.repeat(90000) + '>', 0],
+    ['<password1 + 90,000 digits', '<password' + '1'.repeat(90000) + 'x>', 0],
+    ['<password> + 90,000 spaces + </password>', `<password>${' '.repeat(90000)}</password>`, 0],
+    ['"<a<password><" x9000', '<a<password><'.repeat(9000), 0],
+    ['"<password>abcd</password>" x3500', '<password>abcd</password>'.repeat(3500), 3500],
+    ['\'key="password" \' x6000', 'key="password" '.repeat(6000), 0],
+    // Every other repetition is a value here (`value="key="`).
+    ['\'key="password" value="\' x4000', 'key="password" value="'.repeat(4000), 2000],
+    ['key=" + "password" x11000', 'key="' + 'password'.repeat(11000), 0],
+    ["\"define('password', '\" x4000", "define('password', '".repeat(4000), 2000],
+    ['"define(\'" x15000', "define('".repeat(15000), 0],
+    ["define('password', ' + 90,000 a", "define('password', '" + 'a'.repeat(90000), 0],
+    ['"\'password\' => " x6000', "'password' => ".repeat(6000), 0],
+    ["\"'password' => 'abcd'\" x4500", "'password' => 'abcd'".repeat(4500), 4500],
   ];
   it.each(long)('long line: %s', (_label, line, expectedCount) => {
     const start = performance.now();
