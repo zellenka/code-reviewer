@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { addedFileDiff, parseUnifiedDiff } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
 import { filterFiles, isProtectedPath, isSecretPath } from './filter';
-import { createRedactor, redactFiles, redactText } from './redact';
+import { createRedactor, redactFiles, redactPromptText, redactText } from './redact';
 import { loadRepoRules } from './rules';
 
 const file = (
@@ -507,6 +507,73 @@ const NOT_SECRETS = [
   'Authorization: Bearer <your-token-goes-right-here>',
   'Authorization: Bearer YOUR_ACCESS_TOKEN_GOES_HERE',
   'Use bearer authentication for every request.',
+  // Connection strings without a literal password, and code that only looks like one.
+  'Server=db;User Id=sa;Password=;',
+  'Server=db;Database=app;Integrated Security=true;',
+  'Server=db;User Id=sa;Password={0};',
+  'var cs = $"Server={host};User Id={user};Password={password};";',
+  'cs = f"SERVER={host};UID={user};PWD={os.environ[\'DB_PASSWORD\']}"',
+  'Server=db;User Id=sa;Password=${DB_PASSWORD};',
+  'Server=db;User Id=sa;Password=$(DbPassword);',
+  'Server=db;User Id=sa;Password=<your-password>;',
+  'Server=db;User Id=sa;Password=<your password>;',
+  'Server=db;User Id=sa;Password=%DB_PASSWORD%;',
+  'Server=db;User Id=sa;Password=%s;',
+  'Server=db;User Id=sa;Password=#{DbPassword}#;',
+  'Server=db;User Id=sa;Password=__DbPassword__;',
+  'Server=db;User Id=sa;Password=********;',
+  'Server=db;User Id=sa;Password=changeme;',
+  'var cs = "Server=db;User Id=sa;Password=" + password + ";";',
+  'x=1;password=d;y=2;',
+  'var b = new SqlConnectionStringBuilder { UserID = "sa", Password = pwd };',
+  'user = u; password = pwd;',
+  'AccountKey=<storage-account-key>',
+  'AccountKey=${STORAGE_ACCOUNT_KEY};',
+  '"AccountKey": "",',
+  'SharedAccessKeyName=RootManageSharedAccessKey;',
+  'const sig=hmacSha256Signature(payload, key);',
+  'url += "&sig=" + signature;',
+  'https://acct.blob.core.windows.net/c?sv=2021-06-08&sig=<signature>',
+  'https://api.example.com/v1/items?page=2&sort=desc&user=bob',
+  'https://hooks.slack.com/services/XXX/YYY/ZZZ',
+  'webhook: https://hooks.slack.com/services/${SLACK_WEBHOOK_PATH}',
+  'Use Basic authentication for every request.',
+  'Basic Requirements',
+  'Authorization: Basic ${credentials}',
+  "headers.Authorization = 'Basic ' + btoa(user + ':' + pass);",
+  // Quoted values under a credential name that are labels, placeholders or code.
+  '  "password": "Password",',
+  '  "password": "Passwort",',
+  '  "password": "Senha",',
+  '  "password": "Пароль",',
+  '  "token": "TOKEN",',
+  "  token: 'Bearer',",
+  '  "passwordLabel": "Enter password",',
+  '  "passwordHint": "Required",',
+  '  "passwordPlaceholder": "Enter123",',
+  '  "passwordError": "Wrong1234",',
+  '  "token": "token",',
+  '  "DB_PASSWORD": "db_password",',
+  'password: "none"',
+  'token: "null"',
+  "secret: 'true'",
+  '"apiKey": "false",',
+  'password: "TODO"',
+  'password: "****"',
+  "password: 'xxxx'",
+  'password: "${DB_PASSWORD}"',
+  'password: "<password>"',
+  "password: '{0}'",
+  'password: "{{ .Values.db.password }}"',
+  'password: "%DB_PW%"',
+  'secret: "#{Secret}#"',
+  'token: "__TOKEN__"',
+  'pwd: "/srv/app"',
+  '"secret": "/run/secrets/db"',
+  'pwd: "C:\\\\app"',
+  "type Opts = { secret: 'hmac' | 'rsa' };",
+  'if (token === "abcd") return;',
+  "if (password == 'abcd') return;",
 ];
 
 describe('redaction patterns (characterization)', () => {
@@ -584,8 +651,10 @@ describe('redaction patterns (characterization)', () => {
 
   it('quoted secret: short values, values with spaces and other names are left alone', () => {
     const lines = [
-      'const password = "short";',
-      'const password = "1234567";',
+      // Under 4 characters, or under 8 when the name only contains a keyword (`passwordHint`).
+      'const password = "abc";',
+      'const passwordHint = "short";',
+      'const tokenUrl = "1234567";',
       'password: "two words here"',
       'const greeting = "hunter2hunter2";',
       'const password = "";',
@@ -790,6 +859,188 @@ describe('unquoted secrets (F2)', () => {
   });
 });
 
+describe('connection strings and service credentials', () => {
+  // Built from parts so that secret scanners do not flag this file.
+  const accountKey = `${'a1B2c3D4'.repeat(11)}==`;
+  const sasKey = `${'Zx9/Yw8+'.repeat(5)}abc=`;
+  const sig = `${'aB3dE6gH9'.repeat(4)}%2Bk%3D`;
+  const slackHook = `T0123ABCD/B0456EFGH/${'aB3d'.repeat(6)}`;
+  const sendgrid = `SG.${'aB3d_E6g-'.repeat(2)}aB3d.${'aB3dE6gH9-'.repeat(4)}aB3`;
+  const basic = Buffer.from('deploy:Hunter2!').toString('base64');
+  const azdo = `${'a1B2'.repeat(19)}AZDO${'x9Y8'}`;
+  const pw = '[REDACTED:connection-string-password]';
+  const cases: [string, string][] = [
+    // ADO.NET, ODBC and JDBC connection strings, in the places they are written.
+    ['Server=db;User Id=sa;Password=hunter2;', `Server=db;User Id=sa;Password=${pw};`],
+    [
+      'var cs = "Server=db;Database=app;User Id=sa;Password=hunter2;";',
+      `var cs = "Server=db;Database=app;User Id=sa;Password=${pw};";`,
+    ],
+    [
+      'var cs = @"Data Source=.\\SQLEXPRESS;Initial Catalog=app;User ID=sa;Password=P@ss w0rd!";',
+      `var cs = @"Data Source=.\\SQLEXPRESS;Initial Catalog=app;User ID=sa;Password=${pw}";`,
+    ],
+    [
+      '    "Default": "Server=tcp:x.database.windows.net,1433;Initial Catalog=db;User ID=admin;Pwd=Hunter2!;Encrypt=True;"',
+      `    "Default": "Server=tcp:x.database.windows.net,1433;Initial Catalog=db;User ID=admin;Pwd=${pw};Encrypt=True;"`,
+    ],
+    ['"Password=hunter2;Server=db;User Id=sa"', `"Password=${pw};Server=db;User Id=sa"`],
+    [
+      '"Server = db; User Id = sa; Password = hunter2;"',
+      `"Server = db; User Id = sa; Password = ${pw};"`,
+    ],
+    [
+      'ConnectionStrings__Default=Server=db;Uid=sa;Pwd=hunter2',
+      `ConnectionStrings__Default=Server=db;Uid=sa;Pwd=${pw}`,
+    ],
+    [
+      '  connectionString: Host=db;Port=5432;Username=app;Password=hunter2',
+      `  connectionString: Host=db;Port=5432;Username=app;Password=${pw}`,
+    ],
+    [
+      'url: jdbc:sqlserver://db:1433;databaseName=app;user=sa;password=hunter2;',
+      `url: jdbc:sqlserver://db:1433;databaseName=app;user=sa;password=${pw};`,
+    ],
+    [
+      '<add name="Default" connectionString="Server=db;User Id=sa;Password=hunter2;" />',
+      `<add name="Default" connectionString="Server=db;User Id=sa;Password=${pw};" />`,
+    ],
+    [
+      'conn = "DRIVER={ODBC Driver 18 for SQL Server};SERVER=db;UID=sa;PWD={p@ss;w0rd}"',
+      `conn = "DRIVER={ODBC Driver 18 for SQL Server};SERVER=db;UID=sa;PWD=${pw}"`,
+    ],
+    // Azure Storage and Service Bus keys.
+    [
+      `DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=${accountKey};EndpointSuffix=core.windows.net`,
+      'DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=[REDACTED:azure-key];EndpointSuffix=core.windows.net',
+    ],
+    [`    "AccountKey": "${accountKey}",`, '    "AccountKey": "[REDACTED:azure-key]",'],
+    [
+      `Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=${sasKey}`,
+      'Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=[REDACTED:azure-key]',
+    ],
+    // Azure SAS signatures: only `sig` is secret, the other parameters stay.
+    [
+      `https://acct.blob.core.windows.net/c/b.txt?sv=2021-06-08&ss=b&sp=r&se=2030-01-01T00:00:00Z&sig=${sig}`,
+      'https://acct.blob.core.windows.net/c/b.txt?sv=2021-06-08&ss=b&sp=r&se=2030-01-01T00:00:00Z&sig=[REDACTED:azure-sas-signature]',
+    ],
+    [
+      `BlobEndpoint=https://acct.blob.core.windows.net/;SharedAccessSignature=sv=2021-06-08&sig=${sig}`,
+      'BlobEndpoint=https://acct.blob.core.windows.net/;SharedAccessSignature=sv=2021-06-08&sig=[REDACTED:azure-sas-signature]',
+    ],
+    [
+      `  sasUrl: "https://acct.blob.core.windows.net/c?sig=${sig}&sv=2021-06-08"`,
+      '  sasUrl: "https://acct.blob.core.windows.net/c?sig=[REDACTED:azure-sas-signature]&sv=2021-06-08"',
+    ],
+    // Slack.
+    [
+      `SLACK_WEBHOOK_URL=https://hooks.slack.com/services/${slackHook}`,
+      'SLACK_WEBHOOK_URL=https://hooks.slack.com/services/[REDACTED:slack-webhook]',
+    ],
+    [
+      `  "url": "https://hooks.slack.com/services/${slackHook}",`,
+      '  "url": "https://hooks.slack.com/services/[REDACTED:slack-webhook]",',
+    ],
+    ['x = xoxe-1-abcdefghij1234 y', 'x = [REDACTED:slack-token] y'],
+    ['slack(xapp-1-A0123456789-1234567890123-abcdef0123)', 'slack([REDACTED:slack-token])'],
+    // SendGrid.
+    [`sgMail.setApiKey("${sendgrid}");`, 'sgMail.setApiKey("[REDACTED:sendgrid-key]");'],
+    // Basic authentication.
+    [`Authorization: Basic ${basic}`, 'Authorization: Basic [REDACTED:basic-auth]'],
+    [
+      `curl -H "Authorization: Basic ${basic}" https://api.example.com`,
+      'curl -H "Authorization: Basic [REDACTED:basic-auth]" https://api.example.com',
+    ],
+    [
+      `client.DefaultRequestHeaders.Add("Authorization", "Basic ${basic}");`,
+      'client.DefaultRequestHeaders.Add("Authorization", "Basic [REDACTED:basic-auth]");',
+    ],
+    // Azure DevOps personal access token (the 84-character format).
+    [`pat = ${azdo}`, 'pat = [REDACTED:azure-devops-pat]'],
+  ];
+  it.each(cases)('redacts %s', (input, expected) => {
+    const { text, count } = redactText(input);
+    expect(text).toBe(expected);
+    expect(count).toBe(1);
+  });
+
+  it('redacts every password in a multi-line config file and keeps its lines', () => {
+    const input = [
+      '{',
+      '  "ConnectionStrings": {',
+      '    "Main": "Server=db;Database=app;User Id=sa;Password=hunter2;",',
+      '    "Reports": "Server=db2;Database=r;Uid=ro;Pwd=s3cret;"',
+      '  }',
+      '}',
+    ].join('\n');
+    const { text, count } = redactText(input);
+    expect(count).toBe(2);
+    expect(text.split('\n')).toHaveLength(6);
+    expect(text).not.toContain('hunter2');
+    expect(text).not.toContain('s3cret');
+    expect(text).toContain('User Id=sa;Password=[REDACTED:connection-string-password];');
+  });
+
+  it('redacts the same formats in prompt text', () => {
+    const input = `cs = "Server=db;User Id=sa;Password=hunter2;"\nAuthorization: Basic ${basic}`;
+    expect(redactPromptText(input)).toBe(
+      'cs = "Server=db;User Id=sa;Password=[REDACTED:connection-string-password];"\nAuthorization: Basic [REDACTED:basic-auth]',
+    );
+  });
+});
+
+describe('short quoted secrets', () => {
+  // A name that ends with a credential keyword makes a quoted value of 4+ characters a secret.
+  const cases: [string, string][] = [
+    ['  "Password": "hunter2",', '  "Password": "[REDACTED:secret]",'],
+    ["password: 'hunter2'", "password: '[REDACTED:secret]'"],
+    ['password: "Hunter2"', 'password: "[REDACTED:secret]"'],
+    ['PASSWORD="hunter2"', 'PASSWORD="[REDACTED:secret]"'],
+    ["DB_PASSWORD='s3cr3t'", "DB_PASSWORD='[REDACTED:secret]'"],
+    ['const password = "admin";', 'const password = "[REDACTED:secret]";'],
+    ['const password = "1234567";', 'const password = "[REDACTED:secret]";'],
+    ['  "pwd": "1234",', '  "pwd": "[REDACTED:secret]",'],
+    ['  "client_secret": "abc123",', '  "client_secret": "[REDACTED:secret]",'],
+    ['  apiKey: "k3y!",', '  apiKey: "[REDACTED:secret]",'],
+    ['x-api-key: "ab12cd"', 'x-api-key: "[REDACTED:secret]"'],
+    ['  "access_token": "tok3n5",', '  "access_token": "[REDACTED:secret]",'],
+    ['private_key = `pk-1`', 'private_key = `[REDACTED:secret]`'],
+    ['  "db_token_2": "abcdef",', '  "db_token_2": "[REDACTED:secret]",'],
+    [
+      'var cfg = new Config { User = "sa", Password = "hunter2" };',
+      'var cfg = new Config { User = "sa", Password = "[REDACTED:secret]" };',
+    ],
+  ];
+  it.each(cases)('redacts %s', (input, expected) => {
+    const { text, count } = redactText(input);
+    expect(text).toBe(expected);
+    expect(count).toBe(1);
+  });
+
+  it('redacts each short password in an appsettings.json and keeps its lines', () => {
+    const input = [
+      '{',
+      '  "Smtp": { "User": "mailer", "Password": "m4il" },',
+      '  "Admin": {',
+      '    "Password": "admin",',
+      '    "PasswordHint": "Ask the team"',
+      '  }',
+      '}',
+    ].join('\n');
+    const { text, count } = redactText(input);
+    expect(count).toBe(2);
+    expect(text.split('\n')).toEqual([
+      '{',
+      '  "Smtp": { "User": "mailer", "Password": "[REDACTED:secret]" },',
+      '  "Admin": {',
+      '    "Password": "[REDACTED:secret]",',
+      '    "PasswordHint": "Ask the team"',
+      '  }',
+      '}',
+    ]);
+  });
+});
+
 describe('redaction of hostile lines', () => {
   // Lines an author of a reviewed change controls. A pattern that backtracks on them would
   // freeze the review, so each must come back quickly (the bound is generous for slow CI).
@@ -832,6 +1083,25 @@ describe('redaction of hostile lines', () => {
     ['"a://b:c" x13000', 'a://b:c'.repeat(13000), 0],
     ['"a://b:cc" x11000 + @', 'a://b:cc'.repeat(11000) + '@', 1],
     ['"token." x15000 + quoted value', 'token.'.repeat(15000) + '="abcdefgh12345"', 1],
+    ['"Password=" x9000', 'Password='.repeat(9000), 0],
+    ['";Password=a" x9000', ';Password=a'.repeat(9000), 0],
+    ['";Password=a b" x7500', ';Password=a b'.repeat(7500), 0],
+    ['"Server=a;Password=b1;" x4500', 'Server=a;Password=b1;'.repeat(4500), 4500],
+    ['"PWD={" x18000', 'PWD={'.repeat(18000), 0],
+    ['AccountKey= + 90,000 a', 'AccountKey=' + 'a'.repeat(90000) + '!', 0],
+    ['"AccountKey=a1" x7500', 'AccountKey=a1'.repeat(7500), 0],
+    ['"&sig=" x18000', '&sig='.repeat(18000), 0],
+    ['&sig= + 90,000 a%', '&sig=' + 'a%'.repeat(45000), 0],
+    ['"hooks.slack.com/services/" x3600', 'hooks.slack.com/services/'.repeat(3600), 0],
+    ['"SG.a" x22500', 'SG.a'.repeat(22500), 0],
+    ['Basic + 90,000 A', 'Basic ' + 'A'.repeat(90000), 0],
+    ['"Basic AAAAAAAA " x6000', 'Basic AAAAAAAA '.repeat(6000), 0],
+    ['90,000 a + AZDO', 'a'.repeat(90000) + 'AZDOabcd', 0],
+    ['"xapp-" x18000', 'xapp-'.repeat(18000), 0],
+    ['\'password="abcd"\' x6000', 'password="abcd"'.repeat(6000), 6000],
+    ["'password=\"' x9000", 'password="'.repeat(9000), 0],
+    ['"secret": " + 90,000 a', '"secret": "' + 'a'.repeat(90000), 0],
+    ['"a_" x45000 + password="abcd"', 'a_'.repeat(45000) + 'password="abcd"', 1],
   ];
   it.each(long)('long line: %s', (_label, line, expectedCount) => {
     const start = performance.now();
