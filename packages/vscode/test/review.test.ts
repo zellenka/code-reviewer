@@ -110,6 +110,12 @@ const KNOWN_BUGS = [
     },
   },
   {
+    file: 'src/ux-text.ts',
+    title: 'text bug',
+    quote: 'return a * b; // text',
+    suggestion: 'return a / b; // text',
+  },
+  {
     file: 'src/ux-partial.ts',
     title: 'partial quote',
     quote: 'count18',
@@ -143,6 +149,8 @@ const SECRET = 'AKIAIOSFODNN7EXAMPLE';
 let reword = false;
 /** When set, the stub reports the `revised` text of a bug under the same quote (same fingerprint). */
 let revise = false;
+/** When set, the stub reports these fields instead, under the same quote (same fingerprint). */
+let edit: Record<string, unknown> | undefined;
 
 /** Stub model: reports known bugs found in the diff; answers summary requests with text. */
 function reviewer(req: ChatRequest): MockStep {
@@ -164,6 +172,7 @@ function reviewer(req: ChatRequest): MockStep {
     suggestion: b.suggestion,
     confidence: 0.95,
     ...(revise ? b.revised : {}),
+    ...edit,
   }));
   return {
     events: [{ type: 'tool_call', id: 'c1', name: 'report_findings', input: { findings } }],
@@ -718,6 +727,38 @@ suite('Review', () => {
     assert.strictEqual(doc.lineAt(3).text, '  return b === 0 ? 0 : a / b; // revise');
     await vscode.window.showTextDocument(doc);
     await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
+  test('a re-review that changes only the text of a same-id finding updates its thread (F17)', async () => {
+    const key = await reviewOne('src/ux-text.ts', DIV('text'));
+    const thread = api.threads.threadOf(key)!;
+    const bodyOf = () => (thread.comments[0]!.body as vscode.MarkdownString).value;
+    // One field more each time; lines, status, category and confidence stay the same.
+    const changes: [Record<string, unknown>, RegExp][] = [
+      [{ suggestion: 'return b ? a / b : 0; // text' }, /return b \? a \/ b : 0; \/\/ text/],
+      [{ title: 'Divides by nothing' }, /\*\*Divides by nothing\*\*/],
+      [{ body: 'Guard against b being 0' }, /Guard against b being 0/],
+      [{ severity: 'critical' }, /🔴 Critical/],
+    ];
+    try {
+      for (const [change, shown] of changes) {
+        const step = JSON.stringify(change);
+        await api.snapshots.clear();
+        edit = { ...edit, ...change };
+        const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+          'aiReview.reviewFile',
+          { root, path: 'src/ux-text.ts', silent: true },
+        );
+        assert.strictEqual(result.ok, true, result.message);
+        const [finding] = api.findings.all();
+        assert.strictEqual(api.threads.threadOf(finding!.key), thread, step);
+        assert.match(bodyOf(), shown, step);
+        // What "Apply fix" would write is what the thread shows.
+        assert.ok(bodyOf().includes(finding!.suggestion!), step);
+      }
+    } finally {
+      edit = undefined;
+    }
   });
 
   test('an edited finding never jumps to an identical line far away', async () => {
