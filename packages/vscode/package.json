@@ -30,6 +30,9 @@
     "anthropic"
   ],
   "main": "./dist/extension.js",
+  "enabledApiProposals": [
+    "chatParticipantAdditions"
+  ],
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -316,6 +319,15 @@
           "default": false,
           "scope": "application",
           "markdownDescription": "Also replace long random-looking strings with `[REDACTED]` before sending code to the model. Known secret formats (API keys, private keys, passwords in code) are always redacted. User settings only."
+        },
+        "aiReview.excludeFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "application",
+          "markdownDescription": "Files never sent to the model, with either provider: their content, their name and their search hits stay out of every review. Copy your organization's Copilot content exclusion paths here (`/scripts/**`, `secrets.json`, `*.cfg`): a leading `/` means the repository root, a pattern without `/` matches a name in any folder, a matched folder excludes everything in it, letter case is ignored. Copilot's own content exclusion is also checked when VS Code allows it (see the README). User settings only."
         },
         "aiReview.verifyFindings": {
           "type": "string",

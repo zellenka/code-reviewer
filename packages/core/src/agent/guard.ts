@@ -2,6 +2,7 @@ import picomatch from 'picomatch';
 import { DiffSourceError } from '../diff/errors';
 import { splitLines } from '../diff/parse';
 import type { WorkspaceTools } from '../diff/types';
+import { cacheExclusion, type IsExcluded } from '../review/exclude';
 import { isProtectedPath } from '../review/filter';
 import { redactText } from '../review/redact';
 
@@ -10,6 +11,11 @@ export interface GuardOptions {
   isBlocked?: (path: string) => boolean;
   /** Same as the review's `redactHighEntropy`. Known secret formats are always redacted. */
   redactHighEntropy?: boolean;
+  /**
+   * Files excluded from AI review (`ReviewOptions.isExcluded`): never read, and their search
+   * hits and references are left out. Asked once per path.
+   */
+  isExcluded?: IsExcluded;
 }
 
 /** A line the model may be shown, from the redacted file. */
@@ -63,10 +69,10 @@ interface HitFile {
 /**
  * The one gate between a host's raw `WorkspaceTools` and the model (A1). A path is refused
  * when it names a secret file or `.git/` (`isProtectedPath`, also for the target of a
- * symlink), is blocked by `options`, or is a file git doesn't show (`listFiles`; often local
- * secrets the protected list doesn't name). Files are redacted whole before any part of them
- * is shown (a private key body is only known after its BEGIN line), and no error shows where
- * the repo lives. Hosts only do IO; `createReviewTools` applies this to every host.
+ * symlink), is blocked or excluded by `options`, or is a file git doesn't show (`listFiles`;
+ * often local secrets the protected list doesn't name). Files are redacted whole before any
+ * part of them is shown (a private key body is only known after its BEGIN line), and no error
+ * shows where the repo lives. Hosts only do IO; `createReviewTools` applies this to every host.
  */
 export function guardWorkspace(ws: WorkspaceTools, options: GuardOptions = {}): GuardedWorkspace {
   const key = (p: string) => (ws.caseInsensitive ? p.toLowerCase() : p);
@@ -76,6 +82,10 @@ export function guardWorkspace(ws: WorkspaceTools, options: GuardOptions = {}): 
   const secret = (p: string) => new RefusedError(`${p} can't be read: it may contain secrets.`);
   const notShown = (p: string) =>
     new RefusedError(`${p} can't be read: it is ignored by git or missing.`);
+  // Says nothing about whether the file exists.
+  const excludedError = (p: string) =>
+    new RefusedError(`${p} can't be read: it is excluded from AI review.`);
+  const isExcluded = options.isExcluded && cacheExclusion(options.isExcluded);
 
   let listing: Promise<{ files: string[]; keys: Set<string> }> | undefined;
   /** `listFiles`, once per guard (one review): a file created during the review is not shown. */
@@ -95,6 +105,29 @@ export function guardWorkspace(ws: WorkspaceTools, options: GuardOptions = {}): 
   };
   /** Whether a path from the host (a hit, a reference) is in a file the model may see. */
   const mayShow = (p: string, keys: Set<string>) => !blocked(p) && keys.has(key(p));
+  /** Whether a file the host named is excluded, by its name or where it really is. */
+  const excludedFile = async (p: string, signal: AbortSignal): Promise<boolean> => {
+    if (!isExcluded) return false;
+    if (await isExcluded(p, signal)) return true;
+    // A file that can't be resolved is left to the read, which refuses or fails it.
+    const real = await ws.realPath(p, signal).then(toSlash, () => undefined);
+    signal.throwIfAborted();
+    return real !== undefined && real !== p && isExcluded(real, signal);
+  };
+  /**
+   * Hits or references without those in excluded files, which aren't counted either. Only
+   * files with hits are asked about, not every file of the repo.
+   */
+  const withoutExcluded = async <T extends { path: string }>(
+    items: T[],
+    signal: AbortSignal,
+  ): Promise<T[]> => {
+    if (!isExcluded) return items;
+    const paths = [...new Set(items.map((i) => i.path))];
+    const flags = await Promise.all(paths.map((p) => excludedFile(p, signal)));
+    const excluded = new Set(paths.filter((_, i) => flags[i]));
+    return excluded.size ? items.filter((i) => !excluded.has(i.path)) : items;
+  };
 
   /**
    * The repo path of a file the model may read. Checked by name first, so the answer doesn't
@@ -106,6 +139,7 @@ export function guardWorkspace(ws: WorkspaceTools, options: GuardOptions = {}): 
     const shown = normalize(input);
     const p = resolveRepoPath(input);
     if (blocked(p)) throw secret(shown);
+    if (await isExcluded?.(p, signal)) throw excludedError(shown);
     const { keys } = await listed(signal);
     const viaLink = !keys.has(key(p));
     if (viaLink && !ancestors(p).some((dir) => keys.has(key(dir)))) throw notShown(shown);
@@ -118,6 +152,7 @@ export function guardWorkspace(ws: WorkspaceTools, options: GuardOptions = {}): 
       throw err;
     }
     if (blocked(real)) throw secret(shown);
+    if (real !== p && (await isExcluded?.(real, signal))) throw excludedError(shown);
     if (!keys.has(key(real))) throw notShown(shown);
     return p;
   };
@@ -167,9 +202,12 @@ export function guardWorkspace(ws: WorkspaceTools, options: GuardOptions = {}): 
         const inGlob = glob ? picomatch(glob, { dot: true }) : undefined;
         // Files the model may not read are never even searched: no hit hints at their content.
         const paths = files.filter((p) => !blocked(p) && (!inGlob || inGlob(p)));
-        const hits = (await ws.grep(pattern, paths, signal))
-          .map((h) => ({ ...h, path: toSlash(h.path) }))
-          .filter((h) => mayShow(h.path, keys));
+        const hits = await withoutExcluded(
+          (await ws.grep(pattern, paths, signal))
+            .map((h) => ({ ...h, path: toSlash(h.path) }))
+            .filter((h) => mayShow(h.path, keys)),
+          signal,
+        );
         const read = new Map<string, HitFile | null>();
         const shown: GuardedLine[] = [];
         let refused = 0;
@@ -206,9 +244,12 @@ export function guardWorkspace(ws: WorkspaceTools, options: GuardOptions = {}): 
       try {
         const p = await check(input, signal);
         const { keys } = await listed(signal);
-        const refs = (await ws.findReferences(p, line, col, signal))
-          .map((r) => ({ ...r, path: toSlash(r.path) }))
-          .filter((r) => mayShow(r.path, keys));
+        const refs = await withoutExcluded(
+          (await ws.findReferences(p, line, col, signal))
+            .map((r) => ({ ...r, path: toSlash(r.path) }))
+            .filter((r) => mayShow(r.path, keys)),
+          signal,
+        );
         const files = new Map<string, string[] | null>();
         const shown: GuardedLine[] = [];
         let refused = 0;

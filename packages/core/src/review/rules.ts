@@ -47,13 +47,15 @@ export interface LoadRulesOptions {
    * a link to a secret file is refused by what it points to.
    */
   realPath?: (path: string) => Promise<string>;
+  /** Files excluded from AI review (`ReviewOptions.isExcluded`): by name and by `realPath`. */
+  isExcluded?: (path: string) => Promise<boolean>;
 }
 
 /**
  * Reads the rules files with a host-provided `read` (which must sandbox paths to the repo
- * and return undefined for missing files). Paths outside the repo and secret files (e.g.
- * `rules: .env`, by name and by `realPath`) are refused, the text is redacted like diffs,
- * empty files are skipped and long ones truncated.
+ * and return undefined for missing files). Paths outside the repo, secret files (e.g.
+ * `rules: .env`) and excluded files (both by name and by `realPath`) are refused, the text
+ * is redacted like diffs, empty files are skipped and long ones truncated.
  */
 export async function loadRepoRules(
   read: (path: string) => Promise<string | undefined>,
@@ -69,13 +71,22 @@ export async function loadRepoRules(
     try {
       // The same check as the agent tools' (A1), without the git listing: a rules file may
       // be local to the user.
-      if (isProtectedPath(resolveRepoPath(path))) {
+      const repoPath = resolveRepoPath(path);
+      if (isProtectedPath(repoPath)) {
         ignored('it may contain secrets');
+        continue;
+      }
+      if (await options.isExcluded?.(repoPath)) {
+        ignored('it is excluded from AI review');
         continue;
       }
       const real = await options.realPath?.(path);
       if (real !== undefined && isProtectedPath(real)) {
         ignored('it may contain secrets');
+        continue;
+      }
+      if (real !== undefined && real !== repoPath && (await options.isExcluded?.(real))) {
+        ignored('it is excluded from AI review');
         continue;
       }
       text = await read(path);

@@ -13,10 +13,10 @@ type Settings = Pick<vscode.WorkspaceConfiguration, 'inspect'>;
  * decide how much a review may spend (cost threshold, prices, agent limits, the summary,
  * verify and refusal-fallback requests, full re-reviews), how closely it looks (thresholds,
  * mode, context, the verify pass that drops findings, whether `.codereview.yml` may relax
- * the review) and where the code goes (provider,
- * model, fallback model, what is redacted). Opening a repository must not, for example,
- * turn off the cost confirmation or pick an expensive model on the user's API key. They are
- * declared `"scope": "application"` in package.json, and read here from user settings only.
+ * the review) and where the code goes (provider, model, fallback model, what is redacted,
+ * which files are never sent). Opening a repository must not, for example, turn off the cost
+ * confirmation or pick an expensive model on the user's API key. They are declared
+ * `"scope": "application"` in package.json, and read here from user settings only.
  * What a repository may decide goes in `.codereview.yml`, checked by `resolveReviewConfig`.
  */
 export const USER_ONLY_SETTINGS = [
@@ -28,6 +28,7 @@ export const USER_ONLY_SETTINGS = [
   'confidenceThreshold',
   'allowRepoConfigToRelax',
   'redactHighEntropyStrings',
+  'excludeFiles',
   'verifyFindings',
   'incrementalReview',
   'summary',
@@ -108,6 +109,14 @@ export function reviewRunSettings(settings: Settings): {
     incremental: flag('incrementalReview', true),
     redactHighEntropy: flag('redactHighEntropyStrings', false),
   };
+}
+
+/** `aiReview.excludeFiles`: the user's globs of files never to send. Non-strings are dropped. */
+export function excludeFileGlobs(settings: Settings): string[] {
+  const value = userSetting<unknown>(settings, 'excludeFiles');
+  return Array.isArray(value)
+    ? value.filter((g): g is string => typeof g === 'string' && !!g.trim())
+    : [];
 }
 
 /** `aiReview.anthropic.refusalFallback`: on unless the user turned it off. */

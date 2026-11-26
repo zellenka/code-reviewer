@@ -704,3 +704,99 @@ describe('tool errors (F5)', () => {
     });
   });
 });
+
+describe('files excluded from AI review', () => {
+  /** Excludes src/price.ts and anything in deals/, and counts the questions. */
+  const excluding = (host: WorkspaceTools = ws, maxMatches = 50) => {
+    const asked: string[] = [];
+    const tools = toolsOn(host, {
+      maxLines: 50,
+      maxMatches,
+      isExcluded: async (p) => {
+        asked.push(p);
+        return p === 'src/price.ts' || p.startsWith('deals/');
+      },
+    });
+    return { call: tools, asked };
+  };
+  const refused = (p: string) => `${p} can't be read: it is excluded from AI review.`;
+
+  it('cannot be read, and the refusal does not say whether the file exists', async () => {
+    const { call } = excluding();
+    await expect(call('read_file', { path: 'src/price.ts' })).rejects.toThrow(
+      refused('src/price.ts'),
+    );
+    await expect(call('read_file', { path: './deals/missing.ts' })).rejects.toThrow(
+      refused('deals/missing.ts'),
+    );
+    expect(await call('read_file', { path: 'src/cart.ts' })).toContain('formatPrice');
+  });
+
+  it('have no symbols or references', async () => {
+    const { call } = excluding({
+      ...ws,
+      getSymbolAt: async () => ({
+        name: 'formatPrice',
+        kind: 'function',
+        startLine: 1,
+        endLine: 3,
+      }),
+    });
+    await expect(call('get_symbol', { path: 'src/price.ts', line: 1 })).rejects.toThrow(
+      refused('src/price.ts'),
+    );
+    await expect(
+      call('find_references', { path: 'src/price.ts', line: 1, symbol: 'formatPrice' }),
+    ).rejects.toThrow(refused('src/price.ts'));
+  });
+
+  it('their search hits are left out and not counted', async () => {
+    const { call, asked } = excluding(ws, 2);
+    // cart.ts has two hits (the limit), price.ts one more: excluded, so no "more matches".
+    expect(await call('search_code', { pattern: 'formatPrice' })).toBe(
+      "src/cart.ts:1: import { formatPrice } from './price';\nsrc/cart.ts:3: export const label = formatPrice('EUR', 100);",
+    );
+    expect(await call('search_code', { pattern: 'toFixed' })).toBe('No matches.');
+    // Only files with hits are asked about, each once per review.
+    expect([...new Set(asked)].sort()).toEqual(['src/cart.ts', 'src/price.ts']);
+    expect(asked.filter((p) => p === 'src/price.ts')).toHaveLength(1);
+  });
+
+  it('their references are left out and not counted', async () => {
+    const host: WorkspaceTools = {
+      ...ws,
+      findReferences: async () => [
+        { path: 'src/cart.ts', line: 1 },
+        { path: 'src/cart.ts', line: 3 },
+        { path: 'src/price.ts', line: 1 },
+      ],
+    };
+    const { call } = excluding(host, 2);
+    expect(
+      await call('find_references', { path: 'src/cart.ts', line: 3, symbol: 'formatPrice' }),
+    ).toBe(
+      "src/cart.ts:1: import { formatPrice } from './price';\nsrc/cart.ts:3: export const label = formatPrice('EUR', 100);",
+    );
+  });
+
+  it('cannot be reached through a link, and their hits through a link are left out', async () => {
+    const files: Record<string, string> = { ...FILES, 'src/link.ts': FILES['src/price.ts']! };
+    const host: WorkspaceTools = {
+      ...ws,
+      listFiles: async () => Object.keys(files),
+      realPath: async (p) => (p === 'src/link.ts' ? 'deals/plan.ts' : p),
+      readFile: async (p) => files[p] ?? '',
+      grep: async (pattern, paths) =>
+        paths.flatMap((path) =>
+          (files[path] ?? '')
+            .split('\n')
+            .flatMap((t, i) => (t.includes(pattern) ? [{ path, line: i + 1, text: t }] : [])),
+        ),
+    };
+    const { call } = excluding(host);
+    await expect(call('read_file', { path: 'src/link.ts' })).rejects.toThrow(
+      refused('src/link.ts'),
+    );
+    expect(await call('search_code', { pattern: 'toFixed' })).toBe('No matches.');
+  });
+});

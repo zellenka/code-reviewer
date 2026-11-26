@@ -9,6 +9,7 @@ import {
   loadSymbols,
   isProviderError,
   prepareDiff,
+  removeExcluded,
   runReview,
   type Finding,
   type Logger,
@@ -28,10 +29,12 @@ import {
   USER_ONLY_SETTINGS,
   agentLimitSettings,
   costThreshold,
+  excludeFileGlobs,
   reviewRunSettings,
   setInWorkspace,
 } from '../settings';
 import type { ReviewConfigService } from './config';
+import type { ContentExclusion } from './exclusion';
 import { relativeToRepo, unsavedFiles, type RepoLocator } from './repo';
 import type { ReviewRuns } from './runs';
 import type { SnapshotStore } from './snapshots';
@@ -83,6 +86,8 @@ export interface ReviewDeps {
   runs: ReviewRuns;
   /** Last complete review per scope, for incremental re-reviews. */
   snapshots?: SnapshotStore;
+  /** Files never sent: `aiReview.excludeFiles` and Copilot's content exclusion. */
+  exclusion: ContentExclusion;
 }
 
 export async function reviewCommand(
@@ -165,6 +170,8 @@ export async function reviewCommand(
     const concurrency = settings.get<number>('concurrency') || undefined;
     const { summary, redactHighEntropy } = runSettings;
     const previous = runSettings.incremental ? deps.snapshots?.get(repo.root, mode) : undefined;
+    // Answers are kept for this review only: the setting or Copilot's rules may change.
+    const exclusion = deps.exclusion.forReview(repo.root, excludeFileGlobs(settings));
     // File and selection reviews read unsaved editor text; git diffs only see saved files,
     // so say which edits are left out. Staged reviews the index: unsaved edits aren't in it,
     // just like saved but unstaged ones, so it doesn't warn.
@@ -199,6 +206,25 @@ export async function reviewCommand(
           if (controller.signal.aborted) return { cancelled: true as const };
           if (!diff.files.length) return { empty: true as const };
 
+          // Excluded files are taken out first: nothing below asks about them, counts their
+          // cost or sends them (and core checks again). A file review of one is refused.
+          const removed = await removeExcluded(diff, exclusion.isExcluded, controller.signal);
+          if (controller.signal.aborted) return { cancelled: true as const };
+          const excluded = removed.excluded;
+          if (excluded.length && (mode.kind === 'file' || mode.kind === 'selection')) {
+            const by = await exclusion.match(excluded[0]!.path, controller.signal);
+            return {
+              refused: true as const,
+              message: `${excluded[0]!.path} is excluded from AI review${by === 'copilot' ? ' by Copilot content exclusion' : by === 'setting' ? ' by aiReview.excludeFiles' : ''}, so it isn't reviewed.`,
+            };
+          }
+          diff = removed.diff;
+          if (excluded.length) {
+            logger.info(
+              `leaving out ${excluded.length} file(s) excluded from AI review: ${excluded.map((f) => f.path).join(', ')}`,
+            );
+          }
+
           // Untracked files go only when the user says so, asked before the estimate so it
           // counts only what is sent. Files skipped anyway (secrets, binaries, …) aren't
           // asked about. Nothing is remembered: the next review asks again.
@@ -227,6 +253,7 @@ export async function reviewCommand(
           const rules = await loadRepoRulesFromDisk(repo.root, config, {
             logger,
             redactHighEntropy,
+            isExcluded: (p) => exclusion.isExcluded(p, controller.signal),
           });
           const baseOptions = {
             model,
@@ -242,7 +269,8 @@ export async function reviewCommand(
             }),
             agentLimits,
             ...(relaxed.length ? { relaxed } : {}),
-            ...(leftOut.length ? { leftOut } : {}),
+            ...(excluded.length || leftOut.length ? { leftOut: [...excluded, ...leftOut] } : {}),
+            isExcluded: exclusion.isExcluded,
             ...(previous ? { previous } : {}),
           };
           // Filtered, redacted and planned once: for the symbols, the estimate and the review.
@@ -302,6 +330,9 @@ export async function reviewCommand(
               });
             },
           });
+          // Once per review, with the other warnings about the review itself.
+          const warning = exclusion.warning();
+          if (warning) result.warnings = [...(result.warnings ?? []), warning];
           return { empty: false as const, result, estimate };
         } finally {
           subs.forEach((s) => s.dispose());
@@ -309,6 +340,12 @@ export async function reviewCommand(
       },
     );
 
+    if ('refused' in outcome && outcome.refused) {
+      const { message } = outcome;
+      logger.warn(message);
+      notify(message, 'warn');
+      return { ok: false, message };
+    }
     if ('needsConfirmation' in outcome) {
       return {
         ok: false,

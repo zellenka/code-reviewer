@@ -5,6 +5,7 @@ import type { UnifiedDiff, WorkspaceTools } from '../diff/types';
 import { noopLogger, type Logger } from '../logger';
 import type { LLMProvider, ModelInfo } from '../provider/types';
 import { emptyUsage } from '../provider/usage';
+import { cacheExclusion, removeExcluded, type IsExcluded } from './exclude';
 import { repoIgnoreBlocks } from './filter';
 import type { ReviewSnapshot } from './incremental';
 import { addSnapshot, addSummary, checkFindings, mergeCarried } from './postprocess';
@@ -92,6 +93,13 @@ export interface ReviewOptions {
    */
   leftOut?: SkippedFile[];
   /**
+   * Files excluded from AI review (the organization's Copilot content exclusion, the user's
+   * list). Never sent, whatever the provider: skipped as `'excluded'` (by path or, for a
+   * rename, old path) and only counted in what the model is sent; their rules files are
+   * left out; the agent tools refuse them and leave out their hits. Asked once per path.
+   */
+  isExcluded?: IsExcluded;
+  /**
    * The last review of the same scope (`ReviewResult.snapshot`). Hunks reviewed then are
    * not sent again and their findings are carried over. Ignored when the model, mode,
    * config, rules or prompts changed since.
@@ -117,6 +125,9 @@ export async function runReview(
   options.signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
+    if (options.isExcluded) {
+      ({ diff, options } = await withoutExcluded(diff, options, controller.signal));
+    }
     const diffPrepared = toPreparedDiff(diff, options);
     const { plan } = diffPrepared;
     if (diffPrepared.previous && !plan) {
@@ -151,6 +162,7 @@ export async function runReview(
               redactHighEntropy: options.redactHighEntropy ?? false,
               // Files the repo's `ignore:` hides from the diff stay hidden from the tools.
               ...(isBlocked ? { isBlocked } : {}),
+              ...(options.isExcluded ? { isExcluded: options.isExcluded } : {}),
             }) as AgentTool<never>[],
             limits: prepared.agentLimits,
           }
@@ -236,4 +248,39 @@ export async function runReview(
   } finally {
     options.signal?.removeEventListener('abort', onAbort);
   }
+}
+
+/**
+ * The diff and options without what `isExcluded` excludes: its files go to `leftOut` (as
+ * `'excluded'`), its rules files are dropped. A host may have taken them out already (then
+ * nothing changes, and a prepared diff is used as it is).
+ */
+async function withoutExcluded(
+  diff: UnifiedDiff | PreparedDiff,
+  options: ReviewOptions,
+  signal: AbortSignal,
+): Promise<{ diff: UnifiedDiff | PreparedDiff; options: ReviewOptions }> {
+  const isExcluded = cacheExclusion(options.isExcluded!);
+  const raw = 'review' in diff ? diff.diff : diff;
+  const { diff: kept, excluded } = await removeExcluded(raw, isExcluded, signal);
+  const rules = options.rules && {
+    sources: (
+      await Promise.all(
+        options.rules.sources.map(async (s) =>
+          (await isExcluded(s.path, signal).catch(() => true)) ? [] : [s],
+        ),
+      )
+    ).flat(),
+  };
+  options = { ...options, isExcluded };
+  const rulesChanged = rules && rules.sources.length !== options.rules!.sources.length;
+  if (!excluded.length && !rulesChanged) return { diff, options };
+  return {
+    diff: kept,
+    options: {
+      ...options,
+      leftOut: [...(options.leftOut ?? []), ...excluded],
+      ...(rulesChanged ? { rules } : {}),
+    },
+  };
 }

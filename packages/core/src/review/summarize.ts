@@ -87,15 +87,20 @@ export function buildSummaryUserPrompt(options: {
         `- ${s.oldPath ? `${escapePath(s.oldPath)} → ` : ''}${escapePath(s.path)} (${s.status}, +${s.added} −${s.removed})`,
     )
     .join('\n');
-  // Untracked files the user left out are only counted: a file name can be sensitive too.
-  const leftOut = options.skipped?.filter((s) => s.reason === 'untracked').length ?? 0;
+  // Untracked files the user left out and excluded files are only counted: a file name can
+  // be sensitive too.
+  const count = (reason: SkippedFile['reason']) =>
+    options.skipped?.filter((s) => s.reason === reason).length ?? 0;
+  const leftOut = count('untracked');
+  const excluded = count('excluded');
   const notReviewed = [
     ...(options.skipped ?? [])
-      .filter((s) => s.reason !== 'untracked')
+      .filter((s) => s.reason !== 'untracked' && s.reason !== 'excluded')
       .map((s) => `${escapePath(s.path)} (${s.reason})`),
     ...(leftOut
       ? [`${leftOut} untracked file${leftOut === 1 ? '' : 's'} left out by the user`]
       : []),
+    ...(excluded ? [`${excluded} file${excluded === 1 ? '' : 's'} excluded from AI review`] : []),
   ];
   const skipped = notReviewed.length ? `\nNot reviewed: ${notReviewed.join(', ')}\n` : '';
   const findings = options.findings.length

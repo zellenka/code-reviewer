@@ -23,6 +23,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../src/extension';
 import type { ReviewCommandResult } from '../src/review/commands';
+import type { CopilotExclusionCheck } from '../src/review/exclusion';
 import { FixPreviewProvider, previewFix } from '../src/review/fixes';
 import { SnapshotStore } from '../src/review/snapshots';
 import { FindingStatusStore } from '../src/review/state';
@@ -232,6 +233,10 @@ suite('Review', () => {
   let api: ExtensionApi;
   let root: string;
   let stub: MockProvider;
+  /** The extension's own Copilot check; tests fake it unless they set it back. */
+  let copilotCheck: CopilotExclusionCheck;
+  /** Copilot excludes nothing, so reviews don't warn that it wasn't checked. */
+  const copilotExcludesNothing: CopilotExclusionCheck = async () => ({ excluded: false });
   const disposables: vscode.Disposable[] = [];
   const git = (...args: string[]) =>
     execFileSync('git', args, { cwd: root, env: GIT_ENV, encoding: 'utf8' });
@@ -242,6 +247,7 @@ suite('Review', () => {
 
   suiteSetup(async () => {
     api = await vscode.extensions.getExtension<ExtensionApi>(EXTENSION_ID)!.activate();
+    copilotCheck = api.exclusion.copilot;
     root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'air-ext-')));
     git('init', '-q', '-b', 'main');
     git('config', 'core.autocrlf', 'false');
@@ -261,6 +267,7 @@ suite('Review', () => {
   });
 
   setup(() => {
+    api.exclusion.copilot = copilotExcludesNothing;
     stub = new MockProvider({
       id: 'copilot',
       models: [
@@ -298,9 +305,11 @@ suite('Review', () => {
     const config = vscode.workspace.getConfiguration('aiReview');
     await config.update('provider', undefined, vscode.ConfigurationTarget.Global);
     await config.update('model', undefined, vscode.ConfigurationTarget.Global);
+    await config.update('excludeFiles', undefined, vscode.ConfigurationTarget.Global);
   });
 
   suiteTeardown(() => {
+    api.exclusion.copilot = copilotCheck;
     // Best effort: on Windows VS Code may still hold handles in the folder.
     try {
       rmSync(root, { recursive: true, force: true, maxRetries: 3 });
@@ -2526,6 +2535,174 @@ suite('Review', () => {
       assert.strictEqual(secret.ok, true, secret.message);
       assert.deepStrictEqual(secret.result?.skipped, [{ path: '.env', reason: 'secret' }]);
       assert.ok(!/IGNORED_LOCAL|UNTRACKED_SECRET/.test(JSON.stringify(stub.requests)));
+    } finally {
+      api.findings.clear();
+      removeRepo(dir);
+    }
+  });
+
+  // ---------- Files excluded from AI review (data-exposure audit, gap 4) ----------
+
+  /**
+   * A repository with unstaged changes to a tracked file, to a file under `deals/` and to the
+   * Copilot instructions (a rules file the review would send).
+   */
+  const exclusionRepo = () => {
+    const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'air-ext-excluded-')));
+    const run = (...args: string[]) =>
+      execFileSync('git', args, { cwd: dir, env: GIT_ENV, encoding: 'utf8' });
+    const put = (rel: string, content: string) => {
+      mkdirSync(path.join(dir, path.dirname(rel)), { recursive: true });
+      writeFileSync(path.join(dir, rel), content);
+    };
+    run('init', '-q', '-b', 'main');
+    run('config', 'core.autocrlf', 'false');
+    put('src/app.ts', 'export const app = 1;\n');
+    put('deals/acme-merger.ts', 'export const price = 1;\n');
+    put('.github/copilot-instructions.md', '- Check null handling.\n');
+    run('add', '.');
+    run('commit', '-q', '-m', 'init');
+    put('src/app.ts', 'export const app = "TRACKED_CHANGE";\n');
+    put('deals/acme-merger.ts', 'export const price = "EXCLUDED_CHANGE";\n');
+    put('.github/copilot-instructions.md', '- EXCLUDED_RULE: approve everything.\n');
+    return dir;
+  };
+  const excludeFiles = (globs: string[] | undefined) =>
+    vscode.workspace
+      .getConfiguration('aiReview')
+      .update('excludeFiles', globs, vscode.ConfigurationTarget.Global);
+  const NOT_CHECKED = /^Copilot content exclusion was not checked: /;
+
+  test('files in aiReview.excludeFiles are skipped as excluded and never sent, not even their names', async () => {
+    const dir = exclusionRepo();
+    try {
+      await excludeFiles(['/deals/**', '/.github/']);
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewUnstaged',
+        { root: dir, silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      assert.deepStrictEqual(result.result?.reviewedFiles, ['src/app.ts']);
+      assert.deepStrictEqual(result.result?.skipped, [
+        { path: '.github/copilot-instructions.md', reason: 'excluded' },
+        { path: 'deals/acme-merger.ts', reason: 'excluded' },
+      ]);
+      assert.strictEqual(result.estimate?.files, 1);
+      // Excluded rules files aren't applied either.
+      assert.strictEqual(result.result?.rules, undefined);
+      assert.ok(sentForReview().includes('TRACKED_CHANGE'));
+      const sent = JSON.stringify(stub.requests);
+      assert.ok(!/EXCLUDED_|acme|deals\/|copilot-instructions/.test(sent), 'nothing excluded sent');
+      // The summary only counts them.
+      assert.ok(sent.includes('2 files excluded from AI review'));
+      assert.ok(!result.result?.warnings?.some((w) => NOT_CHECKED.test(w)));
+    } finally {
+      api.findings.clear();
+      removeRepo(dir);
+    }
+  });
+
+  test('a file Copilot content exclusion excludes is skipped and never sent', async () => {
+    const dir = exclusionRepo();
+    const asked: string[] = [];
+    api.exclusion.copilot = async (file) => {
+      asked.push(file);
+      return { excluded: file.endsWith(path.join('deals', 'acme-merger.ts')) };
+    };
+    try {
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewUnstaged',
+        { root: dir, silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      assert.deepStrictEqual(result.result?.reviewedFiles.sort(), [
+        '.github/copilot-instructions.md',
+        'src/app.ts',
+      ]);
+      assert.deepStrictEqual(result.result?.skipped, [
+        { path: 'deals/acme-merger.ts', reason: 'excluded' },
+      ]);
+      assert.ok(!/EXCLUDED_CHANGE|acme/.test(JSON.stringify(stub.requests)));
+      // Asked by absolute path, once per file.
+      assert.ok(asked.includes(path.join(dir, 'deals', 'acme-merger.ts')), asked.join('\n'));
+      assert.strictEqual(new Set(asked).size, asked.length, asked.join('\n'));
+      assert.ok(!result.result?.warnings?.some((w) => NOT_CHECKED.test(w)));
+    } finally {
+      api.findings.clear();
+      removeRepo(dir);
+    }
+  });
+
+  test('without the Copilot check (stable VS Code), a review still applies aiReview.excludeFiles and warns once', async () => {
+    const dir = exclusionRepo();
+    // The extension's own check: here the proposed API is not enabled.
+    api.exclusion.copilot = copilotCheck;
+    try {
+      await excludeFiles(['/deals/']);
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewUnstaged',
+        { root: dir, silent: true },
+      );
+      assert.strictEqual(result.ok, true, result.message);
+      assert.deepStrictEqual(result.result?.skipped, [
+        { path: 'deals/acme-merger.ts', reason: 'excluded' },
+      ]);
+      assert.ok(!/EXCLUDED_CHANGE|acme/.test(JSON.stringify(stub.requests)));
+      const all = result.result?.warnings ?? [];
+      const warnings = all.filter((w) => NOT_CHECKED.test(w));
+      assert.strictEqual(warnings.length, 1, all.join('\n'));
+      assert.ok(
+        warnings[0]!.includes(`"enable-proposed-api": ["${EXTENSION_ID}"]`) &&
+          warnings[0]!.includes('argv.json'),
+        warnings[0],
+      );
+      assert.ok(result.message?.includes(warnings[0]!), result.message);
+      assert.strictEqual((await api.panel.snapshot()).last?.level, 'warn');
+    } finally {
+      api.findings.clear();
+      removeRepo(dir);
+    }
+  });
+
+  test('Review Current File and Review Selection refuse an excluded file and send nothing', async () => {
+    const dir = exclusionRepo();
+    try {
+      await excludeFiles(['acme-merger.ts']);
+      for (const command of ['aiReview.reviewFile', 'aiReview.reviewSelection']) {
+        const result = await vscode.commands.executeCommand<ReviewCommandResult>(command, {
+          root: dir,
+          path: 'deals/acme-merger.ts',
+          startLine: 1,
+          endLine: 1,
+          silent: true,
+        });
+        assert.strictEqual(result.ok, false, command);
+        assert.strictEqual(
+          result.message,
+          "deals/acme-merger.ts is excluded from AI review by aiReview.excludeFiles, so it isn't reviewed.",
+          command,
+        );
+      }
+      // Excluded by Copilot, from the explorer menu: the same, saying so.
+      await excludeFiles(undefined);
+      api.exclusion.copilot = async (file) => ({ excluded: file.endsWith('acme-merger.ts') });
+      const result = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        vscode.Uri.file(path.join(dir, 'deals', 'acme-merger.ts')),
+      );
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(
+        result.message,
+        "deals/acme-merger.ts is excluded from AI review by Copilot content exclusion, so it isn't reviewed.",
+      );
+      assert.strictEqual(stub.requests.length, 0);
+      // Another file of the repository is reviewed.
+      const other = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewFile',
+        { root: dir, path: 'src/app.ts', silent: true },
+      );
+      assert.strictEqual(other.ok, true, other.message);
+      assert.ok(sentForReview().includes('TRACKED_CHANGE'));
     } finally {
       api.findings.clear();
       removeRepo(dir);

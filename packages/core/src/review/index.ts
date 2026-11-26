@@ -1,5 +1,6 @@
 export * from './types';
 export * from './filter';
+export * from './exclude';
 export * from './redact';
 export * from './chunker';
 export * from './output';
