@@ -140,6 +140,24 @@
         "icon": "$(book)"
       },
       {
+        "command": "aiReview.saveReview",
+        "title": "Save Review as Markdown…",
+        "category": "AI Review",
+        "icon": "$(save)"
+      },
+      {
+        "command": "aiReview.sendReviewToChat",
+        "title": "Send Review to Agent Chat",
+        "category": "AI Review",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "aiReview.sendFindingToChat",
+        "title": "Send to Agent Chat",
+        "category": "AI Review",
+        "icon": "$(comment-discussion)"
+      },
+      {
         "command": "aiReview.applyFix",
         "title": "Apply Fix",
         "category": "AI Review",
@@ -334,6 +352,22 @@
           "scope": "application",
           "markdownDescription": "Files never sent to the model, with either provider: their content, their name and their search hits stay out of every review. Copy your organization's Copilot content exclusion paths here (`/scripts/**`, `secrets.json`, `*.cfg`): a leading `/` means the repository root, a pattern without `/` matches a name in any folder, a matched folder excludes everything in it, letter case is ignored. Copilot's own content exclusion is also checked when VS Code allows it (see the README). User settings only."
         },
+        "aiReview.agentChat": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "claude-code",
+            "copilot"
+          ],
+          "enumDescriptions": [
+            "The agent chat that is installed; asks which when both are.",
+            "Claude Code: a new conversation with the prompt typed in.",
+            "GitHub Copilot Chat in agent mode, with the prompt typed in."
+          ],
+          "default": "auto",
+          "scope": "application",
+          "markdownDescription": "Where **Send Review to Agent Chat** and **Send to Agent Chat** (on a finding) put the prompt. It is typed in, not sent: you read it and press Enter. The prompt holds the findings, their code (secrets redacted, as the reviewer saw it) and suggested fixes, and the summary. User settings only."
+        },
         "aiReview.verifyFindings": {
           "type": "string",
           "enum": [
@@ -458,6 +492,18 @@
         {
           "command": "aiReview.cancelReview",
           "when": "aiReview.running"
+        },
+        {
+          "command": "aiReview.saveReview",
+          "when": "aiReview.hasReview"
+        },
+        {
+          "command": "aiReview.sendReviewToChat",
+          "when": "aiReview.hasReview"
+        },
+        {
+          "command": "aiReview.sendFindingToChat",
+          "when": "false"
         }
       ],
       "comments/commentThread/title": [
@@ -485,6 +531,11 @@
           "command": "aiReview.reopenFinding",
           "when": "commentController == aiReview && commentThread =~ /\\bresolved\\b/",
           "group": "inline@1"
+        },
+        {
+          "command": "aiReview.sendFindingToChat",
+          "when": "commentController == aiReview && commentThread =~ /\bopen\b/",
+          "group": "inline@5"
         }
       ],
       "view/title": [
@@ -504,9 +555,19 @@
           "group": "navigation@2"
         },
         {
-          "command": "aiReview.clearFindings",
+          "command": "aiReview.sendReviewToChat",
           "when": "view == aiReview.findings && aiReview.hasReview",
           "group": "navigation@3"
+        },
+        {
+          "command": "aiReview.saveReview",
+          "when": "view == aiReview.findings && aiReview.hasReview",
+          "group": "navigation@4"
+        },
+        {
+          "command": "aiReview.clearFindings",
+          "when": "view == aiReview.findings && aiReview.hasReview",
+          "group": "navigation@5"
         }
       ],
       "view/item/context": [
@@ -529,6 +590,11 @@
           "command": "aiReview.previewFix",
           "when": "view == aiReview.findings && viewItem =~ /\\bfixable\\b/",
           "group": "fix@1"
+        },
+        {
+          "command": "aiReview.sendFindingToChat",
+          "when": "view == aiReview.findings && viewItem =~ /^finding/",
+          "group": "inline@4"
         }
       ],
       "editor/context": [

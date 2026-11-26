@@ -29,6 +29,7 @@ export const USER_ONLY_SETTINGS = [
   'allowRepoConfigToRelax',
   'redactHighEntropyStrings',
   'excludeFiles',
+  'agentChat',
   'verifyFindings',
   'incrementalReview',
   'summary',

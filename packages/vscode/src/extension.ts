@@ -8,6 +8,7 @@ import { ModelStatusBar, selectModelCommand } from './providers/picker';
 import { CONFIG_SECTION, ProviderRegistry, type Selection } from './providers/registry';
 import { trustedReviewArgs } from './review/args';
 import { reviewCommand, type ReviewCommandArgs, type ReviewKind } from './review/commands';
+import { AgentChat } from './review/chat';
 import { ReviewConfigService } from './review/config';
 import { COPILOT_CHAT_ID, ContentExclusion, copilotExclusionCheck } from './review/exclusion';
 import { FindingsDiagnostics } from './review/diagnostics';
@@ -38,6 +39,8 @@ export interface ExtensionApi {
   panel: ReviewPanel;
   /** Its `copilot` check can be replaced, to fake Copilot's content exclusion. */
   exclusion: ContentExclusion;
+  /** Its `installed` and `open` can be replaced, to fake the agent chats. */
+  chat: AgentChat;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi> {
@@ -120,6 +123,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const tree = new FindingsTree(store);
   const previews = new FixPreviewProvider();
   const summaries = new SummaryProvider(store);
+  const chat = new AgentChat();
+  const testMode = context.extensionMode === vscode.ExtensionMode.Test;
   context.subscriptions.push(
     configs,
     runs,
@@ -138,12 +143,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         providedCodeActionKinds: FindingCodeActions.kinds,
       },
     ),
-    ...registerFindingCommands({ store, threads, previews }),
+    ...registerFindingCommands({ store, threads, previews, chat, testMode }),
   );
   const deps = { registry, repos, configs, store, logger, runs, snapshots, exclusion };
   // Every review starts here (menus, keybindings, the panel's Run Review), so test-only
   // options are dropped here outside tests.
-  const testMode = context.extensionMode === vscode.ExtensionMode.Test;
   const reviewCommands: [string, ReviewKind][] = [
     ['aiReview.reviewStaged', 'staged'],
     ['aiReview.reviewUnstaged', 'unstaged'],
@@ -211,6 +215,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     tree,
     panel,
     exclusion,
+    chat,
   };
 }
 

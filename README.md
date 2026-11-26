@@ -36,6 +36,8 @@ Free and open source. **Bring your own model:** GitHub Copilot (no key needed) o
    - **Inline comment threads** on the code, with buttons to apply or preview the fix, mark resolved, or dismiss.
    - The **Findings** view in the AI Review sidebar, below the panel: a summary of the change (walkthrough + top risks), findings grouped by file (click to jump to the code), and review details (model, tokens, cost, dropped findings).
    - The **Problems** panel: critical = error, major = warning, minor = info, nit = hint.
+   - **Save Review as Markdown…** (Findings view title, the panel, or the command palette): the summary, the open findings by file with their code and suggested fixes, and the review details, in a `.md` file you choose (by default `ai-review-<scope>-<date>.md` in the repository).
+   - **Send Review to Agent Chat** (same places) and **Send to Agent Chat** on a finding (in the Findings view and its comment thread): types a prompt into Claude Code or GitHub Copilot Chat (agent mode) asking it to check the finding(s) and fix the real ones. The prompt is typed in, not sent, so you can edit it first. `aiReview.agentChat` picks the chat; by default the one installed is used, and when both are you're asked.
 4. Fix: when a finding suggests a change, use the light bulb (**Apply fix** or **Preview fix…**) or the thread's buttons. Fixes are normal edits, so **Undo** works.
 5. Keep editing: findings move with your code. If the code a finding refers to is changed or deleted, it's marked _outdated_ and its fix is disabled. **AI Review: Clear Findings** removes all findings.
 6. Review again after your edits: only the changes since the last review are sent (see below). Findings you dismissed or resolved stay that way in later reviews, even when the model words them a little differently; **AI Review: Forget Dismissed and Resolved Findings** brings them back.
@@ -86,6 +88,7 @@ The repository file decides _what_ is reviewed and reported, but it can only tig
 - **No telemetry.**
 - Your Anthropic API key is stored in VS Code's encrypted Secret Storage, never in `settings.json`.
 - Files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_rsa*`, …), lockfiles and build output are never sent. Neither are files git ignores, nor untracked files unless you confirm them for an unstaged review, nor files excluded from AI review (see [Excluded files](#excluded-files)).
+- **Save Review as Markdown** and **Send to Agent Chat** quote code as the reviewer saw it: secrets stay `[REDACTED]`, and excluded files never have findings. Sending to a chat hands the findings, their code and the summary to that chat's model, under its own terms.
 - Repository content is treated as untrusted. The reviewer can only read files inside the repository; it can't write files or run commands. In agentic mode the model chooses which files to read, but secret files and `.git/` are refused, and everything it reads is redacted like the diff.
 
 ### Excluded files

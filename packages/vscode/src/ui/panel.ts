@@ -37,6 +37,8 @@ const PANEL_COMMANDS = new Set([
   'aiReview.setAnthropicApiKey',
   'aiReview.testConnection',
   'aiReview.showSummary',
+  'aiReview.saveReview',
+  'aiReview.sendReviewToChat',
   'aiReview.clearFindings',
   'aiReview.showLog',
   'aiReview.findings.focus',
@@ -67,7 +69,14 @@ export interface PanelState {
   /** Verify pass on: aiReview.verifyFindings "on", or "auto" and `review.verify` in the repo config. */
   verifyFindings: boolean;
   running: boolean;
-  last?: { text: string; level: 'info' | 'warn' | 'error'; hasSummary: boolean; open: number };
+  last?: {
+    text: string;
+    level: 'info' | 'warn' | 'error';
+    hasSummary: boolean;
+    open: number;
+    /** A review's outcome (not an error before one ran): it can be saved or sent to a chat. */
+    hasReview: boolean;
+  };
 }
 
 const STATE_KEY = 'aiReview.panel';
@@ -220,13 +229,14 @@ export class ReviewPanel implements vscode.WebviewViewProvider, vscode.Disposabl
 
     const session = this.deps.store.session;
     let last: PanelState['last'];
-    if (this.lastError) last = { ...this.lastError, hasSummary: false, open: 0 };
+    if (this.lastError) last = { ...this.lastError, hasSummary: false, open: 0, hasReview: false };
     else if (session) {
       last = {
         text: summarize(session.result, session.model),
         level: needsAttention(session.result) ? 'warn' : 'info',
         hasSummary: !!session.result.summary,
         open: this.deps.store.open().length,
+        hasReview: true,
       };
     }
 

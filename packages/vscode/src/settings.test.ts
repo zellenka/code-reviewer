@@ -147,6 +147,7 @@ describe('settings a repository cannot change (A2)', () => {
         'allowRepoConfigToRelax',
         'redactHighEntropyStrings',
         'excludeFiles',
+        'agentChat',
         'verifyFindings',
         'incrementalReview',
         'summary',

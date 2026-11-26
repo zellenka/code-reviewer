@@ -933,6 +933,71 @@ suite('Review', () => {
     }
   });
 
+  test('save review writes the summary and the open findings as Markdown', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const target = vscode.Uri.file(path.join(tmpdir(), `air-report-${Date.now()}.md`));
+    try {
+      const saved = await vscode.commands.executeCommand<vscode.Uri>('aiReview.saveReview', target);
+      assert.strictEqual(saved?.fsPath, target.fsPath);
+      const md = readFileSync(target.fsPath, 'utf8');
+      assert.match(md, /^# AI Review: src\/ux-lf\.ts\n\n_Stub · /);
+      assert.match(md, /## Summary\n\n[^]*Walkthrough/);
+      assert.ok(md.includes('### `src/ux-lf.ts`'), md);
+      assert.ok(md.includes(`#### 1. ${api.findings.get(key)!.title}`), md);
+      assert.ok(md.includes('## Details'), md);
+
+      // Dismissed findings are counted, not listed.
+      await vscode.commands.executeCommand('aiReview.dismissFinding', key);
+      await vscode.commands.executeCommand('aiReview.saveReview', target);
+      const after = readFileSync(target.fsPath, 'utf8');
+      assert.ok(after.includes('No open findings.'), after);
+      assert.ok(after.includes('- Not listed: 0 resolved, 1 dismissed'), after);
+    } finally {
+      rmSync(target.fsPath, { force: true });
+    }
+  });
+
+  test('send to agent chat: one finding or the review, to the chat the setting picks', async () => {
+    const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
+    const sent: [string, string][] = [];
+    const { installed, open } = api.chat;
+    api.chat.installed = (target) => target === 'claude-code';
+    api.chat.open = async (target, prompt) => {
+      sent.push([target, prompt]);
+    };
+    const config = vscode.workspace.getConfiguration('aiReview');
+    try {
+      // From the tree's inline button, which passes the node.
+      const node = api.tree.getChildren(api.tree.getChildren()[1]!)[0]!;
+      assert.strictEqual(
+        await vscode.commands.executeCommand('aiReview.sendFindingToChat', node),
+        true,
+      );
+      assert.strictEqual(sent[0]![0], 'claude-code');
+      // Named as the chat sees it: workspace-relative, or absolute outside the workspace (here).
+      const name = vscode.workspace.asRelativePath(uriOf('src/ux-lf.ts'));
+      assert.ok(
+        sent[0]![1].startsWith(`Below is a finding from an AI code review of \`${name}\`.`),
+        sent[0]![1],
+      );
+      assert.ok(sent[0]![1].includes(api.findings.get(key)!.title));
+
+      assert.strictEqual(await vscode.commands.executeCommand('aiReview.sendReviewToChat'), true);
+      assert.match(sent[1]![1], /^Below is an AI code review of src\/ux-lf\.ts\. Go through/);
+      assert.ok(sent[1]![1].includes(`### \`${name}\``), sent[1]![1]);
+      assert.ok(!sent[1]![1].includes('## Details'));
+
+      // A chat the setting names but isn't installed gets nothing.
+      await config.update('agentChat', 'copilot', vscode.ConfigurationTarget.Global);
+      assert.strictEqual(await vscode.commands.executeCommand('aiReview.sendReviewToChat'), false);
+      assert.strictEqual(sent.length, 2);
+    } finally {
+      api.chat.installed = installed;
+      api.chat.open = open;
+      await config.update('agentChat', undefined, vscode.ConfigurationTarget.Global);
+    }
+  });
+
   test('a priced model above the cost threshold needs confirmation', async () => {
     const priced = new MockProvider({
       id: 'anthropic',

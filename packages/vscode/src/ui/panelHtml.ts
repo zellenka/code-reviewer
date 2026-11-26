@@ -184,6 +184,8 @@ export function panelHtml(cspSource: string, nonce: string): string {
     <div class="actions">
       <button class="link" id="show-findings" hidden>Show findings</button>
       <button class="link" id="show-summary" hidden>Show summary</button>
+      <button class="link" id="send-chat" hidden title="Type the review into an agent chat (Claude Code or Copilot) to work through the findings">Send to chat</button>
+      <button class="link" id="save-review" hidden title="Save the summary and findings as a Markdown file">Save as Markdown</button>
       <button class="link" id="show-log" hidden>Show log</button>
       <button class="link" id="clear" hidden>Clear</button>
     </div>
@@ -213,6 +215,8 @@ export function panelHtml(cspSource: string, nonce: string): string {
     send('command', state && state.model.needsKey ? 'aiReview.setAnthropicApiKey' : 'aiReview.selectModel'));
   $('show-findings').addEventListener('click', () => send('command', 'aiReview.findings.focus'));
   $('show-summary').addEventListener('click', () => send('command', 'aiReview.showSummary'));
+  $('send-chat').addEventListener('click', () => send('command', 'aiReview.sendReviewToChat'));
+  $('save-review').addEventListener('click', () => send('command', 'aiReview.saveReview'));
   $('show-log').addEventListener('click', () => send('command', 'aiReview.showLog'));
   $('clear').addEventListener('click', () => send('command', 'aiReview.clearFindings'));
 
@@ -278,6 +282,8 @@ export function panelHtml(cspSource: string, nonce: string): string {
       $('show-findings').hidden = !last.open;
       $('show-findings').textContent = 'Show ' + last.open + ' open finding' + (last.open === 1 ? '' : 's');
       $('show-summary').hidden = !last.hasSummary;
+      $('send-chat').hidden = !last.hasReview;
+      $('save-review').hidden = !last.hasReview;
       $('show-log').hidden = last.level === 'info';
       $('clear').hidden = last.level !== 'info';
     }
