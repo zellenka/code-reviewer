@@ -18,9 +18,11 @@ import { isDiffSourceError, noopLogger } from '@ai-review/core';
 import {
   FsWorkspaceTools,
   GitCliDiffSource,
+  commitSpan,
   findRepoRoot,
   isInside,
   isSafeRef,
+  listCommits,
   resolveInRepo,
 } from './index';
 
@@ -532,6 +534,89 @@ describe('GitCliDiffSource', () => {
     const { files } = await unsaved.getDiff({ kind: 'unstaged' });
     expect(files.find((f) => f.path === 'keep.txt')!.newContent).toBe('one\nTWO\nthree\n');
     expect(asked).toEqual([]);
+  });
+});
+
+describe('commits', () => {
+  let root: string;
+  let git: (...args: string[]) => string;
+  let source: GitCliDiffSource;
+  /** Commit ids, oldest first. */
+  const ids: string[] = [];
+  const commit = (rel: string, content: string, message: string) => {
+    writeFileSync(path.join(root, rel), content);
+    git('add', '.');
+    git('commit', '-q', '-m', message);
+    ids.push(git('rev-parse', 'HEAD').trim());
+  };
+
+  beforeAll(() => {
+    ({ root, git } = makeRepo());
+    commit('a.ts', 'one\n', 'first');
+    commit('a.ts', 'one\ntwo\n', 'second');
+    commit('b.ts', 'b\n', 'third: add b');
+    // Not committed: a commits review never sees it.
+    writeFileSync(path.join(root, 'a.ts'), 'one\ntwo\nlocal\n');
+    writeFileSync(path.join(root, 'new.ts'), 'new\n');
+    source = new GitCliDiffSource({ root });
+  });
+
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  it('one commit: its changes, with content as committed', async () => {
+    const { files } = await source.getDiff({ kind: 'commits', oldest: ids[1]!, newest: ids[1]! });
+    expect(files.map((f) => f.path)).toEqual(['a.ts']);
+    expect(files[0]!.newContent).toBe('one\ntwo\n');
+    expect(files[0]!.hunks[0]!.lines.filter((l) => l.kind === 'add')).toEqual([
+      { kind: 'add', text: 'two', newLine: 2 },
+    ]);
+  });
+
+  it('a run of commits, from the first commit (no parent) to a ref name', async () => {
+    const { files } = await source.getDiff({ kind: 'commits', oldest: ids[0]!, newest: 'HEAD' });
+    expect(Object.fromEntries(files.map((f) => [f.path, [f.status, f.newContent]]))).toEqual({
+      'a.ts': ['added', 'one\ntwo\n'],
+      'b.ts': ['added', 'b\n'],
+    });
+    expect(files.some((f) => f.untracked)).toBe(false);
+  });
+
+  it('rejects unknown commits, option-like refs and reversed runs', async () => {
+    const rejects = (oldest: string, newest: string, message: RegExp) =>
+      expect(source.getDiff({ kind: 'commits', oldest, newest })).rejects.toSatisfy(
+        (e) => isDiffSourceError(e) && e.kind === 'noCommit' && message.test(e.message),
+      );
+    await rejects('nope', 'HEAD', /not found/);
+    await rejects('--output=x', 'HEAD', /not a valid commit/);
+    await rejects('HEAD~1..HEAD', 'HEAD', /not a valid commit/);
+    await rejects(ids[2]!, ids[0]!, /not an earlier commit/);
+  });
+
+  it('lists first-parent commits newest first; a span covers the picks and what lies between', async () => {
+    const commits = await listCommits(root);
+    expect(commits.map((c) => c.id)).toEqual([...ids].reverse());
+    expect(commits[0]).toMatchObject({ subject: 'third: add b', author: 't' });
+    expect(commits[0]!.id.startsWith(commits[0]!.shortId)).toBe(true);
+    expect(await listCommits(root, { limit: 1 })).toHaveLength(1);
+
+    expect(commitSpan(commits, [ids[1]!])).toEqual({
+      oldest: ids[1],
+      newest: ids[1],
+      count: 1,
+      unpicked: 0,
+    });
+    // Picked out of order, with a gap: the run from the oldest to the newest.
+    expect(commitSpan(commits, [ids[0]!, ids[2]!])).toEqual({
+      oldest: ids[0],
+      newest: ids[2],
+      count: 3,
+      unpicked: 1,
+    });
+    expect(commitSpan(commits, ['unknown'])).toBeUndefined();
+
+    const empty = makeRepo();
+    expect(await listCommits(empty.root)).toEqual([]);
+    rmSync(empty.root, { recursive: true, force: true });
   });
 });
 

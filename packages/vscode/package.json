@@ -108,6 +108,11 @@
         "category": "AI Review"
       },
       {
+        "command": "aiReview.reviewCommits",
+        "title": "Review Commits…",
+        "category": "AI Review"
+      },
+      {
         "command": "aiReview.reviewFile",
         "title": "Review Current File",
         "category": "AI Review"

@@ -141,6 +141,10 @@ export function panelHtml(cspSource: string, nonce: string): string {
         <datalist id="branches"></datalist>
       </span>
     </label>
+    <label class="scope" data-scope="commits">
+      <input type="radio" name="scope" value="commits"><span>Commits</span>
+      <span class="hint">Pick one or more commits when you run</span>
+    </label>
     <label class="scope" data-scope="file">
       <input type="radio" name="scope" value="file"><span>Current file</span>
       <span class="hint" id="file-hint"></span>

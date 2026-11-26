@@ -93,6 +93,8 @@ function scopeKey(root: string, mode: ReviewMode): string | undefined {
       return `${r}|branch|${mode.base ?? ''}`;
     case 'file':
       return `${r}|file|${mode.path}`;
+    case 'commits':
+      return `${r}|commits|${mode.oldest}|${mode.newest}`;
     case 'selection':
       return undefined;
   }

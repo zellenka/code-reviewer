@@ -1,5 +1,6 @@
 import {
   MockProvider,
+  describeMode,
   fingerprint,
   type ChatRequest,
   type Finding,
@@ -326,6 +327,7 @@ suite('Review', () => {
       'reviewBranch',
       'reviewFile',
       'reviewSelection',
+      'reviewCommits',
     ]) {
       assert.ok(commands.includes(`aiReview.${id}`), id);
     }
@@ -359,6 +361,62 @@ suite('Review', () => {
       sel.files[0]!.hunks[0]!.lines.map((l) => l.newLine),
       [3, 4, 5],
     );
+  });
+
+  test('review commits sends what they changed as committed, not the working tree', async () => {
+    const r2 = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'air-commits-')));
+    const g2 = (...args: string[]) =>
+      execFileSync('git', args, { cwd: r2, env: GIT_ENV, encoding: 'utf8' }).trim();
+    try {
+      g2('init', '-q', '-b', 'main');
+      g2('config', 'core.autocrlf', 'false');
+      mkdirSync(path.join(r2, 'src'));
+      writeFileSync(path.join(r2, 'src', 'calc.ts'), CALC_V1);
+      g2('add', '.');
+      g2('commit', '-q', '-m', 'v1');
+      const first = g2('rev-parse', 'HEAD');
+      writeFileSync(path.join(r2, 'src', 'calc.ts'), CALC_V2);
+      g2('commit', '-q', '-am', 'v2');
+      // Not committed: left out of commit reviews.
+      writeFileSync(path.join(r2, 'src', 'local.ts'), 'export const local = 1;\n');
+
+      const last = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewCommits',
+        { root: r2, toCommit: 'HEAD', silent: true },
+      );
+      assert.strictEqual(last.ok, true, last.message);
+      assert.deepStrictEqual(last.result?.reviewedFiles, ['src/calc.ts']);
+      assert.strictEqual(last.findings?.length, 1);
+      // Anchored to the working tree, where the committed code still is.
+      assert.strictEqual(last.findings[0]!.startLine, 4);
+      assert.strictEqual(last.findings[0]!.stale, false);
+      assert.match(api.findings.session ? describeMode(api.findings.session.mode) : '', /^commit /);
+
+      stub.requests.length = 0;
+      const one = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewCommits',
+        { root: r2, fromCommit: first, toCommit: first, silent: true },
+      );
+      assert.strictEqual(one.ok, true, one.message);
+      assert.strictEqual(one.findings?.length, 0);
+      const sent = JSON.stringify(stub.requests.map((r) => r.messages));
+      assert.ok(sent.includes('return a - b;'));
+      assert.ok(!sent.includes('return a + b;') && !sent.includes('local'));
+
+      const missing = await vscode.commands.executeCommand<ReviewCommandResult>(
+        'aiReview.reviewCommits',
+        { root: r2, toCommit: 'no-such-commit', silent: true },
+      );
+      assert.strictEqual(missing.ok, false);
+      assert.match(missing.message ?? '', /not found/);
+    } finally {
+      api.findings.clear();
+      try {
+        rmSync(r2, { recursive: true, force: true, maxRetries: 3 });
+      } catch {
+        // left in the temp dir
+      }
+    }
   });
 
   test('review unstaged shows diagnostics on the expected lines', async () => {

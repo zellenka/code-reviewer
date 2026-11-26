@@ -4,7 +4,9 @@ import {
   createGitRunner,
   findRepoRoot,
   isInside,
+  listCommits,
   pathKey,
+  type CommitInfo,
 } from '@ai-review/node-host';
 import { stat } from 'node:fs/promises';
 import * as path from 'node:path';
@@ -90,6 +92,16 @@ export class RepoLocator {
         .filter((b) => b && !b.endsWith('/HEAD') && b !== 'origin');
     } catch (err) {
       this.logger.debug(`listing branches failed: ${String(err)}`);
+      return [];
+    }
+  }
+
+  /** The latest commits of HEAD in `root` (first parents, newest first), for the commit picker. */
+  async commits(root: string): Promise<CommitInfo[]> {
+    try {
+      return await listCommits(root, { gitPath: (await this.gitApi())?.git.path });
+    } catch (err) {
+      this.logger.debug(`listing commits failed: ${String(err)}`);
       return [];
     }
   }

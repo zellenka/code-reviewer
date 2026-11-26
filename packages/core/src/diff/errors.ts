@@ -1,5 +1,13 @@
 export type DiffSourceErrorKind =
-  'noRepo' | 'detachedHead' | 'noBase' | 'notFound' | 'outsideRepo' | 'ignored' | 'git';
+  | 'noRepo'
+  | 'detachedHead'
+  | 'noBase'
+  /** A commit to review doesn't exist, or the commits aren't one run of history. */
+  | 'noCommit'
+  | 'notFound'
+  | 'outsideRepo'
+  | 'ignored'
+  | 'git';
 
 /** A diff could not be produced. `message` is safe to show to the user. */
 export class DiffSourceError extends Error {

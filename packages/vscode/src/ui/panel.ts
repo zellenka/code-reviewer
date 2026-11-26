@@ -17,13 +17,14 @@ import type { FindingStore } from '../review/store';
 import { reviewRunSettings, userSetting } from '../settings';
 import { panelHtml } from './panelHtml';
 
-export const SCOPES = ['unstaged', 'staged', 'branch', 'file', 'selection'] as const;
+export const SCOPES = ['unstaged', 'staged', 'branch', 'commits', 'file', 'selection'] as const;
 export type PanelScope = (typeof SCOPES)[number];
 
 const REVIEW_COMMANDS: Record<PanelScope, string> = {
   unstaged: 'aiReview.reviewUnstaged',
   staged: 'aiReview.reviewStaged',
   branch: 'aiReview.reviewBranch',
+  commits: 'aiReview.reviewCommits',
   file: 'aiReview.reviewFile',
   selection: 'aiReview.reviewSelection',
 };

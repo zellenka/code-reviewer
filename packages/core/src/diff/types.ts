@@ -47,7 +47,12 @@ export type ReviewMode =
   | { kind: 'branch'; base?: string }
   /** A file git doesn't ignore (tracked, or untracked and not ignored), as on disk or in the editor. */
   | { kind: 'file'; path: string }
-  | { kind: 'selection'; path: string; startLine: number; endLine: number };
+  | { kind: 'selection'; path: string; startLine: number; endLine: number }
+  /**
+   * What a run of commits changed, as committed: from the first parent of `oldest` (nothing,
+   * for the first commit) to `newest`. One commit: `oldest` and `newest` are the same.
+   */
+  | { kind: 'commits'; oldest: string; newest: string };
 
 /** Implemented per host; core only parses. */
 export interface DiffSource {
@@ -119,5 +124,14 @@ export function describeMode(mode: ReviewMode): string {
       return mode.path;
     case 'selection':
       return `${mode.path}:${mode.startLine}-${mode.endLine}`;
+    case 'commits':
+      return mode.oldest === mode.newest
+        ? `commit ${shortRef(mode.newest)}`
+        : `commits ${shortRef(mode.oldest)} to ${shortRef(mode.newest)}`;
   }
+}
+
+/** A full commit id shortened to 7 characters; any other ref as it is. */
+function shortRef(ref: string): string {
+  return /^[0-9a-f]{40}$/i.test(ref) ? ref.slice(0, 7) : ref;
 }

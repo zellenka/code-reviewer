@@ -150,6 +150,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     ['aiReview.reviewBranch', 'branch'],
     ['aiReview.reviewFile', 'file'],
     ['aiReview.reviewSelection', 'selection'],
+    ['aiReview.reviewCommits', 'commits'],
   ];
   for (const [id, kind] of reviewCommands) {
     context.subscriptions.push(
@@ -226,6 +227,16 @@ function isArgs(arg: unknown): arg is ReviewCommandArgs {
     !!arg &&
     typeof arg === 'object' &&
     !(arg instanceof vscode.Uri) &&
-    ['root', 'path', 'startLine', 'endLine', 'base', 'silent', 'confirmCost'].some((k) => k in arg)
+    [
+      'root',
+      'path',
+      'startLine',
+      'endLine',
+      'base',
+      'toCommit',
+      'fromCommit',
+      'silent',
+      'confirmCost',
+    ].some((k) => k in arg)
   );
 }

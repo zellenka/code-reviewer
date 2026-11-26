@@ -20,7 +20,7 @@ import {
   type Severity,
   type SkippedFile,
 } from '@ai-review/core';
-import { loadRepoRulesFromDisk } from '@ai-review/node-host';
+import { loadRepoRulesFromDisk, type CommitInfo } from '@ai-review/node-host';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { showProviderError } from '../providers/errorUi';
@@ -33,6 +33,7 @@ import {
   reviewRunSettings,
   setInWorkspace,
 } from '../settings';
+import { pickCommits } from './commitPicker';
 import type { ReviewConfigService } from './config';
 import type { ContentExclusion } from './exclusion';
 import { relativeToRepo, unsavedFiles, type RepoLocator } from './repo';
@@ -53,6 +54,13 @@ export interface ReviewCommandArgs {
   startLine?: number;
   endLine?: number;
   base?: string;
+  /**
+   * Commit reviews: the newest commit to review (default HEAD). Without this or
+   * `fromCommit`, the commits are picked from a list.
+   */
+  toCommit?: string;
+  /** Commit reviews: the oldest commit to review (default `toCommit`: just that one). */
+  fromCommit?: string;
   /** No notifications. Tests only: dropped outside `ExtensionMode.Test` (see `trustedReviewArgs`). */
   silent?: boolean;
   /**
@@ -146,7 +154,11 @@ export async function reviewCommand(
     const repo = await deps.repos.resolve(args.root ?? fileHint);
     if (!repo) return { ok: false, message: 'cancelled' };
 
-    const mode = buildMode(kind, repo.root, fileTarget, args, editor);
+    const mode =
+      kind === 'commits'
+        ? await commitsMode(args, () => deps.repos.commits(repo.root))
+        : buildMode(kind, repo.root, fileTarget, args, editor);
+    if (mode === undefined) return { ok: false, message: 'cancelled' };
     if (typeof mode === 'string') {
       notify(mode, 'warn');
       return { ok: false, message: mode };
@@ -265,7 +277,7 @@ export async function reviewCommand(
             workspace: new VsCodeWorkspaceTools(repo.root, logger, {
               ...(repo.gitPath ? { gitPath: repo.gitPath } : {}),
               // Untracked files the review doesn't send stay hidden from the agent's tools.
-              untracked: mode.kind !== 'branch' && !leftOut.length,
+              untracked: mode.kind !== 'branch' && mode.kind !== 'commits' && !leftOut.length,
             }),
             agentLimits,
             ...(relaxed.length ? { relaxed } : {}),
@@ -446,8 +458,21 @@ function isTooLarge(err: unknown): boolean {
   return err instanceof Error && err.name === 'ReviewTooLargeError';
 }
 
+/** The commits named in `args`, else the ones the user picks (undefined = cancelled). */
+async function commitsMode(
+  args: ReviewCommandArgs,
+  commits: () => Promise<CommitInfo[]>,
+): Promise<ReviewMode | string | undefined> {
+  if (args.toCommit || args.fromCommit) {
+    const newest = args.toCommit ?? 'HEAD';
+    return { kind: 'commits', oldest: args.fromCommit ?? newest, newest };
+  }
+  if (args.silent) return 'Name the commits to review (toCommit, fromCommit).';
+  return pickCommits(await commits());
+}
+
 function buildMode(
-  kind: ReviewKind,
+  kind: Exclude<ReviewKind, 'commits'>,
   root: string,
   fileTarget: string | undefined,
   args: ReviewCommandArgs,
