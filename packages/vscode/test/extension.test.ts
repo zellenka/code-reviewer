@@ -11,10 +11,14 @@ const manifest = JSON.parse(
 ) as {
   name: string;
   publisher: string;
+  enabledApiProposals?: string[];
   contributes: {
     commands: { command: string }[];
     configuration: {
-      properties: Record<string, { scope?: string; minimum?: number; maximum?: number }>;
+      properties: Record<
+        string,
+        { scope?: string; minimum?: number; maximum?: number; default?: unknown }
+      >;
     };
   };
 };
@@ -34,6 +38,13 @@ suite('Extension', () => {
     assert.strictEqual(extension.isActive, true);
   });
 
+  test('declares the one proposed API it uses, and activates where it is not enabled', () => {
+    // vscode.lm.fileIsIgnored (Copilot content exclusion); stable VS Code only enables it
+    // with --enable-proposed-api, so the tests run without it.
+    assert.deepStrictEqual(manifest.enabledApiProposals, ['chatParticipantAdditions']);
+    assert.strictEqual(extension.isActive, true);
+  });
+
   test('registers every contributed command', async () => {
     const commands = await vscode.commands.getCommands(true);
     for (const { command } of manifest.contributes.commands) {
@@ -48,6 +59,9 @@ suite('Extension', () => {
     for (const key of USER_ONLY_SETTINGS) {
       assert.strictEqual(properties[`aiReview.${key}`]?.scope, 'application', key);
     }
+    // A repository's settings can't empty the list of files never to send.
+    assert.ok(USER_ONLY_SETTINGS.includes('excludeFiles'));
+    assert.deepStrictEqual(properties['aiReview.excludeFiles']?.default, []);
     for (const { key, min, max } of Object.values(AGENT_LIMIT_SETTINGS)) {
       assert.strictEqual(properties[`aiReview.${key}`]?.minimum, min, key);
       assert.strictEqual(properties[`aiReview.${key}`]?.maximum, max, key);

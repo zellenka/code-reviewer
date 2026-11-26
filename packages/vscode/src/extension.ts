@@ -8,7 +8,9 @@ import { ModelStatusBar, selectModelCommand } from './providers/picker';
 import { CONFIG_SECTION, ProviderRegistry, type Selection } from './providers/registry';
 import { trustedReviewArgs } from './review/args';
 import { reviewCommand, type ReviewCommandArgs, type ReviewKind } from './review/commands';
+import { AgentChat } from './review/chat';
 import { ReviewConfigService } from './review/config';
+import { COPILOT_CHAT_ID, ContentExclusion, copilotExclusionCheck } from './review/exclusion';
 import { FindingsDiagnostics } from './review/diagnostics';
 import { registerFindingCommands } from './review/findingCommands';
 import { FindingCodeActions, FixPreviewProvider, PREVIEW_SCHEME } from './review/fixes';
@@ -35,6 +37,10 @@ export interface ExtensionApi {
   threads: FindingThreads;
   tree: FindingsTree;
   panel: ReviewPanel;
+  /** Its `copilot` check can be replaced, to fake Copilot's content exclusion. */
+  exclusion: ContentExclusion;
+  /** Its `installed` and `open` can be replaced, to fake the agent chats. */
+  chat: AgentChat;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi> {
@@ -103,11 +109,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const statuses = new FindingStatusStore(context.workspaceState);
   const snapshots = new SnapshotStore(context.workspaceState);
   const runs = new ReviewRuns();
+  const exclusion = new ContentExclusion(
+    copilotExclusionCheck({
+      lm: vscode.lm,
+      copilotChat: () => vscode.extensions.getExtension(COPILOT_CHAT_ID),
+      uri: (file) => vscode.Uri.file(file),
+      tokenSource: () => new vscode.CancellationTokenSource(),
+    }),
+    context.extension.id,
+  );
   const store = new FindingStore(runs, statuses);
   const threads = new FindingThreads(store);
   const tree = new FindingsTree(store);
   const previews = new FixPreviewProvider();
   const summaries = new SummaryProvider(store);
+  const chat = new AgentChat();
+  const testMode = context.extensionMode === vscode.ExtensionMode.Test;
   context.subscriptions.push(
     configs,
     runs,
@@ -126,18 +143,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         providedCodeActionKinds: FindingCodeActions.kinds,
       },
     ),
-    ...registerFindingCommands({ store, threads, previews }),
+    ...registerFindingCommands({ store, threads, previews, chat }),
   );
-  const deps = { registry, repos, configs, store, logger, runs, snapshots };
+  const deps = { registry, repos, configs, store, logger, runs, snapshots, exclusion };
   // Every review starts here (menus, keybindings, the panel's Run Review), so test-only
   // options are dropped here outside tests.
-  const testMode = context.extensionMode === vscode.ExtensionMode.Test;
   const reviewCommands: [string, ReviewKind][] = [
     ['aiReview.reviewStaged', 'staged'],
     ['aiReview.reviewUnstaged', 'unstaged'],
     ['aiReview.reviewBranch', 'branch'],
     ['aiReview.reviewFile', 'file'],
     ['aiReview.reviewSelection', 'selection'],
+    ['aiReview.reviewCommits', 'commits'],
   ];
   for (const [id, kind] of reviewCommands) {
     context.subscriptions.push(
@@ -197,6 +214,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     threads,
     tree,
     panel,
+    exclusion,
+    chat,
   };
 }
 
@@ -213,6 +232,16 @@ function isArgs(arg: unknown): arg is ReviewCommandArgs {
     !!arg &&
     typeof arg === 'object' &&
     !(arg instanceof vscode.Uri) &&
-    ['root', 'path', 'startLine', 'endLine', 'base', 'silent', 'confirmCost'].some((k) => k in arg)
+    [
+      'root',
+      'path',
+      'startLine',
+      'endLine',
+      'base',
+      'toCommit',
+      'fromCommit',
+      'silent',
+      'confirmCost',
+    ].some((k) => k in arg)
   );
 }

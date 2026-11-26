@@ -86,7 +86,9 @@ export type SkipReason =
   | 'configIgnore'
   | 'noChanges'
   /** A new file git doesn't track, left out by the host (the user chose not to send it). */
-  | 'untracked';
+  | 'untracked'
+  /** Excluded from AI review (`ReviewOptions.isExcluded`): never sent, not even its name. */
+  | 'excluded';
 
 export interface SkippedFile {
   path: string;

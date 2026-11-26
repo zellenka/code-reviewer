@@ -9,6 +9,7 @@ import {
   loadSymbols,
   isProviderError,
   prepareDiff,
+  removeExcluded,
   runReview,
   type Finding,
   type Logger,
@@ -19,7 +20,7 @@ import {
   type Severity,
   type SkippedFile,
 } from '@ai-review/core';
-import { loadRepoRulesFromDisk } from '@ai-review/node-host';
+import { loadRepoRulesFromDisk, type CommitInfo } from '@ai-review/node-host';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { showProviderError } from '../providers/errorUi';
@@ -28,10 +29,13 @@ import {
   USER_ONLY_SETTINGS,
   agentLimitSettings,
   costThreshold,
+  excludeFileGlobs,
   reviewRunSettings,
   setInWorkspace,
 } from '../settings';
+import { pickCommits } from './commitPicker';
 import type { ReviewConfigService } from './config';
+import type { ContentExclusion } from './exclusion';
 import { relativeToRepo, unsavedFiles, type RepoLocator } from './repo';
 import type { ReviewRuns } from './runs';
 import type { SnapshotStore } from './snapshots';
@@ -50,6 +54,13 @@ export interface ReviewCommandArgs {
   startLine?: number;
   endLine?: number;
   base?: string;
+  /**
+   * Commit reviews: the newest commit to review (default HEAD). Without this or
+   * `fromCommit`, the commits are picked from a list.
+   */
+  toCommit?: string;
+  /** Commit reviews: the oldest commit to review (default `toCommit`: just that one). */
+  fromCommit?: string;
   /** No notifications. Tests only: dropped outside `ExtensionMode.Test` (see `trustedReviewArgs`). */
   silent?: boolean;
   /**
@@ -83,6 +94,8 @@ export interface ReviewDeps {
   runs: ReviewRuns;
   /** Last complete review per scope, for incremental re-reviews. */
   snapshots?: SnapshotStore;
+  /** Files never sent: `aiReview.excludeFiles` and Copilot's content exclusion. */
+  exclusion: ContentExclusion;
 }
 
 export async function reviewCommand(
@@ -141,7 +154,11 @@ export async function reviewCommand(
     const repo = await deps.repos.resolve(args.root ?? fileHint);
     if (!repo) return { ok: false, message: 'cancelled' };
 
-    const mode = buildMode(kind, repo.root, fileTarget, args, editor);
+    const mode =
+      kind === 'commits'
+        ? await commitsMode(args, () => deps.repos.commits(repo.root))
+        : buildMode(kind, repo.root, fileTarget, args, editor);
+    if (mode === undefined) return { ok: false, message: 'cancelled' };
     if (typeof mode === 'string') {
       notify(mode, 'warn');
       return { ok: false, message: mode };
@@ -165,6 +182,8 @@ export async function reviewCommand(
     const concurrency = settings.get<number>('concurrency') || undefined;
     const { summary, redactHighEntropy } = runSettings;
     const previous = runSettings.incremental ? deps.snapshots?.get(repo.root, mode) : undefined;
+    // Answers are kept for this review only: the setting or Copilot's rules may change.
+    const exclusion = deps.exclusion.forReview(repo.root, excludeFileGlobs(settings));
     // File and selection reviews read unsaved editor text; git diffs only see saved files,
     // so say which edits are left out. Staged reviews the index: unsaved edits aren't in it,
     // just like saved but unstaged ones, so it doesn't warn.
@@ -199,6 +218,25 @@ export async function reviewCommand(
           if (controller.signal.aborted) return { cancelled: true as const };
           if (!diff.files.length) return { empty: true as const };
 
+          // Excluded files are taken out first: nothing below asks about them, counts their
+          // cost or sends them (and core checks again). A file review of one is refused.
+          const removed = await removeExcluded(diff, exclusion.isExcluded, controller.signal);
+          if (controller.signal.aborted) return { cancelled: true as const };
+          const excluded = removed.excluded;
+          if (excluded.length && (mode.kind === 'file' || mode.kind === 'selection')) {
+            const by = await exclusion.match(excluded[0]!.path, controller.signal);
+            return {
+              refused: true as const,
+              message: `${excluded[0]!.path} is excluded from AI review${by === 'copilot' ? ' by Copilot content exclusion' : by === 'setting' ? ' by aiReview.excludeFiles' : ''}, so it isn't reviewed.`,
+            };
+          }
+          diff = removed.diff;
+          if (excluded.length) {
+            logger.info(
+              `leaving out ${excluded.length} file(s) excluded from AI review: ${excluded.map((f) => f.path).join(', ')}`,
+            );
+          }
+
           // Untracked files go only when the user says so, asked before the estimate so it
           // counts only what is sent. Files skipped anyway (secrets, binaries, …) aren't
           // asked about. Nothing is remembered: the next review asks again.
@@ -227,6 +265,7 @@ export async function reviewCommand(
           const rules = await loadRepoRulesFromDisk(repo.root, config, {
             logger,
             redactHighEntropy,
+            isExcluded: (p) => exclusion.isExcluded(p, controller.signal),
           });
           const baseOptions = {
             model,
@@ -238,11 +277,12 @@ export async function reviewCommand(
             workspace: new VsCodeWorkspaceTools(repo.root, logger, {
               ...(repo.gitPath ? { gitPath: repo.gitPath } : {}),
               // Untracked files the review doesn't send stay hidden from the agent's tools.
-              untracked: mode.kind !== 'branch' && !leftOut.length,
+              untracked: mode.kind !== 'branch' && mode.kind !== 'commits' && !leftOut.length,
             }),
             agentLimits,
             ...(relaxed.length ? { relaxed } : {}),
-            ...(leftOut.length ? { leftOut } : {}),
+            ...(excluded.length || leftOut.length ? { leftOut: [...excluded, ...leftOut] } : {}),
+            isExcluded: exclusion.isExcluded,
             ...(previous ? { previous } : {}),
           };
           // Filtered, redacted and planned once: for the symbols, the estimate and the review.
@@ -302,6 +342,9 @@ export async function reviewCommand(
               });
             },
           });
+          // Once per review, with the other warnings about the review itself.
+          const warning = exclusion.warning();
+          if (warning) result.warnings = [...(result.warnings ?? []), warning];
           return { empty: false as const, result, estimate };
         } finally {
           subs.forEach((s) => s.dispose());
@@ -309,6 +352,12 @@ export async function reviewCommand(
       },
     );
 
+    if ('refused' in outcome && outcome.refused) {
+      const { message } = outcome;
+      logger.warn(message);
+      notify(message, 'warn');
+      return { ok: false, message };
+    }
     if ('needsConfirmation' in outcome) {
       return {
         ok: false,
@@ -409,8 +458,21 @@ function isTooLarge(err: unknown): boolean {
   return err instanceof Error && err.name === 'ReviewTooLargeError';
 }
 
+/** The commits named in `args`, else the ones the user picks (undefined = cancelled). */
+async function commitsMode(
+  args: ReviewCommandArgs,
+  commits: () => Promise<CommitInfo[]>,
+): Promise<ReviewMode | string | undefined> {
+  if (args.toCommit || args.fromCommit) {
+    const newest = args.toCommit ?? 'HEAD';
+    return { kind: 'commits', oldest: args.fromCommit ?? newest, newest };
+  }
+  if (args.silent) return 'Name the commits to review (toCommit, fromCommit).';
+  return pickCommits(await commits());
+}
+
 function buildMode(
-  kind: ReviewKind,
+  kind: Exclude<ReviewKind, 'commits'>,
   root: string,
   fileTarget: string | undefined,
   args: ReviewCommandArgs,

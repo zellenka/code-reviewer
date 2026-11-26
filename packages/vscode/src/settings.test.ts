@@ -4,6 +4,7 @@ import {
   USER_ONLY_SETTINGS,
   agentLimitSettings,
   costThreshold,
+  excludeFileGlobs,
   refusalFallback,
   reviewRunSettings,
   setInWorkspace,
@@ -145,6 +146,8 @@ describe('settings a repository cannot change (A2)', () => {
         'confidenceThreshold',
         'allowRepoConfigToRelax',
         'redactHighEntropyStrings',
+        'excludeFiles',
+        'agentChat',
         'verifyFindings',
         'incrementalReview',
         'summary',
@@ -276,5 +279,23 @@ describe('settings a repository cannot change (A2)', () => {
       ),
     ).toBe(false);
     expect(refusalFallback(settings({}))).toBe(true);
+  });
+
+  it('the excluded files come from user settings only, and junk entries are dropped', () => {
+    const key = 'excludeFiles';
+    // A workspace can't replace the user's list with an empty one.
+    expect(
+      excludeFileGlobs(
+        settings({ [key]: { defaultValue: [], globalValue: ['/deals/**'], workspaceValue: [] } }),
+      ),
+    ).toEqual(['/deals/**']);
+    expect(
+      excludeFileGlobs(settings({ [key]: { defaultValue: [], workspaceValue: ['x'] } })),
+    ).toEqual([]);
+    expect(
+      excludeFileGlobs(settings({ [key]: { globalValue: ['*.cfg', 3, '', '  ', null] } })),
+    ).toEqual(['*.cfg']);
+    expect(excludeFileGlobs(settings({ [key]: { globalValue: 'secrets.json' } }))).toEqual([]);
+    expect(excludeFileGlobs(settings({}))).toEqual([]);
   });
 });

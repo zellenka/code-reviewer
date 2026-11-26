@@ -117,17 +117,29 @@ export class GitCliDiffSource implements DiffSource {
       case 'staged': {
         const target = (await this.headCommit()) ?? EMPTY_TREE;
         const diff = await this.diff(['--cached', target]);
-        await mapLimit(diff.files, 16, async (f) => {
-          if (f.status === 'deleted' || f.binary) return;
-          // Output past the size cap stops git and marks the file binary, as for working files.
-          // `:0:` names the stage, so a file called `1:foo` isn't read as stage 1 of `foo`.
-          const { stdout, code, overflow } = await this.git(['show', `:0:${f.path}`], {
+        // `:0:` names the stage, so a file called `1:foo` isn't read as stage 1 of `foo`.
+        await this.fillFromGit(diff.files, (p) => `:0:${p}`);
+        return diff;
+      }
+      case 'commits': {
+        // As committed: the working tree and the index play no part.
+        const newest = await this.commitId(mode.newest);
+        const oldest = mode.oldest === mode.newest ? newest : await this.commitId(mode.oldest);
+        if (oldest !== newest) {
+          const { code } = await this.git(['merge-base', '--is-ancestor', oldest, newest], {
             allowFail: true,
-            maxBuffer: MAX_FILE_BYTES,
           });
-          if (overflow) f.binary = true;
-          else if (code === 0) f.newContent = normalizeEol(stdout);
-        });
+          if (code !== 0) {
+            throw new DiffSourceError(
+              'noCommit',
+              `${mode.oldest} is not an earlier commit of ${mode.newest}, so there is no run of commits between them to review.`,
+            );
+          }
+        }
+        // The first commit has no parent: everything in it is new.
+        const parent = await this.commitIdIfAny(`${oldest}^`);
+        const diff = await this.diff([parent ?? EMPTY_TREE, newest]);
+        await this.fillFromGit(diff.files, (p) => `${newest}:${p}`);
         return diff;
       }
       case 'branch': {
@@ -205,18 +217,48 @@ export class GitCliDiffSource implements DiffSource {
     return parseUnifiedDiff(stdout);
   }
 
-  private async headCommit(): Promise<string | undefined> {
-    const { stdout, code } = await this.git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], {
-      allowFail: true,
+  /**
+   * New-side content of the files from git objects (`spec` names the blob). Output past the
+   * size cap stops git and marks the file binary, as for working files.
+   */
+  private async fillFromGit(files: FileDiff[], spec: (path: string) => string): Promise<void> {
+    await mapLimit(files, 16, async (f) => {
+      if (f.status === 'deleted' || f.binary) return;
+      const { stdout, code, overflow } = await this.git(['show', spec(f.path)], {
+        allowFail: true,
+        maxBuffer: MAX_FILE_BYTES,
+      });
+      if (overflow) f.binary = true;
+      else if (code === 0) f.newContent = normalizeEol(stdout);
     });
-    return code === 0 ? stdout.trim() : undefined;
+  }
+
+  /** Full id of the commit `ref` names, or throws `noCommit`. */
+  private async commitId(ref: string): Promise<string> {
+    if (!isSafeRef(ref)) {
+      throw new DiffSourceError('noCommit', `"${ref}" is not a valid commit.`);
+    }
+    const id = await this.commitIdIfAny(ref);
+    if (!id) throw new DiffSourceError('noCommit', `Commit "${ref}" was not found.`);
+    return id;
+  }
+
+  private async commitIdIfAny(ref: string): Promise<string | undefined> {
+    const { stdout, code } = await this.git(
+      ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`],
+      {
+        allowFail: true,
+      },
+    );
+    return code === 0 && stdout.trim() ? stdout.trim() : undefined;
+  }
+
+  private headCommit(): Promise<string | undefined> {
+    return this.commitIdIfAny('HEAD');
   }
 
   private async refExists(ref: string): Promise<boolean> {
-    const { code } = await this.git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
-      allowFail: true,
-    });
-    return code === 0;
+    return (await this.commitIdIfAny(ref)) !== undefined;
   }
 
   /** Untracked files that aren't ignored, as added files marked `untracked`. */
@@ -303,6 +345,75 @@ export class GitCliDiffSource implements DiffSource {
       throw err;
     }
   }
+}
+
+export interface CommitInfo {
+  /** Full commit id. */
+  id: string;
+  shortId: string;
+  subject: string;
+  author: string;
+  /** Commit date, ISO 8601. */
+  date: string;
+}
+
+/** Separators in the `git log` output (`%x1f`, `%x1e`): not in subjects or names. */
+const FIELD = '\x1f';
+const RECORD = '\x1e';
+
+/**
+ * The latest `limit` commits of HEAD, newest first, following first parents only: each
+ * commit's parent is the next one, so a run of them is exactly what a `commits` review of
+ * its oldest and newest reviews. Empty before the first commit.
+ */
+export async function listCommits(
+  root: string,
+  options: { gitPath?: string; limit?: number } = {},
+): Promise<CommitInfo[]> {
+  const git = createGitRunner(root, options.gitPath);
+  const { stdout, code } = await git(
+    [
+      'log',
+      '--first-parent',
+      `--max-count=${options.limit ?? 100}`,
+      '--format=%H%x1f%h%x1f%s%x1f%an%x1f%aI%x1e',
+      'HEAD',
+      '--',
+    ],
+    { allowFail: true },
+  );
+  if (code !== 0) return [];
+  return stdout
+    .split(RECORD)
+    .map((r) => r.replace(/^\n/, ''))
+    .filter(Boolean)
+    .map((r) => {
+      const [id = '', shortId = '', subject = '', author = '', date = ''] = r.split(FIELD);
+      return { id, shortId, subject, author, date };
+    });
+}
+
+/**
+ * The run of `commits` (newest first, as `listCommits` gives them) from the oldest to the
+ * newest of `picked`: what a `commits` review of them covers. `unpicked` counts the commits
+ * in between that weren't picked (they are reviewed too). Undefined when none is in the list.
+ */
+export function commitSpan(
+  commits: readonly CommitInfo[],
+  picked: readonly string[],
+): { oldest: string; newest: string; count: number; unpicked: number } | undefined {
+  const wanted = new Set(picked);
+  const at = commits.flatMap((c, i) => (wanted.has(c.id) ? [i] : []));
+  if (!at.length) return undefined;
+  const first = at[0]!;
+  const last = at[at.length - 1]!;
+  const count = last - first + 1;
+  return {
+    newest: commits[first]!.id,
+    oldest: commits[last]!.id,
+    count,
+    unpicked: count - at.length,
+  };
 }
 
 /** Ref names passed to git: no option-like (`-x`), whitespace or `..` range values. */

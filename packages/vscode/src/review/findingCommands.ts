@@ -1,7 +1,11 @@
+import { findingChatPrompt, reviewChatPrompt, reviewToMarkdown } from '@ai-review/core';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
+import type { AgentChat } from './chat';
 import { findingRange } from './diagnostics';
+import { newReportUri, sessionReport } from './export';
 import { applyFix, previewFix, type FixOutcome, type FixPreviewProvider } from './fixes';
-import type { FindingStatus, FindingStore } from './store';
+import type { FindingStatus, FindingStore, ReviewSession } from './store';
 import type { FindingThreads } from './threads';
 import { SUMMARY_URI } from './tree';
 
@@ -9,6 +13,7 @@ export interface FindingCommandDeps {
   store: FindingStore;
   threads: FindingThreads;
   previews: FixPreviewProvider;
+  chat: AgentChat;
 }
 
 /**
@@ -18,7 +23,8 @@ export interface FindingCommandDeps {
  * opened before it) finds nothing.
  */
 export function registerFindingCommands(deps: FindingCommandDeps): vscode.Disposable[] {
-  const { store, threads, previews } = deps;
+  const { store, threads, previews, chat } = deps;
+  const savedReports = new WeakMap<ReviewSession, vscode.Uri>();
   const keyOf = (arg: unknown): string | undefined => {
     if (typeof arg === 'string') return arg;
     if (arg && typeof arg === 'object') {
@@ -74,6 +80,41 @@ export function registerFindingCommands(deps: FindingCommandDeps): vscode.Dispos
       });
       editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
       return editor;
+    }),
+    vscode.commands.registerCommand('aiReview.saveReview', async () => {
+      const session = store.session;
+      const report = sessionReport(store);
+      if (!session || !report) {
+        void vscode.window.showInformationMessage('AI Review: there is no review to save yet.');
+        return undefined;
+      }
+      // Saving the same review again updates its file.
+      const uri = savedReports.get(session) ?? (await newReportUri(session));
+      savedReports.set(session, uri);
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(reviewToMarkdown(report), 'utf8'));
+      await vscode.window.showTextDocument(uri, { preview: false });
+      return uri;
+    }),
+    vscode.commands.registerCommand('aiReview.sendReviewToChat', async () => {
+      const session = store.session;
+      const report = sessionReport(store);
+      if (!session || !report) {
+        void vscode.window.showInformationMessage('AI Review: there is no review to send yet.');
+        return false;
+      }
+      // Named as the chat sees the workspace (with the folder in a multi-root one).
+      const filePath = (file: string) =>
+        vscode.workspace.asRelativePath(
+          vscode.Uri.file(path.join(session.root, ...file.split('/'))),
+        );
+      return chat.send(reviewChatPrompt(report, { filePath }));
+    }),
+    vscode.commands.registerCommand('aiReview.sendFindingToChat', async (arg: unknown) => {
+      const finding = store.get(keyOf(arg) ?? '');
+      if (!finding) return false;
+      return chat.send(
+        findingChatPrompt(finding, { file: vscode.workspace.asRelativePath(finding.uri) }),
+      );
     }),
     vscode.commands.registerCommand('aiReview.showSummary', async () => {
       if (!store.session?.result.summary) {

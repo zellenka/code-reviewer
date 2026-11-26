@@ -179,6 +179,24 @@ describe('summary', () => {
     expect(one).not.toContain('acme');
   });
 
+  it('files excluded from AI review are counted, never named', () => {
+    const prompt = (skipped: SkippedFile[]) =>
+      buildSummaryUserPrompt({ stats: [], skipped, findings: [], diff: '', omitted: 0 });
+    const many = prompt([
+      { path: 'deals/acme-merger.ts', reason: 'excluded' },
+      { path: '.env', reason: 'secret' },
+      { path: 'notes.txt', reason: 'untracked' },
+      { path: 'deals/acme-terms.ts', reason: 'excluded' },
+    ]);
+    expect(many).toContain(
+      'Not reviewed: .env (secret), 1 untracked file left out by the user, 2 files excluded from AI review\n',
+    );
+    expect(many).not.toMatch(/acme|deals/);
+    const one = prompt([{ path: 'deals/acme-merger.ts', reason: 'excluded' }]);
+    expect(one).toContain('Not reviewed: 1 file excluded from AI review\n');
+    expect(one).not.toMatch(/acme|deals/);
+  });
+
   it('diffStats counts added and removed lines', () => {
     expect(diffStats(DIFF.files)[0]).toMatchObject({ path: 'src/a.ts', added: 3, removed: 0 });
   });
