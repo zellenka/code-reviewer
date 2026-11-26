@@ -3,7 +3,7 @@ import { severityRank, type ReviewConfig } from '../config/schema';
 import { normalizeEol, splitLines, toPosixPath } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
 import { locateQuote, normalizeWhitespace, similarity } from './anchor';
-import { neutralizeTags, restoreTags } from './prompt';
+import { escapePath, neutralizeTags, restoreTags } from './prompt';
 import { REDACTED_MARK } from './redact';
 import type { DropReason, Finding, RawFinding } from './types';
 
@@ -257,6 +257,9 @@ function resolveFile(
   const path = exact.replace(/^(?:a|b)\//, '').replace(/^\/+/, '');
   const direct = contexts.get(exact) ?? contexts.get(path) ?? contexts.get(reported);
   if (direct) return direct;
+  // A path with a line break was shown escaped (`escapePath`); the model copies that form.
+  const escaped = [...contexts.values()].find((c) => escapePath(c.file.path) === reported.trim());
+  if (escaped) return escaped;
   const lower = path.toLowerCase();
   const matches = [...contexts.values()].filter((c) => {
     const p = c.file.path.toLowerCase();

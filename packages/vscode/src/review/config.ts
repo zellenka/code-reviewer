@@ -1,14 +1,14 @@
 import {
   CONFIG_FILE_NAME,
-  applyUserThresholds,
   parseConfig,
+  resolveReviewConfig,
   type Logger,
-  type ReviewConfig,
-  type Severity,
+  type ResolvedReviewConfig,
 } from '@ai-review/core';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { userReviewSettings } from '../settings';
 
 /**
  * Loads `.codereview.yml` per repo root, caches it, and reloads when the file changes.
@@ -35,8 +35,11 @@ export class ReviewConfigService implements vscode.Disposable {
     this.watcher.onDidDelete(invalidate);
   }
 
-  /** Repo config with the user's (stricter-only) threshold settings applied. */
-  async get(root: string): Promise<ReviewConfig> {
+  /**
+   * Repo config merged with the user's settings (thresholds can only get stricter; mode and
+   * verify override), and what the repo's file turned down (`resolveReviewConfig`).
+   */
+  async get(root: string): Promise<ResolvedReviewConfig> {
     const key = cacheKey(root);
     let loaded = this.cache.get(key);
     if (!loaded) {
@@ -63,12 +66,10 @@ export class ReviewConfigService implements vscode.Disposable {
           }
         });
     }
-    const settings = vscode.workspace.getConfiguration('aiReview');
-    const severity = settings.get<string>('severityThreshold');
-    return applyUserThresholds(loaded.config, {
-      ...(severity ? { severityThreshold: severity as Severity } : {}),
-      confidenceThreshold: settings.get<number>('confidenceThreshold') ?? 0,
-    });
+    return resolveReviewConfig(
+      loaded.config,
+      userReviewSettings(vscode.workspace.getConfiguration('aiReview')),
+    );
   }
 
   forget(root: string): void {

@@ -5,14 +5,14 @@ import type { UnifiedDiff, WorkspaceTools } from '../diff/types';
 import { noopLogger, type Logger } from '../logger';
 import type { LLMProvider, ModelInfo } from '../provider/types';
 import { emptyUsage } from '../provider/usage';
-import { compileGlobs } from './filter';
+import { repoIgnoreBlocks } from './filter';
 import type { ReviewSnapshot } from './incremental';
 import { addSnapshot, addSummary, checkFindings, mergeCarried } from './postprocess';
 import { prepareParts, toPreparedDiff, type PreparedDiff } from './prepare';
 import { reviewSettingsWarnings, type RepoRules } from './rules';
 import { defaultConcurrency, reviewParts } from './schedule';
 import type { SymbolIndex } from './symbols';
-import type { ReviewResult } from './types';
+import type { ReviewResult, SkippedFile } from './types';
 
 // The review's parts live in their own modules; this entry point keeps exporting them.
 export {
@@ -82,6 +82,16 @@ export interface ReviewOptions {
   /** Model for the verify pass (same provider), e.g. a cheaper one. Default: `model`. */
   verifyModel?: ModelInfo;
   /**
+   * What the repository's config turned down (`resolveReviewConfig().relaxed`). Added to
+   * the result's warnings, so the user sees it with every review.
+   */
+  relaxed?: string[];
+  /**
+   * Files the host took out of the diff before the review (untracked files the user chose
+   * not to send). Never read; listed in `ReviewResult.skipped` with their reason.
+   */
+  leftOut?: SkippedFile[];
+  /**
    * The last review of the same scope (`ReviewResult.snapshot`). Hunks reviewed then are
    * not sent again and their findings are carried over. Ignored when the model, mode,
    * config, rules or prompts changed since.
@@ -133,13 +143,14 @@ export async function runReview(
     logger.info(
       `reviewing ${files.length} file(s) in ${chunks.length} request(s) with ${model.id} (${mode}); skipped ${skipped.length}`,
     );
+    const isBlocked = repoIgnoreBlocks(config);
     const agent =
       mode === 'agentic'
         ? {
             tools: createReviewTools(options.workspace!, {
               redactHighEntropy: options.redactHighEntropy ?? false,
               // Files the repo's `ignore:` hides from the diff stay hidden from the tools.
-              ...(config.ignore.length ? { isBlocked: compileGlobs(config.ignore) } : {}),
+              ...(isBlocked ? { isBlocked } : {}),
             }) as AgentTool<never>[],
             limits: prepared.agentLimits,
           }
@@ -158,8 +169,17 @@ export async function runReview(
       mode,
     };
     if (options.rules?.sources.length) result.rules = options.rules.sources.map((s) => s.path);
-    // The whole diff, not the incremental part: the warning holds for every re-review.
-    const warnings = reviewSettingsWarnings(diffPrepared.diff.files, config);
+    // The whole diff, not the incremental part: the warning holds for every re-review. Files
+    // the host left out (`leftOut`, among the skipped) count too: an edited settings file is
+    // still used by the review.
+    const warnings = [
+      ...reviewSettingsWarnings(
+        [...diffPrepared.diff.files, ...diffPrepared.skipped],
+        config,
+        diffPrepared.relaxedIgnore,
+      ),
+      ...(options.relaxed ?? []),
+    ];
     if (warnings.length) result.warnings = warnings;
     if (agent) result.agent = { turns: 0, toolCalls: 0, limitStops: 0 };
     const progress = (findings: number, phase?: ReviewProgress['phase']) =>

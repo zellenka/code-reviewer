@@ -6,7 +6,7 @@ import type { ModelInfo, ToolDef } from '../provider/types';
 import { estimateTokens } from '../provider/usage';
 import { chunkFiles, type Chunk } from './chunker';
 import { buildFileContext, changedSymbols, renderChangedSymbols } from './context';
-import { filterFiles } from './filter';
+import { filterFiles, type RelaxedIgnore } from './filter';
 import {
   planIncremental,
   snapshotKey,
@@ -33,6 +33,7 @@ export type PrepareOptions = Pick<
   | 'symbols'
   | 'rules'
   | 'agentLimits'
+  | 'leftOut'
 > & {
   /** Whether repo access is available (`ReviewOptions.workspace`). */
   workspace?: unknown;
@@ -61,6 +62,8 @@ export interface PreparedDiff {
   /** `files` redacted, as sent to the model (for the summary and the snapshot). */
   redacted: FileDiff[];
   skipped: SkippedFile[];
+  /** Files the repository's `ignore:` may only skip when the user allows it (`filterFiles`). */
+  relaxedIgnore: RelaxedIgnore[];
   /** When `previous` was made with the same key: what's new, what's carried over. */
   plan?: IncrementalPlan;
   /** What gets sent now: all of `files`, or with a plan only the new hunks. */
@@ -119,7 +122,9 @@ function reviewKey(options: PrepareDiffOptions): string {
  */
 export function prepareDiff(diff: UnifiedDiff, options: PrepareDiffOptions): PreparedDiff {
   const key = reviewKey(options);
-  const { files, skipped } = filterFiles(diff.files, options.config.ignore);
+  const filtered = filterFiles(diff.files, options.config);
+  const { files, relaxedIgnore } = filtered;
+  const skipped = [...filtered.skipped, ...(options.leftOut ?? [])];
   const redacted = redactFiles(files, { highEntropy: options.redactHighEntropy ?? false });
   const prepared: PreparedDiff = {
     diff,
@@ -127,6 +132,7 @@ export function prepareDiff(diff: UnifiedDiff, options: PrepareDiffOptions): Pre
     files,
     redacted: redacted.files,
     skipped,
+    relaxedIgnore,
     review: { files, redacted: redacted.files, redactions: redacted.count },
   };
   if (!options.previous) return prepared;

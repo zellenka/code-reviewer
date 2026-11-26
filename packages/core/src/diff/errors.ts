@@ -1,5 +1,5 @@
 export type DiffSourceErrorKind =
-  'noRepo' | 'detachedHead' | 'noBase' | 'notFound' | 'outsideRepo' | 'git';
+  'noRepo' | 'detachedHead' | 'noBase' | 'notFound' | 'outsideRepo' | 'ignored' | 'git';
 
 /** A diff could not be produced. `message` is safe to show to the user. */
 export class DiffSourceError extends Error {

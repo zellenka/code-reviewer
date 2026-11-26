@@ -1,7 +1,7 @@
 import { splitLines } from '../diff/parse';
 import type { FileDiff, Hunk } from '../diff/types';
 import { estimateTokens } from '../provider/usage';
-import { neutralizeTags } from './prompt';
+import { escapeAttr, escapePath, neutralizeTags } from './prompt';
 import { enclosingSymbols, heuristicSymbols, type CodeSymbol, type SymbolIndex } from './symbols';
 
 /** Unchanged new-side lines shown next to a file's hunks. */
@@ -223,7 +223,7 @@ export function renderChangedSymbols(
     .slice(0, max)
     .map((s) =>
       neutralizeTags(
-        `- ${s.path}:${s.startLine}-${s.endLine} ${s.kind} ${s.names.join('.')}: \`${s.signature.replace(/`/g, "'")}\``,
+        `- ${escapePath(s.path)}:${s.startLine}-${s.endLine} ${s.kind} ${s.names.join('.')}: \`${s.signature.replace(/`/g, "'")}\``,
       ),
     );
   if (list.length > max) lines.push(`- … and ${list.length - max} more`);
@@ -231,8 +231,4 @@ export function renderChangedSymbols(
 Declarations changed anywhere in this change (all files, not only the ones below). Use them to spot callers or callees that no longer match:
 ${lines.join('\n')}
 </changed_symbols>`;
-}
-
-function escapeAttr(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }

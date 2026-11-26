@@ -14,7 +14,7 @@ import {
   type ReviewMode,
   type UnifiedDiff,
 } from '@ai-review/core';
-import { resolveInRepo } from './sandbox';
+import { realRepoPath, resolveInRepo } from './sandbox';
 
 /** The empty tree object: lets `git diff --cached` work before the first commit. */
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
@@ -108,6 +108,7 @@ export class GitCliDiffSource implements DiffSource {
   async getDiff(mode: ReviewMode): Promise<UnifiedDiff> {
     switch (mode.kind) {
       case 'unstaged': {
+        // Untracked files are marked, so the host can decide whether to send them.
         const diff = await this.diff([]);
         await this.fillWorkingTree(diff.files);
         diff.files.push(...(await this.untracked()));
@@ -130,15 +131,17 @@ export class GitCliDiffSource implements DiffSource {
         return diff;
       }
       case 'branch': {
+        // Tracked files only (committed, staged and unstaged changes): a stray untracked
+        // file is not part of the branch.
         const base = await this.mergeBase(mode.base);
         const diff = await this.diff([base]);
         await this.fillWorkingTree(diff.files);
-        diff.files.push(...(await this.untracked()));
         return diff;
       }
       case 'file':
       case 'selection': {
         const rel = toPosixPath(mode.path);
+        await this.refuseIgnored(rel);
         const content = await this.readWorkingFile(rel, { unsaved: true });
         if (content === undefined) throw new DiffSourceError('notFound', `File not found: ${rel}`);
         const range =
@@ -216,15 +219,42 @@ export class GitCliDiffSource implements DiffSource {
     return code === 0;
   }
 
+  /** Untracked files that aren't ignored, as added files marked `untracked`. */
   private async untracked(): Promise<FileDiff[]> {
     const { stdout } = await this.git(['ls-files', '--others', '--exclude-standard', '-z']);
     const paths = stdout.split('\0').filter(Boolean).map(toPosixPath);
-    const files = await mapLimit(paths, 16, async (p) => {
+    const files = await mapLimit(paths, 16, async (p): Promise<FileDiff | undefined> => {
       const content = await this.readWorkingFile(p, { inDiff: true });
       if (content === undefined) return undefined;
-      return addedFileDiff(p, content);
+      return { ...addedFileDiff(p, content), untracked: true };
     });
     return files.filter((f): f is FileDiff => f !== undefined);
+  }
+
+  /**
+   * Throws `ignored` when git ignores `rel` (and doesn't track it): a local config or other
+   * file kept out of the repository is never sent. Checks where the file really is, after
+   * symlinks, so a tracked link to an ignored file is refused too. When git can't tell, the
+   * file is refused as well.
+   */
+  private async refuseIgnored(rel: string): Promise<void> {
+    const abs = await resolveInRepo(this.root, rel);
+    // A file that isn't on disk (only in an editor) is checked by its name.
+    const real = await realRepoPath(this.root, abs).catch(() => rel);
+    // Tracked files are never "ignored" here, even when they match an ignore pattern. The
+    // `./` keeps a name starting with `:` from being read as pathspec magic.
+    const { code } = await this.git(['check-ignore', '--quiet', '--', `./${real}`], {
+      allowFail: true,
+    });
+    if (code === 0) {
+      throw new DiffSourceError('ignored', `${rel} is ignored by git, so it isn't reviewed.`);
+    }
+    if (code !== 1) {
+      throw new DiffSourceError(
+        'git',
+        `Could not check whether ${rel} is ignored by git, so it isn't reviewed.`,
+      );
+    }
   }
 
   private async fillWorkingTree(files: FileDiff[]): Promise<void> {

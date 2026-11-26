@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type * as vscode from 'vscode';
 import {
+  USER_ONLY_SETTINGS,
   agentLimitSettings,
   costThreshold,
+  refusalFallback,
+  reviewRunSettings,
   setInWorkspace,
+  userReviewSettings,
   userSetting,
-  workspaceChoiceNote,
 } from './settings';
 
 interface Values {
@@ -128,11 +131,150 @@ describe('user-only settings (F23)', () => {
       'model',
     ]);
   });
+});
 
-  it('says when the workspace picked the model', () => {
-    expect(workspaceChoiceNote([], 'Opus')).toBe('');
-    expect(workspaceChoiceNote(['provider', 'model'], 'Claude Opus')).toBe(
-      "Claude Opus was chosen by this workspace's settings (aiReview.provider, aiReview.model).",
+describe('settings a repository cannot change (A2)', () => {
+  it('lists every setting that changes cost, scrutiny or where the code goes', () => {
+    expect([...USER_ONLY_SETTINGS].sort()).toEqual(
+      [
+        'provider',
+        'model',
+        'anthropic.models',
+        'anthropic.refusalFallback',
+        'severityThreshold',
+        'confidenceThreshold',
+        'allowRepoConfigToRelax',
+        'redactHighEntropyStrings',
+        'verifyFindings',
+        'incrementalReview',
+        'summary',
+        'costConfirmationThreshold',
+        'reviewMode',
+        'includeContext',
+        'agent.maxTurns',
+        'agent.maxToolCalls',
+        'agent.tokenBudget',
+      ].sort(),
     );
+  });
+
+  it('review mode, verify pass and thresholds ignore workspace and folder values', () => {
+    expect(
+      userReviewSettings(
+        settings({
+          reviewMode: { defaultValue: 'auto', workspaceValue: 'agentic' },
+          verifyFindings: { defaultValue: 'auto', workspaceFolderValue: 'on' },
+          severityThreshold: { defaultValue: '', workspaceValue: 'critical' },
+          confidenceThreshold: { defaultValue: 0, workspaceValue: 0.99 },
+        }),
+      ),
+    ).toEqual({ confidenceThreshold: 0 });
+    expect(
+      userReviewSettings(
+        settings({
+          reviewMode: {
+            defaultValue: 'auto',
+            globalValue: 'single-pass',
+            workspaceValue: 'agentic',
+          },
+          verifyFindings: { defaultValue: 'auto', globalValue: 'off', workspaceValue: 'on' },
+          severityThreshold: { defaultValue: '', globalValue: 'major', workspaceValue: 'critical' },
+          confidenceThreshold: { defaultValue: 0, globalValue: 0.7, workspaceFolderValue: 1 },
+        }),
+      ),
+    ).toEqual({
+      mode: 'single-pass',
+      verify: false,
+      severityThreshold: 'major',
+      confidenceThreshold: 0.7,
+    });
+  });
+
+  it('only the user can let the repository config relax the review', () => {
+    expect(
+      userReviewSettings(
+        settings({
+          allowRepoConfigToRelax: {
+            defaultValue: false,
+            workspaceValue: true,
+            workspaceFolderValue: true,
+          },
+        }),
+      ),
+    ).toEqual({});
+    expect(
+      userReviewSettings(
+        settings({ allowRepoConfigToRelax: { defaultValue: false, globalValue: true } }),
+      ),
+    ).toEqual({ allowRepoConfigToRelax: true });
+    expect(
+      userReviewSettings(settings({ allowRepoConfigToRelax: { globalValue: 'yes' } })),
+    ).toEqual({});
+  });
+
+  it('"auto" and junk leave mode and verify to the repository', () => {
+    expect(
+      userReviewSettings(
+        settings({
+          reviewMode: { globalValue: 'auto' },
+          verifyFindings: { globalValue: true },
+          severityThreshold: { globalValue: 'bogus' },
+          confidenceThreshold: { globalValue: '0.9' },
+        }),
+      ),
+    ).toEqual({});
+    expect(userReviewSettings(settings({ verifyFindings: { globalValue: 'on' } }))).toEqual({
+      verify: true,
+    });
+  });
+
+  it('summary, context, incremental reviews and redaction ignore workspace values', () => {
+    const defaults = {
+      summary: { defaultValue: true },
+      includeContext: { defaultValue: true },
+      incrementalReview: { defaultValue: true },
+      redactHighEntropyStrings: { defaultValue: false },
+    };
+    expect(
+      reviewRunSettings(
+        settings({
+          summary: { ...defaults.summary, workspaceValue: false },
+          includeContext: { ...defaults.includeContext, workspaceFolderValue: false },
+          incrementalReview: { ...defaults.incrementalReview, workspaceValue: false },
+          redactHighEntropyStrings: {
+            defaultValue: false,
+            globalValue: true,
+            workspaceValue: false,
+          },
+        }),
+      ),
+    ).toEqual({ summary: true, includeContext: true, incremental: true, redactHighEntropy: true });
+    expect(
+      reviewRunSettings(
+        settings({
+          summary: { ...defaults.summary, globalValue: false },
+          includeContext: { ...defaults.includeContext, globalValue: false },
+          incrementalReview: { ...defaults.incrementalReview, globalValue: 'no' },
+        }),
+      ),
+    ).toEqual({
+      summary: false,
+      includeContext: false,
+      incremental: true,
+      redactHighEntropy: false,
+    });
+  });
+
+  it('the refusal fallback ignores workspace values', () => {
+    const key = 'anthropic.refusalFallback';
+    expect(
+      refusalFallback(settings({ [key]: { defaultValue: true, workspaceValue: false } })),
+    ).toBe(true);
+    expect(
+      refusalFallback(
+        settings({ [key]: { defaultValue: true, globalValue: false, workspaceValue: true } }),
+      ),
+    ).toBe(false);
+    expect(refusalFallback(settings({}))).toBe(true);
   });
 });

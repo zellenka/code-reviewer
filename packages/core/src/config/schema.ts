@@ -26,7 +26,16 @@ export interface ReviewConfig {
   severityThreshold: Severity;
   confidenceThreshold: number;
   onlyChangedLines: boolean;
+  /**
+   * Skips only generated, vendored and lock files (`isGeneratedOrVendored`), unless
+   * `ignoreAnyFile` is set: the repository can only tighten a review (A2).
+   */
   ignore: string[];
+  /**
+   * `ignore` may skip any file. Not read from the file: `resolveReviewConfig` sets it when
+   * the user lets the repository relax its review.
+   */
+  ignoreAnyFile?: boolean;
   rules?: string;
   language: string;
   review: {

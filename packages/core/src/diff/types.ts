@@ -28,6 +28,11 @@ export interface FileDiff {
   hunks: Hunk[];
   /** Full new-side content (for context and re-anchoring). */
   newContent?: string;
+  /**
+   * Not tracked by git (a new file that isn't ignored), in an `unstaged` diff. The host
+   * decides whether to send it (the VS Code extension asks first).
+   */
+  untracked?: boolean;
 }
 
 export interface UnifiedDiff {
@@ -35,10 +40,12 @@ export interface UnifiedDiff {
 }
 
 export type ReviewMode =
+  /** Working tree vs index, plus untracked files that aren't ignored (`FileDiff.untracked`). */
   | { kind: 'unstaged' }
   | { kind: 'staged' }
-  /** Diff from merge-base(base, HEAD) to the working tree. */
+  /** Diff from merge-base(base, HEAD) to the working tree: tracked files only, no untracked ones. */
   | { kind: 'branch'; base?: string }
+  /** A file git doesn't ignore (tracked, or untracked and not ignored), as on disk or in the editor. */
   | { kind: 'file'; path: string }
   | { kind: 'selection'; path: string; startLine: number; endLine: number };
 
@@ -64,7 +71,8 @@ export interface WorkspaceTools {
   /** File names that differ only in letter case name the same file (Windows, macOS). */
   readonly caseInsensitive?: boolean;
   /**
-   * The files git shows: tracked ones, and untracked ones that aren't ignored. Rejects when
+   * The files git shows: tracked ones, and untracked ones that aren't ignored (unless the
+   * review leaves untracked files out). Rejects when
    * they can't be listed (not a repo, git missing); then nothing is read.
    */
   listFiles(signal?: AbortSignal): Promise<string[]>;

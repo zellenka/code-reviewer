@@ -49,7 +49,7 @@ pnpm eval:compare a.json b.json             # compare any two reports
 
 ## Running the extension
 
-Open the repo in VS Code and press **F5** ("Run Extension"). In the new window run **AI Review: Hello** from the Command Palette. Logs are in the Output panel → "AI Review" (or run **AI Review: Show Log**).
+Open the repo in VS Code and press **F5** ("Run Extension"). In the new window run **AI Review: Open Review Panel** from the Command Palette. Logs are in the Output panel → "AI Review" (or run **AI Review: Show Log**).
 
 ## Tests
 

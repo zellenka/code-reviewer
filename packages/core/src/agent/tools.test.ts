@@ -496,6 +496,61 @@ describe('a host without checks of its own (A1)', () => {
   });
 });
 
+// Committed credential files of cloud, infra and app tooling: git shows them, the model doesn't.
+describe('credential files the repository tracks', () => {
+  const CREDENTIALS = [
+    'infra/.kube/config',
+    '.aws/credentials',
+    'deploy/prod.tfvars',
+    'src/Api/appsettings.Production.json',
+    'src/Functions/local.settings.json',
+    'gcp/credentials.json',
+    '.docker/config.json',
+    '.m2/settings.xml',
+    'vpn/office.ovpn',
+    'ios/AuthKey_ABC123.p8',
+  ];
+  const LOOKALIKES = ['src/credentials.ts', 'docs/kubeconfig.md', 'src/Api/appsettings.json'];
+  const text = (p: string) => `export const v = 'LEAKED_VALUE in ${p}';\n`;
+  const known = (p: string) =>
+    [...CREDENTIALS, ...LOOKALIKES].find((k) => k.toLowerCase() === p.toLowerCase());
+  const host: WorkspaceTools = {
+    caseInsensitive: true,
+    listFiles: async () => [...CREDENTIALS, ...LOOKALIKES],
+    realPath: async (p) => known(p) ?? Promise.reject(enoent(p)),
+    readFile: async (p) => {
+      const k = known(p);
+      if (!k) throw enoent(p);
+      return text(k);
+    },
+    grep: async (pattern, paths) =>
+      paths.flatMap((path) =>
+        new RegExp(pattern).test(text(path)) ? [{ path, line: 1, text: text(path) }] : [],
+      ),
+    findReferences: async () => CREDENTIALS.map((path) => ({ path, line: 1 })),
+    getSymbolAt: async () => ({ name: 'v', kind: 'variable', startLine: 1, endLine: 1 }),
+  };
+  const run = toolsOn(host);
+
+  it('refuses them in any letter case, and still reads files that only look like them', async () => {
+    for (const path of [...CREDENTIALS, ...CREDENTIALS.map((p) => p.toUpperCase())]) {
+      for (const tool of ['read_file', 'get_symbol'] as const) {
+        await expect(run(tool, { path, line: 1 }), `${tool} ${path}`).rejects.toThrow(
+          /may contain secrets/,
+        );
+      }
+    }
+    for (const path of LOOKALIKES) {
+      expect(await run('read_file', { path }), path).toContain(`LEAKED_VALUE in ${path}`);
+    }
+    const hits = await run('search_code', { pattern: 'LEAKED_VALUE' });
+    expect(hits.split('\n').map((l) => l.split(':')[0])).toEqual([...LOOKALIKES].sort());
+    expect(
+      await run('find_references', { path: 'src/credentials.ts', line: 1, symbol: 'v' }),
+    ).not.toMatch(/LEAKED|kube|tfvars/);
+  });
+});
+
 // Error text goes back to the model: it must not show where the repo lives on disk.
 describe('tool errors (F5)', () => {
   const ROOT = 'C:\\Users\\Jane Doe\\work\\repo';

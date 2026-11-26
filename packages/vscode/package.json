@@ -46,11 +46,6 @@
   "contributes": {
     "commands": [
       {
-        "command": "aiReview.hello",
-        "title": "Hello",
-        "category": "AI Review"
-      },
-      {
         "command": "aiReview.showLog",
         "title": "Show Log",
         "category": "AI Review"
@@ -206,12 +201,14 @@
             "Claude models with your own Anthropic API key (pay per token)."
           ],
           "default": "copilot",
-          "markdownDescription": "Model provider used for reviews. Use **AI Review: Select Model** to change it."
+          "scope": "application",
+          "markdownDescription": "Model provider used for reviews. Use **AI Review: Select Model** to change it. User settings only."
         },
         "aiReview.model": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Model id for the selected provider. Empty = the provider's first model. Use **AI Review: Select Model** to pick one."
+          "scope": "application",
+          "markdownDescription": "Model id for the selected provider. Empty = the provider's first model. Use **AI Review: Select Model** to pick one. User settings only."
         },
         "aiReview.anthropic.models": {
           "type": "array",
@@ -265,7 +262,8 @@
         "aiReview.anthropic.refusalFallback": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "If a model's safety filter declines a request (security-related code can trigger this), let Anthropic retry it on a fallback model. Billed at the fallback model's rates."
+          "scope": "application",
+          "markdownDescription": "If a model's safety filter declines a request (security-related code can trigger this), let Anthropic retry it on a fallback model. Billed at the fallback model's rates. User settings only."
         },
         "aiReview.baseBranch": {
           "type": "string",
@@ -296,19 +294,28 @@
             ""
           ],
           "default": "",
-          "markdownDescription": "Hide findings below this severity. Can only make the repository's `.codereview.yml` threshold stricter, not looser."
+          "scope": "application",
+          "markdownDescription": "Hide findings below this severity. Can only make the repository's `.codereview.yml` threshold stricter, not looser. User settings only."
         },
         "aiReview.confidenceThreshold": {
           "type": "number",
           "default": 0,
           "minimum": 0,
           "maximum": 1,
-          "markdownDescription": "Hide findings below this confidence (0–1). Can only make the repository's threshold stricter. `0` = use the repository setting (default 0.6)."
+          "scope": "application",
+          "markdownDescription": "Hide findings below this confidence (0–1). Can only make the repository's threshold stricter. `0` = use the repository setting (default 0.6). User settings only."
+        },
+        "aiReview.allowRepoConfigToRelax": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "markdownDescription": "Let a repository's `.codereview.yml` make reviews see less: higher thresholds than the defaults and yours, fewer categories, and `ignore:` for any file. Off: it can only add scrutiny, and the review says what was not applied (`ignore:` still skips generated, vendored and lock files). Turn on only for repositories you trust; applies to every repository. User settings only."
         },
         "aiReview.redactHighEntropyStrings": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Also replace long random-looking strings with `[REDACTED]` before sending code to the model. Known secret formats (API keys, private keys, passwords in code) are always redacted."
+          "scope": "application",
+          "markdownDescription": "Also replace long random-looking strings with `[REDACTED]` before sending code to the model. Known secret formats (API keys, private keys, passwords in code) are always redacted. User settings only."
         },
         "aiReview.verifyFindings": {
           "type": "string",
@@ -323,17 +330,20 @@
             "Show findings without the extra check."
           ],
           "default": "auto",
-          "markdownDescription": "Verify pass: after the review, ask the model once more whether each finding is a real issue, and drop rejected ones. Fewer false positives, at the cost of one extra request per file with findings."
+          "scope": "application",
+          "markdownDescription": "Verify pass: after the review, ask the model once more whether each finding is a real issue, and drop rejected ones. Fewer false positives, at the cost of one extra request per file with findings. User settings only."
         },
         "aiReview.incrementalReview": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Re-reviewing the same scope (unstaged, staged, branch, file) only sends the changes made since the last complete review, and keeps findings on code that didn't change. The model, mode, settings and repo rules must be the same, else everything is sent. **Clear Findings** starts over."
+          "scope": "application",
+          "markdownDescription": "Re-reviewing the same scope (unstaged, staged, branch, file) only sends the changes made since the last complete review, and keeps findings on code that didn't change. The model, mode, settings and repo rules must be the same, else everything is sent. **Clear Findings** starts over. User settings only."
         },
         "aiReview.summary": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "After the review, make one extra request for a summary: a walkthrough of the change per file and the top risks. Turn off to save a request."
+          "scope": "application",
+          "markdownDescription": "After the review, make one extra request for a summary: a walkthrough of the change per file and the top risks. Turn off to save a request. User settings only."
         },
         "aiReview.costConfirmationThreshold": {
           "type": "number",
@@ -355,12 +365,14 @@
             "The model may read other files in the repository (read-only) before reporting. Finds cross-file bugs; uses several requests per part."
           ],
           "default": "auto",
-          "markdownDescription": "How reviews run. **agentic** lets the model look up callers, definitions and types in the repository with read-only tools. Secret files are never readable."
+          "scope": "application",
+          "markdownDescription": "How reviews run. **agentic** lets the model look up callers, definitions and types in the repository with read-only tools. Secret files are never readable. User settings only."
         },
         "aiReview.includeContext": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Send the enclosing function or class of each change (from the language server when available), and for multi-file changes a list of the declarations changed across the diff."
+          "scope": "application",
+          "markdownDescription": "Send the enclosing function or class of each change (from the language server when available), and for multi-file changes a list of the declarations changed across the diff. User settings only."
         },
         "aiReview.agent.maxTurns": {
           "type": "number",

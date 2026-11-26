@@ -19,7 +19,7 @@ import { FindingStatusStore } from './review/state';
 import { FindingStore } from './review/store';
 import { FindingThreads } from './review/threads';
 import { FindingsTree, SUMMARY_SCHEME, SummaryProvider } from './review/tree';
-import { userSetting } from './settings';
+import { refusalFallback, userSetting } from './settings';
 import { ReviewPanel } from './ui/panel';
 
 /** Returned from `activate`; used by extension tests. Not a stable public API. */
@@ -66,10 +66,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
             vscode.workspace.getConfiguration(CONFIG_SECTION),
             'anthropic.models',
           ) ?? [],
-        refusalFallback: () =>
-          vscode.workspace
-            .getConfiguration(CONFIG_SECTION)
-            .get<boolean>('anthropic.refusalFallback') ?? true,
+        // Retries on another model, billed at its rates: the user's choice too (A2).
+        refusalFallback: () => refusalFallback(vscode.workspace.getConfiguration(CONFIG_SECTION)),
         logger,
       }),
       isAvailable: () => keyStore.hasKey,
@@ -78,12 +76,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   context.subscriptions.push(
     new ModelStatusBar(registry),
-    vscode.commands.registerCommand('aiReview.hello', () => {
-      const message = `${PRODUCT_NAME}: Hello! The extension is running.`;
-      logger.info('hello command invoked');
-      void vscode.window.showInformationMessage(message);
-      return message;
-    }),
     vscode.commands.registerCommand('aiReview.showLog', () => logger.show()),
     vscode.commands.registerCommand('aiReview.selectModel', (selection?: Partial<Selection>) =>
       selectModelCommand(registry, selection),

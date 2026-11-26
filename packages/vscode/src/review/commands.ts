@@ -4,6 +4,7 @@ import {
   describeMode,
   estimateCostUsd,
   estimateReview,
+  filterFiles,
   isDiffSourceError,
   loadSymbols,
   isProviderError,
@@ -12,11 +13,11 @@ import {
   type Finding,
   type Logger,
   type ModelInfo,
-  type ReviewConfig,
   type ReviewEstimate,
   type ReviewMode,
   type ReviewResult,
   type Severity,
+  type SkippedFile,
 } from '@ai-review/core';
 import { loadRepoRulesFromDisk } from '@ai-review/node-host';
 import * as path from 'node:path';
@@ -27,8 +28,8 @@ import {
   USER_ONLY_SETTINGS,
   agentLimitSettings,
   costThreshold,
+  reviewRunSettings,
   setInWorkspace,
-  workspaceChoiceNote,
 } from '../settings';
 import type { ReviewConfigService } from './config';
 import { relativeToRepo, unsavedFiles, type RepoLocator } from './repo';
@@ -56,6 +57,11 @@ export interface ReviewCommandArgs {
    * it would be asked.
    */
   confirmCost?: boolean;
+  /**
+   * Unstaged reviews: send the untracked files (true) or leave them out (false) without
+   * asking. Tests only, like `silent`. Silent runs leave them out unless this is true.
+   */
+  includeUntracked?: boolean;
 }
 
 export interface ReviewCommandResult {
@@ -143,10 +149,11 @@ export async function reviewCommand(
 
     const { provider, model } = await deps.registry.resolveActive();
     const settings = vscode.workspace.getConfiguration('aiReview');
-    const config = withModeSetting(await deps.configs.get(repo.root), settings);
+    // The repo's config with the user's settings; what the repo turned down goes in the result.
+    const { config, relaxed } = await deps.configs.get(repo.root);
+    const runSettings = reviewRunSettings(settings);
     // "Review Selection" sends only the selected lines, so no surrounding code.
-    const includeContext =
-      (settings.get<boolean>('includeContext') ?? true) && mode.kind !== 'selection';
+    const includeContext = runSettings.includeContext && mode.kind !== 'selection';
     const agentLimits = agentLimitSettings(settings);
     // VS Code already ignores these in workspace settings (scope "application"); say so in the log.
     const ignored = setInWorkspace(settings, USER_ONLY_SETTINGS);
@@ -155,16 +162,9 @@ export async function reviewCommand(
         `ignored in workspace settings, only user settings apply: ${ignored.map((k) => `aiReview.${k}`).join(', ')}`,
       );
     }
-    const chosenByWorkspace = setInWorkspace(settings, ['provider', 'model']);
     const concurrency = settings.get<number>('concurrency') || undefined;
-    const summary = settings.get<boolean>('summary') ?? true;
-    const redactHighEntropy = settings.get<boolean>('redactHighEntropyStrings') ?? false;
-    const verifySetting = settings.get<string>('verifyFindings');
-    const verify = verifySetting === 'on' ? true : verifySetting === 'off' ? false : undefined;
-    const previous =
-      (settings.get<boolean>('incrementalReview') ?? true)
-        ? deps.snapshots?.get(repo.root, mode)
-        : undefined;
+    const { summary, redactHighEntropy } = runSettings;
+    const previous = runSettings.incremental ? deps.snapshots?.get(repo.root, mode) : undefined;
     // File and selection reviews read unsaved editor text; git diffs only see saved files,
     // so say which edits are left out. Staged reviews the index: unsaved edits aren't in it,
     // just like saved but unstaged ones, so it doesn't warn.
@@ -194,10 +194,35 @@ export async function reviewCommand(
         if (token.isCancellationRequested || run.token.isCancellationRequested) controller.abort();
         try {
           progress.report({ message: 'collecting changes…' });
-          const diff = await repo.source.getDiff(mode);
+          let diff = await repo.source.getDiff(mode);
           // Nothing was reviewed, so nothing changes (not even for an empty diff).
           if (controller.signal.aborted) return { cancelled: true as const };
           if (!diff.files.length) return { empty: true as const };
+
+          // Untracked files go only when the user says so, asked before the estimate so it
+          // counts only what is sent. Files skipped anyway (secrets, binaries, …) aren't
+          // asked about. Nothing is remembered: the next review asks again.
+          const untracked = filterFiles(
+            diff.files.filter((f) => f.untracked),
+            config,
+          ).files;
+          let leftOut: SkippedFile[] = [];
+          if (untracked.length) {
+            const paths = untracked.map((f) => f.path);
+            const include =
+              args.includeUntracked ??
+              (args.silent ? false : await askAboutUntracked(paths, model));
+            if (include === undefined) return { declined: 'untracked' as const };
+            if (!include) {
+              const dropped = new Set(untracked);
+              diff = { files: diff.files.filter((f) => !dropped.has(f)) };
+              leftOut = paths.map((p) => ({ path: p, reason: 'untracked' as const }));
+            }
+            logger.info(
+              `${include ? 'including' : 'leaving out'} ${paths.length} untracked file(s)${args.silent && args.includeUntracked === undefined ? ' (silent review)' : ''}: ${paths.join(', ')}`,
+            );
+          }
+          if (controller.signal.aborted) return { cancelled: true as const };
 
           const rules = await loadRepoRulesFromDisk(repo.root, config, {
             logger,
@@ -210,13 +235,14 @@ export async function reviewCommand(
             summary,
             rules,
             context: includeContext,
-            workspace: new VsCodeWorkspaceTools(
-              repo.root,
-              logger,
-              repo.gitPath ? { gitPath: repo.gitPath } : {},
-            ),
+            workspace: new VsCodeWorkspaceTools(repo.root, logger, {
+              ...(repo.gitPath ? { gitPath: repo.gitPath } : {}),
+              // Untracked files the review doesn't send stay hidden from the agent's tools.
+              untracked: mode.kind !== 'branch' && !leftOut.length,
+            }),
             agentLimits,
-            ...(verify !== undefined ? { verify } : {}),
+            ...(relaxed.length ? { relaxed } : {}),
+            ...(leftOut.length ? { leftOut } : {}),
             ...(previous ? { previous } : {}),
           };
           // Filtered, redacted and planned once: for the symbols, the estimate and the review.
@@ -244,16 +270,11 @@ export async function reviewCommand(
                 : `AI Review: this review sends about ${formatTokens(estimate.inputTokens)} tokens in ${estimate.requests} request(s) to ${model.name}. Estimated cost: ${formatUsd(estimate.costUsd.low)}–${formatUsd(estimate.costUsd.high)}.`,
               {
                 modal: true,
-                detail: [
-                  `That's above your confirmation threshold of ${formatUsd(threshold)} (setting aiReview.costConfirmationThreshold). Narrow the scope to make it cheaper.`,
-                  workspaceChoiceNote(chosenByWorkspace, model.name),
-                ]
-                  .filter(Boolean)
-                  .join(' '),
+                detail: `That's above your confirmation threshold of ${formatUsd(threshold)} (setting aiReview.costConfirmationThreshold). Narrow the scope to make it cheaper.`,
               },
               'Run Review',
             );
-            if (choice !== 'Run Review') return { declined: true as const, estimate };
+            if (choice !== 'Run Review') return { declined: 'cost' as const, estimate };
           }
           if (!estimate.costUsd) progress.report({ message: `${estimate.requests} request(s)…` });
 
@@ -296,6 +317,10 @@ export async function reviewCommand(
       };
     }
     if ('declined' in outcome) {
+      if (outcome.declined === 'untracked') {
+        logger.info('review cancelled at the question about untracked files; nothing was sent');
+        return { ok: false, message: 'cancelled' };
+      }
       logger.info('review cancelled at the cost confirmation');
       return { ok: false, message: 'cancelled', estimate: outcome.estimate };
     }
@@ -380,16 +405,6 @@ export async function reviewCommand(
   }
 }
 
-/** `aiReview.reviewMode` overrides the repository's `review.mode` unless it is "auto". */
-function withModeSetting(
-  config: ReviewConfig,
-  settings: vscode.WorkspaceConfiguration,
-): ReviewConfig {
-  const mode = settings.get<string>('reviewMode');
-  if (mode !== 'single-pass' && mode !== 'agentic') return config;
-  return { ...config, review: { ...config.review, mode } };
-}
-
 function isTooLarge(err: unknown): boolean {
   return err instanceof Error && err.name === 'ReviewTooLargeError';
 }
@@ -427,6 +442,33 @@ function buildMode(
       return { kind, path: rel, startLine, endLine };
     }
   }
+}
+
+/** Paths shown in the question about untracked files; the rest are counted. */
+const UNTRACKED_SHOWN = 10;
+
+/**
+ * Asks whether to send the untracked files too: true (with them), false (without them),
+ * undefined (cancelled). Asked every time; the answer isn't remembered.
+ */
+async function askAboutUntracked(paths: string[], model: ModelInfo): Promise<boolean | undefined> {
+  const WITH = 'Review with Them';
+  const WITHOUT = 'Review without Them';
+  // File names come from the repository: no line breaks that could fake text in the dialog.
+  const shown = paths.slice(0, UNTRACKED_SHOWN).map((p) => p.replace(/[\p{Cc}]/gu, '?'));
+  const more = paths.length - shown.length;
+  const choice = await vscode.window.showWarningMessage(
+    paths.length === 1
+      ? `AI Review: send the untracked file ${shown[0]} to ${model.name} too?`
+      : `AI Review: send ${paths.length} untracked files to ${model.name} too?`,
+    {
+      modal: true,
+      detail: `Untracked files are new files git doesn't track yet. They may be notes, dumps or local files that don't belong in the review:\n\n${shown.join('\n')}${more ? `\n+${more} more` : ''}\n\nWithout them, only the changes to tracked files are reviewed.`,
+    },
+    WITH,
+    WITHOUT,
+  );
+  return choice === WITH ? true : choice === WITHOUT ? false : undefined;
 }
 
 /** `a, b, c and 2 more`. */

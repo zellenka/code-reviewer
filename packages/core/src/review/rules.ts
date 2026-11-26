@@ -6,7 +6,7 @@ import { normalizeEol } from '../diff/parse';
 import type { FileDiff } from '../diff/types';
 import { noopLogger, type Logger } from '../logger';
 import { estimateTokens, truncateToTokens } from '../provider/usage';
-import { isProtectedPath } from './filter';
+import { isProtectedPath, type RelaxedIgnore } from './filter';
 import { neutralizeTags } from './prompt';
 import { redactText } from './redact';
 
@@ -129,12 +129,15 @@ ${blocks.join('\n\n')}`;
 
 /**
  * The settings and rules are read from the working tree, so the change under review can
- * relax its own review (`ignore:`, thresholds, fewer categories, softer rules). Says so
- * when the diff touches any of those files, by path, ignored or not.
+ * edit its own review settings and rules. Says so when the diff touches any of those
+ * files, by path, ignored or not. Also names the files of the change that `ignore:` would
+ * leave out although they aren't generated, vendored or lock files (`relaxedIgnore` from
+ * `filterFiles`, A2): reviewed anyway, or with `ignoreAnyFile` left out, never unseen.
  */
 export function reviewSettingsWarnings(
   files: readonly Pick<FileDiff, 'path' | 'oldPath'>[],
-  config: Pick<ReviewConfig, 'rules'>,
+  config: Pick<ReviewConfig, 'rules' | 'ignoreAnyFile'>,
+  relaxedIgnore: readonly RelaxedIgnore[] = [],
 ): string[] {
   const touched = (target: string) => {
     const lower = target.toLowerCase();
@@ -155,6 +158,16 @@ export function reviewSettingsWarnings(
   if (rules.length) {
     warnings.push(
       `This change edits the review rules (${rules.join(', ')}), which this review used. Check those changes yourself.`,
+    );
+  }
+  if (relaxedIgnore.length) {
+    const list = (items: string[]) =>
+      `${items.slice(0, 3).join(', ')}${items.length > 3 ? ` (+${items.length - 3} more)` : ''}`;
+    const paths = list(relaxedIgnore.map((r) => r.path));
+    warnings.push(
+      config.ignoreAnyFile
+        ? `Not reviewed because the repository's ${CONFIG_FILE_NAME} ignores them: ${paths}.`
+        : `Not applied: the repository's ${CONFIG_FILE_NAME} ignores ${list([...new Set(relaxedIgnore.map((r) => r.pattern))])}, which would skip ${paths}. It may only ignore generated, vendored and lock files.`,
     );
   }
   return warnings;

@@ -138,25 +138,32 @@ describe('files ignored by git are not shown (F4)', () => {
   let root: string;
   let linked: boolean;
   const IGNORED = [
-    'secrets.yml',
-    'terraform.tfvars',
-    'local.settings.json',
-    '.aws/credentials',
+    'secrets.local.yml',
+    'terraform.local.hcl',
+    'config.local.json',
+    '.vault/token',
     'deps/lib/vendored.js',
-    'config/appsettings.Development.json',
+    'config/overrides.local.json',
+  ];
+  const TRACKED_CREDENTIALS = [
+    'deploy/prod.tfvars',
+    'src/Api/appsettings.Production.json',
+    'infra/.kube/config',
   ];
 
   beforeAll(() => {
     const repo = makeRepo('air-ignored-');
     root = repo.root;
-    repo.write('.gitignore', 'secrets.yml\n*.tfvars\nlocal.settings.json\n.aws/\ndeps/\n');
+    repo.write('.gitignore', 'secrets.local.yml\n*.local.hcl\nconfig.local.json\n.vault/\ndeps/\n');
     // A nested .gitignore.
-    repo.write('config/.gitignore', 'appsettings.Development.json\n');
+    repo.write('config/.gitignore', 'overrides.local.json\n');
     repo.write('src/app.ts', 'export function loadConfig() {\n  return HIDDEN_VALUE;\n}\n');
     // Tracked although it matches an ignore pattern.
-    repo.write('forced.tfvars', 'region = "HIDDEN_VALUE forced"\n');
+    repo.write('forced.local.hcl', 'region = "HIDDEN_VALUE forced"\n');
+    // Committed credential files: git shows them, the tools refuse them by name.
+    for (const rel of TRACKED_CREDENTIALS) repo.write(rel, `region = "HIDDEN_VALUE in ${rel}"\n`);
     repo.git('add', '.');
-    repo.git('add', '-f', 'forced.tfvars');
+    repo.git('add', '-f', 'forced.local.hcl');
     repo.git('commit', '-q', '-m', 'init');
     for (const rel of IGNORED) {
       repo.write(rel, `export function leak() {\n  return 'HIDDEN_VALUE in ${rel}';\n}\n`);
@@ -164,7 +171,7 @@ describe('files ignored by git are not shown (F4)', () => {
     // Untracked and not ignored: an unstaged review sends it, so the tools show it.
     repo.write('src/fresh.ts', 'export const fresh = HIDDEN_VALUE;\n');
     // Git lists files under a junction by the junction's name; the target is ignored.
-    linked = tryLink(path.join(root, '.aws'), path.join(root, 'awslink'));
+    linked = tryLink(path.join(root, '.vault'), path.join(root, 'vaultlink'));
   });
 
   afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -188,18 +195,18 @@ describe('files ignored by git are not shown (F4)', () => {
       );
     }
     // Other spellings of the same files.
-    await expect(run('read_file', { path: './.aws/../.aws/credentials' })).rejects.toThrow();
-    await expect(run('read_file', { path: '.aws\\credentials' })).rejects.toThrow();
+    await expect(run('read_file', { path: './.vault/../.vault/token' })).rejects.toThrow();
+    await expect(run('read_file', { path: '.vault\\token' })).rejects.toThrow();
   });
 
   it.skipIf(process.platform !== 'win32' && process.platform !== 'darwin')(
     'refuses other casings of an ignored file where the file system ignores case',
     async () => {
       const run = toolsOn(new FsWorkspaceTools(root));
-      await expect(run('read_file', { path: 'Secrets.YML' })).rejects.toThrow(/ignored by git/);
-      await expect(run('read_file', { path: '.AWS/Credentials' })).rejects.toThrow(
+      await expect(run('read_file', { path: 'Secrets.Local.YML' })).rejects.toThrow(
         /ignored by git/,
       );
+      await expect(run('read_file', { path: '.VAULT/Token' })).rejects.toThrow(/ignored by git/);
       expect(await run('read_file', { path: 'SRC/App.ts' })).toContain('loadConfig');
     },
   );
@@ -208,32 +215,70 @@ describe('files ignored by git are not shown (F4)', () => {
     if (!linked) return;
     const ws = new FsWorkspaceTools(root);
     // Git on Windows lists the file by the junction's name; core checks where it really is.
-    await expect(toolsOn(ws)('read_file', { path: 'awslink/credentials' })).rejects.toThrow(
+    await expect(toolsOn(ws)('read_file', { path: 'vaultlink/token' })).rejects.toThrow(
       /ignored by git/,
     );
-    expect(await grepListed(ws, 'HIDDEN_VALUE', 'awslink/**')).toEqual([]);
+    expect(await grepListed(ws, 'HIDDEN_VALUE', 'vaultlink/**')).toEqual([]);
   });
 
   it('search_code shows no hits from ignored files, also under ignored directories', async () => {
     const run = toolsOn(new FsWorkspaceTools(root));
     const out = await run('search_code', { pattern: 'HIDDEN_VALUE' });
     expect(out.split('\n').map((l) => l.split(':')[0])).toEqual([
-      'forced.tfvars',
+      'forced.local.hcl',
       'src/app.ts',
       'src/fresh.ts',
     ]);
     const ws = new FsWorkspaceTools(root);
-    expect(await grepListed(ws, 'HIDDEN_VALUE', '.aws/**')).toEqual([]);
+    expect(await grepListed(ws, 'HIDDEN_VALUE', '.vault/**')).toEqual([]);
     expect(await grepListed(ws, 'leak')).toEqual([]);
   });
 
   it('untracked files that are not ignored, and force-added files, stay readable', async () => {
     const run = toolsOn(new FsWorkspaceTools(root));
     expect(await run('read_file', { path: 'src/fresh.ts' })).toContain('fresh = HIDDEN_VALUE');
-    expect(await run('read_file', { path: 'forced.tfvars' })).toContain('HIDDEN_VALUE forced');
+    expect(await run('read_file', { path: 'forced.local.hcl' })).toContain('HIDDEN_VALUE forced');
     expect(await run('search_code', { pattern: 'fresh =' })).toBe(
       'src/fresh.ts:1: export const fresh = HIDDEN_VALUE;',
     );
+  });
+
+  it('untracked files are hidden when the review leaves them out', async () => {
+    const ws = new FsWorkspaceTools(root, { untracked: false });
+    const listed = await ws.listFiles();
+    expect(listed).toContain('src/app.ts');
+    expect(listed).toContain('forced.local.hcl');
+    expect(listed).not.toContain('src/fresh.ts');
+    const run = toolsOn(ws);
+    // The refusal names only the path the model asked for, and reads as for a missing file.
+    for (const asked of ['src/fresh.ts', './src/../src/fresh.ts']) {
+      const message = await errorOf(run('read_file', { path: asked }));
+      const shown = asked.replace(/^\.\//, '');
+      expect(message).toBe(`${shown} can't be read: it is ignored by git or missing.`);
+      expect(message.replace(shown, '<p>')).toBe(
+        (await errorOf(run('read_file', { path: 'src/gone.ts' }))).replace('src/gone.ts', '<p>'),
+      );
+    }
+    for (const [tool, input] of [
+      ['search_code', { pattern: 'HIDDEN_VALUE' }],
+      ['search_code', { pattern: 'fresh' }],
+      ['find_references', { path: 'src/app.ts', line: 2, symbol: 'HIDDEN_VALUE' }],
+    ] as const) {
+      const out = await run(tool, input).catch((e: unknown) => String(e));
+      expect(out, tool).not.toContain('src/fresh.ts');
+    }
+  });
+
+  it('committed credential files are refused by name although git shows them', async () => {
+    const ws = new FsWorkspaceTools(root);
+    expect(await ws.listFiles(new AbortController().signal)).toEqual(
+      expect.arrayContaining(TRACKED_CREDENTIALS),
+    );
+    const run = toolsOn(ws);
+    for (const rel of TRACKED_CREDENTIALS) {
+      const message = await errorOf(run('read_file', { path: rel }));
+      expect(message, rel).toBe(`${rel} can't be read: it may contain secrets.`);
+    }
   });
 
   it('find_references and get_symbol show nothing from ignored files', async () => {
@@ -244,13 +289,13 @@ describe('files ignored by git are not shown (F4)', () => {
       symbol: 'HIDDEN_VALUE',
     });
     expect(refs.split('\n').map((l) => l.split(':')[0])).toEqual([
-      'forced.tfvars',
+      'forced.local.hcl',
       'src/app.ts',
       'src/fresh.ts',
     ]);
-    await expect(run('get_symbol', { path: 'secrets.yml', line: 2 })).rejects.toThrow();
+    await expect(run('get_symbol', { path: 'secrets.local.yml', line: 2 })).rejects.toThrow();
     await expect(
-      run('find_references', { path: '.aws/credentials', line: 1, symbol: 'leak' }),
+      run('find_references', { path: '.vault/token', line: 1, symbol: 'leak' }),
     ).rejects.toThrow();
   });
 

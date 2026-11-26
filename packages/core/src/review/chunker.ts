@@ -1,7 +1,7 @@
 import type { FileDiff, Hunk } from '../diff/types';
 import { estimateTokens } from '../provider/usage';
 import { renderContext, type ContextRange } from './context';
-import { neutralizeTags } from './prompt';
+import { escapeAttr, neutralizeTags } from './prompt';
 
 export interface ChunkFile {
   path: string;
@@ -192,8 +192,4 @@ function splitHunk(hunk: Hunk, budget: number, count: (t: string) => number): Hu
   }
   flush();
   return out;
-}
-
-function escapeAttr(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }

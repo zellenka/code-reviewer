@@ -3,8 +3,11 @@ import type { FileDiff } from '../diff/types';
 interface Pattern {
   label: string;
   re: RegExp;
-  /** Extra check on a match: the value, the kept prefix and the rest of the line after the match. */
-  accept?: (value: string, prefix: string, after: string) => boolean;
+  /**
+   * Extra check on a match: the value, the kept prefix, the rest of the line after the match
+   * and the line before it.
+   */
+  accept?: (value: string, prefix: string, after: string, before: string) => boolean;
 }
 
 /** Values that stand for "no secret here" in config files and docs. */
@@ -24,7 +27,78 @@ const PLACEHOLDERS = new Set([
   'optional',
   'disabled',
   'placeholder',
+  'none',
+  'null',
+  'nil',
+  'true',
+  'false',
+  'empty',
+  'todo',
+  'tbd',
 ]);
+
+/** Templates, variables, masks and placeholder words that stand in for a value. */
+function isPlaceholderValue(value: string): boolean {
+  return (
+    /^(.)\1*$/.test(value) ||
+    PLACEHOLDERS.has(value.toLowerCase()) ||
+    /^(?:\$[{(\w]|#\{|[?%]|<.*>$|__\w+__$)/.test(value)
+  );
+}
+
+/** Names of UI text about a credential (`passwordLabel`, `tokenHint`), not the credential. */
+const LABEL_NAME =
+  /(?:label|hint|placeholder|title|text|message|msg|prompt|caption|tooltip|description|error|help)["']?\s*(?:=>|[:=])\s*["'`]$/i;
+
+/**
+ * Tells a quoted value under a credential name from a label or a stand-in: placeholders,
+ * templates and paths; the name itself (`"token": "token"`); one capitalised or upper-case
+ * word or a word in another script (`"password": "Passwort"`, an i18n file); a string-literal
+ * union type (`secret: 'hmac' | 'rsa'`); UI text under a label name.
+ */
+function isQuotedSecret(value: string, prefix: string, after: string, before: string): boolean {
+  if (isPlaceholderValue(value) || value.startsWith('{')) return false;
+  if (/^(?:[/~]|\.\.?[/\\]|[A-Za-z]:[/\\])/.test(value)) return false;
+  if (/^(?:\p{Lu}[\p{Ll}\p{M}]*|\p{Lu}+|[\p{Lo}\p{M}]+)$/u.test(value)) return false;
+  if (/^\s*\|/.test(after) || LABEL_NAME.test(prefix.slice(-64))) return false;
+  const normalize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const word = normalize(value);
+  return !word || !normalize((before.slice(-64) + prefix).slice(-128)).endsWith(word);
+}
+
+/**
+ * `isQuotedSecret` for a value that may hold spaces (XML text, a PHP constant): words of
+ * letters only are text (`put your unique phrase here`), not a password. A Maven-encrypted
+ * password (`{COQLCE6DU6GtcS5P=}`) is a secret: it is only as safe as `settings-security.xml`.
+ */
+function isSpacedSecret(value: string, prefix: string, after: string, before: string): boolean {
+  const v = value.trim();
+  if (!v || v.includes(REDACTED_MARK)) return false;
+  if (/^\{(?=[^}]*[\d+/=])[A-Za-z0-9+/]{8,}={0,2}\}$/.test(v)) return true;
+  if (/^[\p{L}\p{M}'’-]+(?:\s+[\p{L}\p{M}'’-]+)+[.!?:]?$/u.test(v)) return false;
+  return isQuotedSecret(v, prefix, after, before);
+}
+
+/** The text of an XML element named after a credential; not after a self-closing tag. */
+function isXmlElementSecret(value: string, prefix: string, after: string, before: string): boolean {
+  return !prefix.endsWith('/>') && isSpacedSecret(value, prefix, after, before);
+}
+
+/** Words a credential's name has in it (`db_password`, `clientSecret`, `x-api-key`). */
+const CREDENTIAL_KEY = String.raw`(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key)`;
+/**
+ * The end of a name that names a credential (`DbPassword`, `client-secret`, `apiKey2`):
+ * `tokenCount` or `passwordLabel` name something else. One digit per suffix step, so a name
+ * matches in one way only (these run over untrusted lines and must stay linear).
+ */
+const CREDENTIAL_NAME_END = String.raw`${CREDENTIAL_KEY}(?:[_-]?(?:key|value|base|\d))*`;
+/** `:`, `=` or `=>` (PHP, Ruby, Perl: `'password' => 'hunter2'`) between a name and its value. */
+const ASSIGN = '(?:=>|[:=])';
+/** A quote of any kind, and a character that is neither a quote nor a space. */
+const QUOTE = '["\'`]';
+const UNQUOTED = '[^"\'`\\s]';
+/** WordPress's authentication keys and salts (`AUTH_KEY`, `SECURE_AUTH_SALT`, …). */
+const WORDPRESS_KEY = String.raw`(?:SECURE_AUTH|AUTH|LOGGED_IN|NONCE)_(?:KEY|SALT)`;
 
 /**
  * Tells an unquoted literal (`password: hunter2hunter2`, `DB_PASSWORD=plainsecretvalue`) from
@@ -52,6 +126,43 @@ function looksLikeUnquotedSecret(value: string, prefix: string, after: string): 
   return /\d/.test(value);
 }
 
+/** Keys of ADO.NET, ODBC and JDBC connection strings that sit next to a password. */
+const CONNECTION_STRING_KEY =
+  /(?:^|[;&?"'`\s])(?:server|data source|host|address|addr|network address|user id|userid|uid|user|user name|username|database|initial catalog|dsn|driver|provider|port)\s*=/i;
+
+/**
+ * Tells `Password=…` / `Pwd=…` in a connection string (`Server=db;User Id=sa;Password=hunter2;`)
+ * from code and templates. The pair must be `;`-separated and share the line with another
+ * connection-string key; any literal value counts, however short, but templates, variables,
+ * masks and placeholder words do not. Braces hold a format argument or an interpolated name
+ * (`{0}`, `{password}`) unless they quote an ODBC value with punctuation (`{p@ss;w0rd}`).
+ */
+function isConnectionStringPassword(
+  value: string,
+  prefix: string,
+  after: string,
+  before: string,
+): boolean {
+  if (value.includes(REDACTED_MARK)) return false;
+  if (value.startsWith('{')) {
+    if (value.startsWith('{{') || !value.endsWith('}') || /^\{[\w.]*\}$/.test(value)) return false;
+  } else if (isPlaceholderValue(value)) return false;
+  // `Password = pwd` with spaces is how code assigns (`{ UserID = "sa", Password = pwd }`);
+  // a literal written that way needs a digit or a symbol, like an unquoted secret.
+  if (/\s/.test(prefix) && (/\s/.test(value) || /^[A-Za-z_]+$/.test(value))) return false;
+  const near = before.slice(-200);
+  if (!/[;&?]\s*$/.test(near) && !/^\s*[;&]/.test(after)) return false;
+  return CONNECTION_STRING_KEY.test(near) || CONNECTION_STRING_KEY.test(after.slice(0, 200));
+}
+
+/** `Authorization: Basic …` holds base64 of `user:password`; English after "Basic" does not. */
+function isBasicCredentials(value: string): boolean {
+  if (value.length % 4 !== 0) return false;
+  const decoded = Buffer.from(value, 'base64').toString('latin1');
+  const colon = decoded.indexOf(':');
+  return colon > 0 && colon < decoded.length - 1 && /^[ -~]+$/.test(decoded);
+}
+
 /** Known credential formats. Always redacted before anything is sent to a provider. */
 const PATTERNS: Pattern[] = [
   { label: 'aws-access-key', re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b/g },
@@ -62,10 +173,18 @@ const PATTERNS: Pattern[] = [
   { label: 'github-token', re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b/g },
   { label: 'anthropic-key', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
   { label: 'openai-key', re: /\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}/g },
-  { label: 'slack-token', re: /\bxox[abprs]-[A-Za-z0-9-]{10,}/g },
+  { label: 'slack-token', re: /\b(?:xox[abeoprs]|xapp-\d+)-[A-Za-z0-9-]{10,}/g },
+  {
+    label: 'slack-webhook',
+    // https://hooks.slack.com/services/T…/B…/… — the host and kind stay, the path is the secret.
+    re: /(\bhooks\.slack\.com\/(?:services|workflows|triggers)\/)([A-Za-z0-9_/-]{20,})/g,
+  },
   { label: 'google-api-key', re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
   { label: 'stripe-key', re: /\b(?:sk|rk)_live_[0-9a-zA-Z]{24,}\b/g },
   { label: 'npm-token', re: /\bnpm_[A-Za-z0-9]{36}\b/g },
+  { label: 'sendgrid-key', re: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g },
+  // The 84-character format, with its fixed `AZDO` signature (the older 52-character one has none).
+  { label: 'azure-devops-pat', re: /\b[A-Za-z0-9]{76}AZDO[A-Za-z0-9]{4}\b/g },
   {
     label: 'jwt',
     re: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
@@ -78,11 +197,73 @@ const PATTERNS: Pattern[] = [
     re: /(?<![^\s@"'`])(?=[^\s@"'`]*@)([^\s@"'`]*?:\/\/(?<=\b[a-z][a-z0-9+.-]*:\/\/)[^\s:/@"'`]+:)([^\s@"'`]{3,})(@)/gi,
   },
   {
+    label: 'connection-string-password',
+    // Server=db;User Id=sa;Password=hunter2; — the value runs to `;`, a quote or the end of the
+    // line and may hold spaces; an ODBC value may be quoted in braces (`PWD={p@ss;w0rd}`).
+    re: /((?<![\w.$-])(?:password|pwd)\s*=\s*)(\{[^{}"'`\r\n]*\}|[^;"'`\s]+(?:[ \t]+[^;"'`\s]+)*)/gi,
+    accept: isConnectionStringPassword,
+  },
+  {
+    label: 'azure-key',
+    // AccountKey=… in Azure Storage, SharedAccessKey=… in Service Bus / Event Hubs strings.
+    re: /((?<![\w-])(?:AccountKey|SharedAccessKey)["']?\s*[:=]\s*["']?)([A-Za-z0-9+/]{20,}={0,2})/g,
+    accept: (value) => /[\d+/]/.test(value),
+  },
+  {
+    label: 'azure-sas-signature',
+    // ?sv=…&sig=… — the other SAS parameters (version, expiry, permissions) are not secret.
+    re: /([?&;]sig=)([A-Za-z0-9%+/=]{20,})/g,
+    accept: (value) => /\d/.test(value),
+  },
+  {
     label: 'secret',
     // password = "hunter2xyz" — the name is kept so the model can still flag hard-coded secrets.
     // The name is any run of [\w.-] with a keyword in it (`db_password`, `passwordHash`). It is
     // matched from the start of the run only: starting at each keyword is quadratic on long runs.
-    re: /((?<![\w.-])(?=[\w.-]*?(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key))[\w.-]+["']?\s*[:=]\s*["'`])(?!\[REDACTED)([^"'`\s]{8,})(["'`])/gi,
+    re: new RegExp(
+      String.raw`((?<![\w.-])(?=[\w.-]*?${CREDENTIAL_KEY})[\w.-]+["']?\s*${ASSIGN}\s*${QUOTE})(?!\[REDACTED)(${UNQUOTED}{8,})(${QUOTE})`,
+      'gi',
+    ),
+    accept: isQuotedSecret,
+  },
+  {
+    label: 'secret',
+    // "Password": "hunter2" — a name that ends with the keyword (as for unquoted secrets below)
+    // makes a shorter quoted value a secret too; `passwordHint = "short"` keeps the 8 above.
+    re: new RegExp(
+      String.raw`(${CREDENTIAL_NAME_END}["']?\s*${ASSIGN}\s*${QUOTE})(?!\[REDACTED)(${UNQUOTED}{4,7})(${QUOTE})`,
+      'gi',
+    ),
+    accept: isQuotedSecret,
+  },
+  {
+    label: 'secret',
+    // <password>hunter2</password>, <client-secret>…</client-secret> (Maven, Spring, SOAP) on
+    // one line. The text may hold spaces; it can't hold `<` or `>`, so each `<` is tried once.
+    re: new RegExp(
+      String.raw`(<[\w.:-]*?${CREDENTIAL_NAME_END}(?:\s[^<>]*)?>)(?!\[REDACTED)([^<>\r\n]{4,})(<\/[\w.:-]+\s*>)`,
+      'gi',
+    ),
+    accept: isXmlElementSecret,
+  },
+  {
+    label: 'secret',
+    // <add key="DbPassword" value="hunter2" /> (.NET appSettings), <property name="password"
+    // value="…"/> (Spring): the key or name attribute names the credential, `value` holds it.
+    re: new RegExp(
+      String.raw`((?<![\w.:-])(?:key|name)\s*=\s*["'][\w.:-]*?${CREDENTIAL_NAME_END}["']\s+value\s*=\s*["'])(?!\[REDACTED)([^"'\r\n]{4,})(["'])`,
+      'gi',
+    ),
+    accept: isSpacedSecret,
+  },
+  {
+    label: 'secret',
+    // define('DB_PASSWORD', 'hunter2'), and WordPress's keys and salts, which may hold spaces.
+    re: new RegExp(
+      String.raw`(\bdefine\s*\(\s*["'](?:[\w.:-]*?${CREDENTIAL_NAME_END}|${WORDPRESS_KEY})["']\s*,\s*["'])(?!\[REDACTED)([^"'\r\n]{4,})(["'])`,
+      'gi',
+    ),
+    accept: isSpacedSecret,
   },
   {
     label: 'bearer-token',
@@ -91,12 +272,18 @@ const PATTERNS: Pattern[] = [
     accept: (value) => /\d/.test(value),
   },
   {
+    label: 'basic-auth',
+    // Authorization: Basic dXNlcjpwYXNz — only a value that decodes to `user:password`.
+    re: /(\bBasic\s+)([A-Za-z0-9+/]{8,}={0,2})/gi,
+    accept: isBasicCredentials,
+  },
+  {
     label: 'secret',
     // password: hunter2hunter2, DB_PASSWORD=plainsecretvalue — no quotes; the value runs to
     // whitespace. The name must end with the keyword (`tokenCount`, `secretName` are not secrets).
     // Written to match in one way only (no name prefix, one digit per suffix step, no lookahead):
     // this runs over untrusted lines and must stay linear. The value's end is checked in `accept`.
-    re: /((?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key)(?:[_-]?(?:key|value|base|\d))*["']?\s*[:=]\s*)([^"'`\s]{8,})/gi,
+    re: new RegExp(String.raw`(${CREDENTIAL_NAME_END}["']?\s*[:=]\s*)(${UNQUOTED}{8,})`, 'gi'),
     accept: looksLikeUnquotedSecret,
   },
 ];
@@ -167,8 +354,10 @@ export function createRedactor(options: RedactOptions = {}): Redactor {
           const match = m[0] as string;
           const groups = m.slice(1, -2).filter((g) => typeof g === 'string');
           if (accept) {
-            const after = (m.at(-1) as string).slice((m.at(-2) as number) + match.length);
-            if (!accept(groups[1]!, groups[0]!, after)) return match;
+            const line = m.at(-1) as string;
+            const offset = m.at(-2) as number;
+            const after = line.slice(offset + match.length);
+            if (!accept(groups[1]!, groups[0]!, after, line.slice(0, offset))) return match;
           }
           redactor.count++;
           // Patterns with capture groups keep the prefix (and suffix) and replace the value.
