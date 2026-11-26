@@ -141,7 +141,7 @@
       },
       {
         "command": "aiReview.saveReview",
-        "title": "Save Review as Markdown…",
+        "title": "Save Review as Markdown",
         "category": "AI Review",
         "icon": "$(save)"
       },

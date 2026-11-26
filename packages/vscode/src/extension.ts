@@ -143,7 +143,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         providedCodeActionKinds: FindingCodeActions.kinds,
       },
     ),
-    ...registerFindingCommands({ store, threads, previews, chat, testMode }),
+    ...registerFindingCommands({ store, threads, previews, chat }),
   );
   const deps = { registry, repos, configs, store, logger, runs, snapshots, exclusion };
   // Every review starts here (menus, keybindings, the panel's Run Review), so test-only

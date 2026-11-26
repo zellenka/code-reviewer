@@ -18,16 +18,25 @@ export function sessionReport(store: FindingStore): ReviewReport | undefined {
   };
 }
 
-/** `ai-review-commits-abc1234-to-def5678-2026-11-26.md` in the repository root. */
-export function defaultReportUri(session: ReviewSession): vscode.Uri {
-  const slug = describeMode(session.mode)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48)
-    .replace(/-+$/, '');
+/**
+ * `review-summary-2026-11-26.md` in the repository root, or `-2`, `-3`… when another
+ * review already saved one that day.
+ */
+export async function newReportUri(session: ReviewSession): Promise<vscode.Uri> {
   const d = session.finishedAt;
   const pad = (n: number) => String(n).padStart(2, '0');
-  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  return vscode.Uri.file(path.join(session.root, `ai-review-${slug || 'review'}-${date}.md`));
+  const base = `review-summary-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  for (let n = 1; ; n++) {
+    const uri = vscode.Uri.file(path.join(session.root, n === 1 ? `${base}.md` : `${base}-${n}.md`));
+    if (!(await exists(uri))) return uri;
+  }
+}
+
+async function exists(uri: vscode.Uri): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(uri);
+    return true;
+  } catch {
+    return false;
+  }
 }

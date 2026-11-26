@@ -3,9 +3,9 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { AgentChat } from './chat';
 import { findingRange } from './diagnostics';
-import { defaultReportUri, sessionReport } from './export';
+import { newReportUri, sessionReport } from './export';
 import { applyFix, previewFix, type FixOutcome, type FixPreviewProvider } from './fixes';
-import type { FindingStatus, FindingStore } from './store';
+import type { FindingStatus, FindingStore, ReviewSession } from './store';
 import type { FindingThreads } from './threads';
 import { SUMMARY_URI } from './tree';
 
@@ -14,8 +14,6 @@ export interface FindingCommandDeps {
   threads: FindingThreads;
   previews: FixPreviewProvider;
   chat: AgentChat;
-  /** Extension tests may pass where Save Review writes, instead of being asked. */
-  testMode?: boolean;
 }
 
 /**
@@ -26,6 +24,7 @@ export interface FindingCommandDeps {
  */
 export function registerFindingCommands(deps: FindingCommandDeps): vscode.Disposable[] {
   const { store, threads, previews, chat } = deps;
+  const savedReports = new WeakMap<ReviewSession, vscode.Uri>();
   const keyOf = (arg: unknown): string | undefined => {
     if (typeof arg === 'string') return arg;
     if (arg && typeof arg === 'object') {
@@ -82,25 +81,18 @@ export function registerFindingCommands(deps: FindingCommandDeps): vscode.Dispos
       editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
       return editor;
     }),
-    vscode.commands.registerCommand('aiReview.saveReview', async (target?: unknown) => {
+    vscode.commands.registerCommand('aiReview.saveReview', async () => {
       const session = store.session;
       const report = sessionReport(store);
       if (!session || !report) {
         void vscode.window.showInformationMessage('AI Review: there is no review to save yet.');
         return undefined;
       }
-      const given = deps.testMode && target instanceof vscode.Uri ? target : undefined;
-      const uri =
-        given ??
-        (await vscode.window.showSaveDialog({
-          defaultUri: defaultReportUri(session),
-          filters: { Markdown: ['md'] },
-          saveLabel: 'Save Review',
-          title: 'Save the review as Markdown',
-        }));
-      if (!uri) return undefined;
+      // Saving the same review again updates its file.
+      const uri = savedReports.get(session) ?? (await newReportUri(session));
+      savedReports.set(session, uri);
       await vscode.workspace.fs.writeFile(uri, Buffer.from(reviewToMarkdown(report), 'utf8'));
-      if (!given) await vscode.window.showTextDocument(uri, { preview: false });
+      await vscode.window.showTextDocument(uri, { preview: false });
       return uri;
     }),
     vscode.commands.registerCommand('aiReview.sendReviewToChat', async () => {

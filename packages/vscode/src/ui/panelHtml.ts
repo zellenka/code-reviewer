@@ -185,7 +185,7 @@ export function panelHtml(cspSource: string, nonce: string): string {
       <button class="link" id="show-findings" hidden>Show findings</button>
       <button class="link" id="show-summary" hidden>Show summary</button>
       <button class="link" id="send-chat" hidden title="Type the review into an agent chat (Claude Code or Copilot) to work through the findings">Send to chat</button>
-      <button class="link" id="save-review" hidden title="Save the summary and findings as a Markdown file">Save as Markdown</button>
+      <button class="link" id="save-review" hidden title="Save the summary and findings as a Markdown file in the repository root">Save as Markdown</button>
       <button class="link" id="show-log" hidden>Show log</button>
       <button class="link" id="clear" hidden>Clear</button>
     </div>

@@ -935,25 +935,41 @@ suite('Review', () => {
 
   test('save review writes the summary and the open findings as Markdown', async () => {
     const key = await reviewOne('src/ux-lf.ts', DIV('lf'));
-    const target = vscode.Uri.file(path.join(tmpdir(), `air-report-${Date.now()}.md`));
+    const d = api.findings.session!.finishedAt;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const name = `review-summary-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const target = path.join(root, `${name}.md`);
+    const second = path.join(root, `${name}-2.md`);
     try {
-      const saved = await vscode.commands.executeCommand<vscode.Uri>('aiReview.saveReview', target);
-      assert.strictEqual(saved?.fsPath, target.fsPath);
-      const md = readFileSync(target.fsPath, 'utf8');
+      const saved = await vscode.commands.executeCommand<vscode.Uri>('aiReview.saveReview');
+      assert.strictEqual(saved?.fsPath.toLowerCase(), target.toLowerCase());
+      const md = readFileSync(target, 'utf8');
       assert.match(md, /^# AI Review: src\/ux-lf\.ts\n\n_Stub · /);
       assert.match(md, /## Summary\n\n[^]*Walkthrough/);
       assert.ok(md.includes('### `src/ux-lf.ts`'), md);
       assert.ok(md.includes(`#### 1. ${api.findings.get(key)!.title}`), md);
       assert.ok(md.includes('## Details'), md);
 
-      // Dismissed findings are counted, not listed.
+      // Saving the same review again updates its file; dismissed findings are counted, not listed.
       await vscode.commands.executeCommand('aiReview.dismissFinding', key);
-      await vscode.commands.executeCommand('aiReview.saveReview', target);
-      const after = readFileSync(target.fsPath, 'utf8');
+      const again = await vscode.commands.executeCommand<vscode.Uri>('aiReview.saveReview');
+      assert.strictEqual(again?.fsPath.toLowerCase(), target.toLowerCase());
+      const after = readFileSync(target, 'utf8');
       assert.ok(after.includes('No open findings.'), after);
       assert.ok(after.includes('- Not listed: 0 resolved, 1 dismissed'), after);
+
+      // Another review the same day doesn't overwrite it.
+      await vscode.commands.executeCommand('aiReview.reopenFinding', key);
+      await reviewOne('src/ux-lf.ts', DIV('lf again'));
+      if (api.findings.session!.finishedAt.getDate() === d.getDate()) {
+        const next = await vscode.commands.executeCommand<vscode.Uri>('aiReview.saveReview');
+        assert.strictEqual(next?.fsPath.toLowerCase(), second.toLowerCase());
+        assert.ok(readFileSync(target, 'utf8').includes('No open findings.'));
+      }
     } finally {
-      rmSync(target.fsPath, { force: true });
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      rmSync(target, { force: true });
+      rmSync(second, { force: true });
     }
   });
 
