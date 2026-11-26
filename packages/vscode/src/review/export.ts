@@ -27,7 +27,9 @@ export async function newReportUri(session: ReviewSession): Promise<vscode.Uri> 
   const pad = (n: number) => String(n).padStart(2, '0');
   const base = `review-summary-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   for (let n = 1; ; n++) {
-    const uri = vscode.Uri.file(path.join(session.root, n === 1 ? `${base}.md` : `${base}-${n}.md`));
+    const uri = vscode.Uri.file(
+      path.join(session.root, n === 1 ? `${base}.md` : `${base}-${n}.md`),
+    );
     if (!(await exists(uri))) return uri;
   }
 }
